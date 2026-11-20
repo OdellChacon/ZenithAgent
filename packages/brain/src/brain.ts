@@ -25,6 +25,8 @@ export interface BrainResult {
   /** Texto a enviar al cliente (siempre hay uno, aunque sea el mensaje de respaldo). */
   reply: string;
   handoff: { reason: HandoffReason | 'seguridad' | 'error'; summary: string } | null;
+  /** Fotos a enviar antes del texto, en orden. */
+  photos: { productId: string; name: string }[];
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
   iterations: number;
   stopReason: string | null;
@@ -49,7 +51,7 @@ export async function runBrainTurn(params: {
 }): Promise<BrainResult> {
   const config = { ...DEFAULT_BRAIN_CONFIG, ...params.config };
   const messages = [...params.messages];
-  const effects: ToolEffects = { handoff: null };
+  const effects: ToolEffects = { handoff: null, photos: [] };
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
   let iterations = 0;
   let stopReason: string | null = null;
@@ -59,6 +61,7 @@ export async function runBrainTurn(params: {
     outcome,
     reply: FALLBACK_REPLY,
     handoff: effects.handoff ?? { reason: outcome === 'refusal' ? 'seguridad' : 'error', summary },
+    photos: [],
     usage,
     iterations,
     stopReason,
@@ -139,6 +142,7 @@ export async function runBrainTurn(params: {
       outcome: effects.handoff ? 'handoff' : 'replied',
       reply: check.text,
       handoff: effects.handoff,
+      photos: effects.photos,
       usage,
       iterations,
       stopReason,

@@ -79,6 +79,48 @@ describe('simulador: papel de Meta', () => {
     expect(app.botMessages).toHaveLength(0);
   });
 
+  it('recibe fotos subidas como multipart, las envía y las sirve al navegador', async () => {
+    const { app } = setup();
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('type', 'image/jpeg');
+    form.append('file', new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }), 'foto.jpg');
+    const req = new Request('http://x', { method: 'POST', body: form });
+    const upload = await app.inject({
+      method: 'POST',
+      url: `/v21.0/${PHONE}/media`,
+      headers: { authorization: 'Bearer t', 'content-type': req.headers.get('content-type')! },
+      payload: Buffer.from(await req.arrayBuffer()),
+    });
+    expect(upload.statusCode).toBe(200);
+    const mediaId = upload.json().id as string;
+
+    const sent = await graph(app, { messaging_product: 'whatsapp', to: '584141234567', type: 'image', image: { id: mediaId, caption: 'Aconna Beige' } });
+    expect(sent.statusCode).toBe(200);
+    expect(app.botMessages.at(-1)).toMatchObject({ text: 'Aconna Beige', image: `/sim-media/${mediaId}` });
+
+    const served = await app.inject({ method: 'GET', url: `/sim-media/${mediaId}` });
+    expect(served.headers['content-type']).toBe('image/jpeg');
+    expect(served.rawPayload.length).toBe(4);
+  });
+
+  it('rechaza fotos con un id que no se subió o de un tipo no admitido', async () => {
+    const { app } = setup();
+    const unknown = await graph(app, { messaging_product: 'whatsapp', to: '584141234567', type: 'image', image: { id: 'nada' } });
+    expect(unknown.statusCode).toBe(400);
+
+    const form = new FormData();
+    form.append('file', new Blob([new Uint8Array([1])], { type: 'image/webp' }), 'x.webp');
+    const req = new Request('http://x', { method: 'POST', body: form });
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v21.0/${PHONE}/media`,
+      headers: { authorization: 'Bearer t', 'content-type': req.headers.get('content-type')! },
+      payload: Buffer.from(await req.arrayBuffer()),
+    });
+    expect(res.statusCode).toBe(400);
+  });
+
   it('el stream exige un número válido', async () => {
     expect((await setup().app.inject({ method: 'GET', url: '/api/stream?to=abc' })).statusCode).toBe(400);
   });

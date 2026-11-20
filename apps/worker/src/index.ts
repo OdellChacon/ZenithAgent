@@ -128,7 +128,7 @@ const brainWorker = new Worker<BrainJobData>(
     if (outcome.result === 'replied') {
       await outboundQueue.add(
         'send',
-        { tenantId: job.data.tenantId, outboundMessageId: outcome.outboundMessageId },
+        { tenantId: job.data.tenantId, outboundMessageIds: outcome.outboundMessageIds },
         { jobId: outcome.outboundMessageId, attempts: 5, backoff: { type: 'exponential', delay: 3000 }, removeOnComplete: 1000 },
       );
     }
@@ -149,7 +149,7 @@ const outboundWorker = new Worker<OutboundJobData>(
       },
       job.data,
     );
-    log.info({ outboundMessageId: job.data.outboundMessageId, outcome: outcome.result }, 'envío procesado');
+    log.info({ outboundMessageIds: job.data.outboundMessageIds, outcome: outcome.map((o) => o.result) }, 'envío procesado');
     return outcome;
   },
   { connection, concurrency: env.WORKER_CONCURRENCY },

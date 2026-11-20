@@ -1,12 +1,13 @@
 import { z } from 'zod';
 import { parseTileFormat } from './format.js';
+import { normalizeImages } from './images.js';
 import type { ProductInput } from './sync.js';
 
 /**
  * Catálogo de la tienda de Inversiones Mora Mora (la misma API que usa su web y el visualizador):
  *   GET {base}/api/v1/store/categories
  *   GET {base}/api/v1/store/products
- * Las imágenes vienen embebidas en base64 y no se copian: el bot no las necesita para responder.
+ * Las fotos vienen embebidas en base64; se guardan normalizadas para que el bot pueda enviarlas.
  */
 export const IMM_STORE_SOURCE = 'imm_store';
 
@@ -41,6 +42,7 @@ const productSchema = z.object({
   obj_w_cm: optionalDimension,
   obj_h_cm: optionalDimension,
   obj_d_cm: optionalDimension,
+  imgs: z.array(z.string()).nullish(),
 });
 
 const productsResponseSchema = z.object({ items: z.array(z.unknown()), total: z.number().optional() });
@@ -156,14 +158,17 @@ export async function fetchImmCatalog(opts: FetchImmCatalogOptions): Promise<Imm
   const products: ProductInput[] = [];
   const rejected: ImmCatalogResult['rejected'] = [];
 
-  productsEnvelope.data.items.forEach((raw, index) => {
+  for (const [index, raw] of productsEnvelope.data.items.entries()) {
     const parsed = productSchema.safeParse(raw);
     if (!parsed.success) {
       rejected.push({ index, reason: parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
-      return;
+      continue;
     }
-    products.push(mapImmProduct(parsed.data, categoryMap, opts.currency));
-  });
+    const product = mapImmProduct(parsed.data, categoryMap, opts.currency);
+    // Las fotos vienen embebidas en base64; se convierten a un formato que acepte WhatsApp.
+    product.images = await normalizeImages(parsed.data.imgs ?? []);
+    products.push(product);
+  }
 
   return { products, rejected };
 }

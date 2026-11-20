@@ -50,7 +50,7 @@ describe.skipIf(!hasDb)('syncProducts', () => {
     const second = await withTenant(app, a.tenantId, (c) =>
       syncProducts(c, a.tenantId, 'imm_store', [product('1', 'Brooklyn Mate')]),
     );
-    expect(second).toEqual({ upserted: 1, deactivated: 1 });
+    expect(second).toEqual({ upserted: 1, deactivated: 1, images: 0 });
     expect(await list(a.tenantId)).toEqual([
       { external_id: '1', name: 'Brooklyn Mate', active: true, area_per_box_m2: '1.800' },
       { external_id: '2', name: 'Sinai', active: false, area_per_box_m2: '1.800' },
@@ -58,7 +58,7 @@ describe.skipIf(!hasDb)('syncProducts', () => {
   });
 
   it('una fuente vacía no vacía el catálogo', async () => {
-    expect(await withTenant(app, a.tenantId, (c) => syncProducts(c, a.tenantId, 'imm_store', []))).toEqual({ upserted: 0, deactivated: 0 });
+    expect(await withTenant(app, a.tenantId, (c) => syncProducts(c, a.tenantId, 'imm_store', []))).toEqual({ upserted: 0, deactivated: 0, images: 0 });
     expect((await list(a.tenantId)).find((p) => p.external_id === '1')?.active).toBe(true);
   });
 

@@ -31,6 +31,7 @@ export function buildSystemPrompt(settings: TenantBotSettings): string {
     '- Haz una sola búsqueda por pregunta, con pocas palabras (ej. "madera"). Si no hay coincidencias exactas, la herramienta te da sugerencias parecidas: úsalas en vez de buscar otra vez.',
     '- Nunca digas que algo no está en stock o no está disponible: no conoces el inventario. Si nada del catálogo encaja, ofrece conseguirlo bajo pedido con un asesor.',
     '- Cuando el cliente dé los metros cuadrados de un producto de cerámica o porcelanato, usa calcular_cajas. Nunca hagas tú la cuenta. Si la herramienta indica que el desperdicio no está definido, dilo con naturalidad: un asesor confirmará la cantidad final.',
+    '- Si el cliente pide fotos, o si ver el producto le ayuda a decidir, usa enviar_fotos con los productos que recomiendas (máximo 3). Las fotos llegan antes de tu mensaje.',
     '- Sugiere complementos que tengan sentido (por ejemplo, sanitario y lavamanos para un baño), sin insistir.',
     '- Cierra invitando al siguiente paso: visitar el showroom, recibir la cotización de un asesor o probar el visualizador.',
     '',

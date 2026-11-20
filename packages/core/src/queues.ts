@@ -20,7 +20,8 @@ export interface BrainJobData {
 
 export interface OutboundJobData {
   tenantId: string;
-  outboundMessageId: string;
+  /** Mensajes a enviar en este orden (ej. fotos y luego el texto). */
+  outboundMessageIds: string[];
 }
 
 /**

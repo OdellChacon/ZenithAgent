@@ -96,7 +96,7 @@ describe('createOpenAiCompatibleLlm', () => {
     expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer clave');
     const body = JSON.parse(String(init?.body));
     expect(body).toMatchObject({ model: 'gemini-3.8-flash', max_tokens: 2000, reasoning_effort: 'low', tool_choice: 'auto' });
-    expect(body.tools).toHaveLength(3);
+    expect(body.tools).toHaveLength(4);
     expect(body).not.toHaveProperty('fallbacks');
     expect(body).not.toHaveProperty('betas');
 
@@ -225,7 +225,7 @@ describe('el cerebro completo sobre el adaptador', () => {
     });
     const row = {
       id: productId, name: 'Aconna Beige', category: 'ceramicas', category_name: 'Cerámicas', description: null,
-      format: '60x60/1.80m²/5 Piezas', area_per_box_m2: '1.800', pieces_per_box: 5, attributes: {}, price: null, currency: null, in_visualizer: true,
+      format: '60x60/1.80m²/5 Piezas', area_per_box_m2: '1.800', pieces_per_box: 5, attributes: {}, price: null, currency: null, in_visualizer: true, has_photo: false,
     };
     const catalog: CatalogReader = { search: vi.fn(async () => [row]), get: vi.fn(async () => row) };
 

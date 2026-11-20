@@ -1,5 +1,11 @@
 import { decryptCredentials, windowState, type Channel, type OutboundJobData } from '@zenith/core';
-import { sendWhatsAppText, type SendResult } from '@zenith/channel-whatsapp';
+import {
+  sendWhatsAppImage,
+  sendWhatsAppText,
+  uploadWhatsAppMedia,
+  type SendResult,
+  type WhatsAppSendConfig,
+} from '@zenith/channel-whatsapp';
 import { withTenant, type Pool } from '@zenith/db';
 
 export interface OutboundDeps {
@@ -23,7 +29,9 @@ interface Claimed {
   message_id: string | null;
   conversation_id: string;
   attempts: number;
-  payload: { kind: 'text'; text: string; to: string; author: 'bot' | 'agent' };
+  payload:
+    | { kind: 'text'; text: string; to: string; author: 'bot' | 'agent' }
+    | { kind: 'image'; productImageId: string; caption?: string; to: string; author: 'bot' | 'agent' };
   channel: Channel;
   last_inbound_at: Date | null;
   channel_account_id: string;
@@ -38,11 +46,78 @@ export class RetryableSendError extends Error {
   override name = 'RetryableSendError';
 }
 
+/** WhatsApp guarda los archivos subidos 30 días; se reutilizan hasta 25 para tener margen. */
+const MEDIA_REUSE_DAYS = 25;
+
+type MediaLookup = { ok: true; mediaId: string; cached: boolean } | { ok: false; retryable: boolean; message: string };
+
+/** Devuelve el id de WhatsApp de una foto: el guardado si sigue vigente, o la sube. */
+async function resolveMedia(
+  deps: OutboundDeps,
+  tenantId: string,
+  channelAccountId: string,
+  productImageId: string,
+  config: WhatsAppSendConfig,
+): Promise<MediaLookup> {
+  const found = await withTenant(deps.pool, tenantId, async (client) => {
+    const image = await client.query<{ data: Buffer; mime_type: 'image/jpeg' | 'image/png'; sha256: string }>(
+      'SELECT data, mime_type, sha256 FROM product_images WHERE id = $1',
+      [productImageId],
+    );
+    const cached = await client.query<{ external_media_id: string; image_sha256: string }>(
+      `SELECT external_media_id, image_sha256 FROM channel_media
+        WHERE channel_account_id = $1 AND product_image_id = $2 AND uploaded_at > now() - make_interval(days => $3)`,
+      [channelAccountId, productImageId, MEDIA_REUSE_DAYS],
+    );
+    return { image: image.rows[0], cached: cached.rows[0] };
+  });
+  if (!found.image) return { ok: false, retryable: false, message: 'la foto del producto ya no existe' };
+  if (found.cached && found.cached.image_sha256 === found.image.sha256) {
+    return { ok: true, mediaId: found.cached.external_media_id, cached: true };
+  }
+
+  const ext = found.image.mime_type === 'image/png' ? 'png' : 'jpg';
+  const upload = await uploadWhatsAppMedia(config, found.image.data, found.image.mime_type, `producto-${productImageId}.${ext}`);
+  if (!upload.ok) return { ok: false, retryable: upload.retryable, message: `subida de foto: ${upload.message}` };
+
+  await withTenant(deps.pool, tenantId, (client) =>
+    client.query(
+      `INSERT INTO channel_media (tenant_id, channel_account_id, product_image_id, image_sha256, external_media_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (channel_account_id, product_image_id) DO UPDATE SET
+         image_sha256 = EXCLUDED.image_sha256, external_media_id = EXCLUDED.external_media_id, uploaded_at = now()`,
+      [tenantId, channelAccountId, productImageId, found.image!.sha256, upload.mediaId],
+    ),
+  );
+  return { ok: true, mediaId: upload.mediaId, cached: false };
+}
+
+async function forgetMedia(deps: OutboundDeps, tenantId: string, channelAccountId: string, productImageId: string) {
+  await withTenant(deps.pool, tenantId, (client) =>
+    client.query('DELETE FROM channel_media WHERE channel_account_id = $1 AND product_image_id = $2', [channelAccountId, productImageId]),
+  );
+}
+
+/**
+ * Envía varios mensajes en orden (fotos y luego texto). Si uno falla por algo pasajero, se
+ * reintenta el lote completo: los que ya salieron se saltan solos.
+ */
+export async function processOutbound(deps: OutboundDeps, job: OutboundJobData): Promise<OutboundOutcome[]> {
+  const results: OutboundOutcome[] = [];
+  for (const outboundMessageId of job.outboundMessageIds) {
+    results.push(await processOutboundMessage(deps, { tenantId: job.tenantId, outboundMessageId }));
+  }
+  return results;
+}
+
 /**
  * Envía un mensaje pendiente. Lo toma primero ('sending') para que dos workers no lo manden
  * dos veces, revisa la ventana de mensajería, envía y guarda el resultado.
  */
-export async function processOutbound(deps: OutboundDeps, job: OutboundJobData): Promise<OutboundOutcome> {
+export async function processOutboundMessage(
+  deps: OutboundDeps,
+  job: { tenantId: string; outboundMessageId: string },
+): Promise<OutboundOutcome> {
   const now = deps.now?.() ?? new Date();
   const maxAttempts = deps.maxAttempts ?? 5;
 
@@ -112,20 +187,40 @@ export async function processOutbound(deps: OutboundDeps, job: OutboundJobData):
     return { result: 'failed', reason: 'bad_credentials' };
   }
 
+  const config: WhatsAppSendConfig = {
+    graphApiVersion: deps.graphApiVersion,
+    phoneNumberId: claimed.external_account_id,
+    accessToken,
+    ...(deps.graphBaseUrl ? { graphBaseUrl: deps.graphBaseUrl } : {}),
+    ...(deps.fetch ? { fetch: deps.fetch } : {}),
+  };
+
   let res: SendResult;
   try {
-    res = await sendWhatsAppText(
-      {
-        graphApiVersion: deps.graphApiVersion,
-        phoneNumberId: claimed.external_account_id,
-        accessToken,
-        ...(deps.graphBaseUrl ? { graphBaseUrl: deps.graphBaseUrl } : {}),
-        ...(deps.fetch ? { fetch: deps.fetch } : {}),
-      },
-      claimed.payload.to,
-      claimed.payload.text,
-    );
+    if (claimed.payload.kind === 'image') {
+      const media = await resolveMedia(deps, job.tenantId, claimed.channel_account_id, claimed.payload.productImageId, config);
+      if (!media.ok) {
+        if (media.retryable && claimed.attempts < maxAttempts) {
+          await finish('queued', { error: media.message });
+          throw new RetryableSendError(media.message);
+        }
+        await finish('failed', { error: media.message });
+        return { result: 'failed', reason: 'media_upload_failed' };
+      }
+      res = await sendWhatsAppImage(config, claimed.payload.to, media.mediaId, claimed.payload.caption);
+      // Si Meta ya no reconoce un id guardado, se descarta y se reintenta subiendo la foto de nuevo.
+      if (!res.ok && media.cached) {
+        await forgetMedia(deps, job.tenantId, claimed.channel_account_id, claimed.payload.productImageId);
+        if (claimed.attempts < maxAttempts) {
+          await finish('queued', { error: `id de foto vencido: ${res.message}` });
+          throw new RetryableSendError(res.message);
+        }
+      }
+    } else {
+      res = await sendWhatsAppText(config, claimed.payload.to, claimed.payload.text);
+    }
   } catch (err) {
+    if (err instanceof RetryableSendError) throw err;
     await finish('failed', { error: (err as Error).message });
     return { result: 'failed', reason: 'invalid_message' };
   }

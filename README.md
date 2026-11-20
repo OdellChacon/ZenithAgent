@@ -94,7 +94,8 @@ npm run test:all  # también las de integración (usan la BD local de .env)
 ## Cómo responde el bot
 
 1. Llega un mensaje y se espera 4 s por si el cliente sigue escribiendo; si llega otro, solo responde el último turno.
-2. Claude (`claude-opus-5-5`, esfuerzo `medium`, configurable) recibe el historial reciente, el perfil del negocio y tres herramientas: `buscar_productos`, `calcular_cajas` y `derivar_a_asesor`.
+2. El modelo (según `AI_PROVIDER`) recibe el historial reciente, el perfil del negocio y cuatro herramientas: `buscar_productos`, `calcular_cajas`, `enviar_fotos` y `derivar_a_asesor`.
+   Las fotos de cada producto se guardan al sincronizar el catálogo (WebP pasa a JPEG, que es lo que acepta WhatsApp). Al enviarlas, cada foto se sube a WhatsApp una vez y su id se reutiliza 25 días; las fotos salen antes del texto.
 3. Los productos y las cajas salen de la BD y del código, nunca del modelo. Las herramientas no le muestran precios.
 4. Antes de enviar, un validador bloquea cualquier respuesta con montos. Si el modelo falla, rechaza o se enreda, el cliente recibe un mensaje de respaldo y la conversación pasa a un asesor.
 5. Al derivar, la conversación queda en modo `human`: el bot deja de responder y el pase queda en `handoffs`.

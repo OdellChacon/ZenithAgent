@@ -45,7 +45,7 @@ try {
     console.warn('Sin catálogo del fabricante: el bot no sabrá el aspecto (madera, mármol…) de cada producto.');
   }
   const result = await withTenant(pool, tenantId, (client) => syncProducts(client, tenantId, IMM_STORE_SOURCE, products));
-  console.log(`Catálogo sincronizado: ${result.upserted} productos, ${result.deactivated} desactivados.`);
+  console.log(`Catálogo sincronizado: ${result.upserted} productos, ${result.deactivated} desactivados, ${result.images} fotos nuevas o cambiadas.`);
   if (rejected.length) {
     console.warn(`${rejected.length} productos rechazados por formato:`);
     for (const r of rejected) console.warn(`  - #${r.index}: ${r.reason}`);

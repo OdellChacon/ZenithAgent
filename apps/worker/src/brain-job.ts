@@ -29,7 +29,15 @@ export interface BrainJobDeps {
 }
 
 export type BrainJobOutcome =
-  | { result: 'replied'; outboundMessageId: string; handoff: boolean; outcome: BrainResult['outcome'] }
+  | {
+      result: 'replied';
+      /** El mensaje de texto. */
+      outboundMessageId: string;
+      /** Todos los envíos, en el orden en que deben salir (fotos y luego texto). */
+      outboundMessageIds: string[];
+      handoff: boolean;
+      outcome: BrainResult['outcome'];
+    }
   | { result: 'skipped'; reason: 'not_found' | 'human_mode' | 'closed' | 'superseded' | 'already_answered' }
   | { result: 'failed'; reason: string };
 
@@ -121,6 +129,7 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
           ? 'El proveedor de IA no respondió tras varios intentos; atender manualmente.'
           : 'Falló la llamada al modelo; atender manualmente.',
       },
+      photos: [],
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
       iterations: 0,
       stopReason: null,
@@ -165,31 +174,48 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       return { result: 'skipped', reason: superseded ? 'superseded' : 'human_mode' };
     }
 
-    const message = await client.query<{ id: string }>(
-      `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body)
-       VALUES ($1, $2, 'out', 'bot', 'text', $3) RETURNING id`,
-      [job.tenantId, job.conversationId, brain.reply],
-    );
-    const messageId = message.rows[0]!.id;
+    /** Guarda un mensaje del bot y su envío pendiente; null si ese paso ya estaba guardado. */
+    const queue = async (type: 'text' | 'image', body: string, payload: object, idempotencyKey: string, attachments: object[] = []) => {
+      const message = await client.query<{ id: string }>(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments)
+         VALUES ($1, $2, 'out', 'bot', $3, $4, $5) RETURNING id`,
+        [job.tenantId, job.conversationId, type, body, JSON.stringify(attachments)],
+      );
+      const outbound = await client.query<{ id: string }>(
+        `INSERT INTO outbound_messages (tenant_id, conversation_id, message_id, idempotency_key, channel, payload)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (idempotency_key) DO NOTHING
+         RETURNING id`,
+        [job.tenantId, job.conversationId, message.rows[0]!.id, idempotencyKey, snapshot.channel, JSON.stringify(payload)],
+      );
+      return outbound.rows[0]?.id ?? null;
+    };
 
-    const outbound = await client.query<{ id: string }>(
-      `INSERT INTO outbound_messages (tenant_id, conversation_id, message_id, idempotency_key, channel, payload)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT (idempotency_key) DO NOTHING
-       RETURNING id`,
-      [
-        job.tenantId,
-        job.conversationId,
-        messageId,
-        key,
-        snapshot.channel,
-        JSON.stringify({ kind: 'text', text: brain.reply, to: snapshot.recipient, author: 'bot' }),
-      ],
-    );
-    if (!outbound.rows[0]) {
+    // Primero las fotos (cada una con el nombre del producto como pie) y después el texto.
+    const ordered: string[] = [];
+    for (const photo of brain.photos) {
+      const image = await client.query<{ id: string }>(
+        'SELECT id FROM product_images WHERE product_id = $1 ORDER BY position LIMIT 1',
+        [photo.productId],
+      );
+      const imageId = image.rows[0]?.id;
+      if (!imageId) continue;
+      const id = await queue(
+        'image',
+        photo.name,
+        { kind: 'image', productImageId: imageId, caption: photo.name, to: snapshot.recipient, author: 'bot' },
+        outboundIdempotencyKey(job.conversationId, job.triggerMessageId, `photo:${photo.productId}`),
+        [{ productImageId: imageId }],
+      );
+      if (id) ordered.push(id);
+    }
+
+    const textId = await queue('text', brain.reply, { kind: 'text', text: brain.reply, to: snapshot.recipient, author: 'bot' }, key);
+    if (!textId) {
       // Otro intento ya guardó la respuesta: se deshace esta transacción.
       throw new AlreadyAnsweredError();
     }
+    ordered.push(textId);
 
     if (brain.handoff) {
       await client.query(`UPDATE conversations SET mode = 'human', updated_at = now() WHERE id = $1`, [job.conversationId]);
@@ -202,7 +228,13 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     }
     await logRun(brain.outcome);
 
-    return { result: 'replied', outboundMessageId: outbound.rows[0].id, handoff: Boolean(brain.handoff), outcome: brain.outcome };
+    return {
+      result: 'replied',
+      outboundMessageId: textId,
+      outboundMessageIds: ordered,
+      handoff: Boolean(brain.handoff),
+      outcome: brain.outcome,
+    };
   }).catch((err) => {
     if (err instanceof AlreadyAnsweredError) return { result: 'skipped', reason: 'already_answered' } as const;
     throw err;

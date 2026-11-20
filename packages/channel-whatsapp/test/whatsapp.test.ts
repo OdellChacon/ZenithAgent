@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   parseWhatsAppWebhook,
+  sendWhatsAppImage,
   sendWhatsAppText,
+  uploadWhatsAppMedia,
   signMetaPayload,
   verifyMetaSignature,
   WhatsAppPayloadError,
@@ -118,6 +120,39 @@ describe('sendWhatsAppText', () => {
   it('reintenta errores de red', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockRejectedValue(new Error('ECONNRESET'));
     expect(await sendWhatsAppText({ ...base, fetch: fetchMock }, '584141112233', 'x')).toMatchObject({ ok: false, retryable: true, httpStatus: null });
+  });
+
+  it('sube una foto como multipart y devuelve su id', async () => {
+    const fetchMock = reply(200, { id: 'media-77' });
+    const res = await uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.from([1, 2, 3]), 'image/jpeg', 'foto.jpg');
+    expect(res).toEqual({ ok: true, mediaId: 'media-77' });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe(`https://graph.facebook.com/v21.0/${PHONE_NUMBER_ID}/media`);
+    const form = init?.body as FormData;
+    expect(form.get('messaging_product')).toBe('whatsapp');
+    expect(form.get('type')).toBe('image/jpeg');
+    expect((form.get('file') as File).size).toBe(3);
+    expect((init?.headers as Record<string, string>)['Content-Type']).toBeUndefined();
+  });
+
+  it('rechaza fotos vacías o de más de 5 MB antes de llamar a Meta', async () => {
+    const fetchMock = reply(200, {});
+    await expect(uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.alloc(0), 'image/png', 'x.png')).rejects.toThrow(WhatsAppSendError);
+    await expect(uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.alloc(5 * 1024 * 1024 + 1), 'image/png', 'x.png')).rejects.toThrow(
+      WhatsAppSendError,
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('envía la foto con su pie', async () => {
+    const fetchMock = reply(200, { messages: [{ id: 'wamid.IMG9' }] });
+    const res = await sendWhatsAppImage({ ...base, fetch: fetchMock }, '584141112233', 'media-77', ' Aconna Beige ');
+    expect(res).toEqual({ ok: true, externalMessageId: 'wamid.IMG9' });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toMatchObject({
+      to: '584141112233',
+      type: 'image',
+      image: { id: 'media-77', caption: 'Aconna Beige' },
+    });
   });
 
   it('valida entradas antes de llamar a Meta', async () => {

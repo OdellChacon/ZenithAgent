@@ -30,6 +30,7 @@ const PRODUCT: ProductRow = {
   price: '99.00', // aunque exista, el bot no debe verlo
   currency: 'USD',
   in_visualizer: true,
+  has_photo: true,
 };
 
 function catalog(rows: ProductRow[] = [PRODUCT]): CatalogReader & { search: ReturnType<typeof vi.fn> } {
@@ -195,6 +196,31 @@ describe('runBrainTurn', () => {
     expect(result).toContain('sugerencias');
     expect(result).toContain('Aconna Beige');
     expect(result).toContain('No digas que no hay stock');
+  });
+
+  it('envía fotos solo de productos reales con foto, máximo 3 por mensaje', async () => {
+    const ids = ['a', 'b', 'c', 'd', 'e'].map((x) => `${x.repeat(8)}-1111-4111-8111-111111111111`);
+    const rows: ProductRow[] = ids.map((id, i) => ({ ...PRODUCT, id, name: `Producto ${i + 1}`, has_photo: i !== 1 }));
+    const { llm, calls } = scriptedLlm([
+      tool('enviar_fotos', { producto_ids: [...ids, '99999999-1111-4111-8111-111111111111'] }),
+      text('Le envié las fotos.'),
+    ]);
+    const res = await runBrainTurn({ ...base, llm, messages: customer('¿Tienen fotos?'), tools: { catalog: catalog(rows), wastePercent: null } });
+    expect(res.photos).toEqual([
+      { productId: ids[0], name: 'Producto 1' },
+      { productId: ids[2], name: 'Producto 3' },
+      { productId: ids[3], name: 'Producto 4' },
+    ]);
+    const result = JSON.stringify(calls[1]?.messages.at(-1));
+    expect(result).toContain('Producto 2: no tiene foto');
+    expect(result).toContain('máximo 3 fotos');
+  });
+
+  it('si el turno falla no se envían las fotos pedidas', async () => {
+    const { llm } = scriptedLlm([tool('enviar_fotos', { producto_ids: [PRODUCT.id] }), text('Cuesta $20')]);
+    const res = await runBrainTurn({ ...base, llm, messages: customer('fotos y precio'), tools: { catalog: catalog(), wastePercent: null } });
+    expect(res.outcome).toBe('blocked_by_validator');
+    expect(res.photos).toEqual([]);
   });
 
   it('limita la cantidad de resultados aunque el modelo pida más', async () => {

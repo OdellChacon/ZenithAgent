@@ -1,6 +1,9 @@
 import type { PoolClient } from '@zenith/db';
+import type { ProductImageInput } from './images.js';
 
 export interface ProductInput {
+  /** Fotos ya normalizadas; si no se pasa, no se tocan las fotos guardadas. */
+  images?: ProductImageInput[];
   externalId: string;
   name: string;
   category: string | null;
@@ -21,6 +24,8 @@ export interface ProductInput {
 export interface SyncResult {
   upserted: number;
   deactivated: number;
+  /** Fotos nuevas o cambiadas. */
+  images: number;
 }
 
 /**
@@ -29,7 +34,7 @@ export interface SyncResult {
  * Si la fuente vino vacía no desactiva nada, para no vaciar el catálogo por una caída de la tienda.
  */
 export async function syncProducts(client: PoolClient, tenantId: string, source: string, products: ProductInput[]): Promise<SyncResult> {
-  if (products.length === 0) return { upserted: 0, deactivated: 0 };
+  if (products.length === 0) return { upserted: 0, deactivated: 0, images: 0 };
 
   const ids = new Set<string>();
   for (const p of products) {
@@ -88,5 +93,36 @@ export async function syncProducts(client: PoolClient, tenantId: string, source:
     [tenantId, source, [...ids]],
   );
 
-  return { upserted: upserted ?? 0, deactivated: deactivated ?? 0 };
+  const images = await syncImages(client, tenantId, source, products);
+  return { upserted: upserted ?? 0, deactivated: deactivated ?? 0, images };
+}
+
+/** Guarda las fotos de cada producto; solo reescribe las que cambiaron. */
+async function syncImages(client: PoolClient, tenantId: string, source: string, products: ProductInput[]): Promise<number> {
+  const withImages = products.filter((p) => p.images);
+  if (!withImages.length) return 0;
+  const { rows } = await client.query<{ id: string; external_id: string }>(
+    'SELECT id, external_id FROM products WHERE tenant_id = $1 AND source = $2 AND external_id = ANY($3::text[])',
+    [tenantId, source, withImages.map((p) => p.externalId)],
+  );
+  const productIds = new Map(rows.map((r) => [r.external_id, r.id]));
+  let written = 0;
+  for (const p of withImages) {
+    const productId = productIds.get(p.externalId);
+    if (!productId) continue;
+    const images = p.images ?? [];
+    for (const [position, img] of images.entries()) {
+      const { rowCount } = await client.query(
+        `INSERT INTO product_images (tenant_id, product_id, position, mime_type, data, bytes, sha256)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT (product_id, position) DO UPDATE SET
+           mime_type = EXCLUDED.mime_type, data = EXCLUDED.data, bytes = EXCLUDED.bytes, sha256 = EXCLUDED.sha256, updated_at = now()
+         WHERE product_images.sha256 <> EXCLUDED.sha256`,
+        [tenantId, productId, position, img.mimeType, img.data, img.data.length, img.sha256],
+      );
+      written += rowCount ?? 0;
+    }
+    await client.query('DELETE FROM product_images WHERE product_id = $1 AND position >= $2', [productId, images.length]);
+  }
+  return written;
 }

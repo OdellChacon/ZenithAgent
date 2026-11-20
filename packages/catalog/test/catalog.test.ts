@@ -117,6 +117,8 @@ describe('fetchImmCatalog', () => {
       currency: null,
       onOffer: false,
       inVisualizer: true,
+      // La foto del ejemplo no es una imagen válida: se descarta sin romper la sincronización.
+      images: [],
     });
 
     expect(out[1]).toMatchObject({
@@ -127,8 +129,8 @@ describe('fetchImmCatalog', () => {
       inVisualizer: false,
       attributes: { brand: 'Corona', finish: 'Brillante', dimensions_cm: { width: 40, height: 68.1, depth: null } },
     });
-    // Las imágenes embebidas no se copian.
-    expect(JSON.stringify(out)).not.toContain('base64');
+    // Los datos de texto no arrastran el base64 de las fotos.
+    expect(JSON.stringify(out.map(({ images: _i, ...rest }) => rest))).not.toContain('base64');
   });
 
   it('falla con un error claro si la tienda no responde bien', async () => {

@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@zenith/db": "*",
+    "sharp": "^0.34.5",
     "zod": "^4.6.7"
   }
 }

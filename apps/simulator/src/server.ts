@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import Fastify, { type FastifyInstance } from 'fastify';
+import multipart from '@fastify/multipart';
 import { z } from 'zod';
 import { signMetaPayload } from '@zenith/channel-whatsapp';
 
@@ -23,7 +24,10 @@ export interface SimulatorDeps {
 export interface BotMessage {
   id: string;
   to: string;
+  /** Texto, o pie de foto si es una imagen. */
   text: string;
+  /** Ruta para ver la imagen en el navegador, si el mensaje es una foto. */
+  image?: string;
   at: string;
 }
 
@@ -33,17 +37,26 @@ const sendSchema = z.object({
   text: z.string().trim().min(1).max(4096),
 });
 
-const graphBodySchema = z.object({
-  messaging_product: z.literal('whatsapp'),
-  to: z.string().min(1),
-  type: z.literal('text'),
-  text: z.object({ body: z.string() }),
-});
+const graphBodySchema = z.discriminatedUnion('type', [
+  z.object({ messaging_product: z.literal('whatsapp'), to: z.string().min(1), type: z.literal('text'), text: z.object({ body: z.string() }) }),
+  z.object({
+    messaging_product: z.literal('whatsapp'),
+    to: z.string().min(1),
+    type: z.literal('image'),
+    image: z.object({ id: z.string().min(1), caption: z.string().optional() }),
+  }),
+]);
+
+/** Como Meta: JPEG o PNG de hasta 5 MB. */
+const MEDIA_TYPES = new Set(['image/jpeg', 'image/png']);
+const MAX_MEDIA_BYTES = 5 * 1024 * 1024;
 
 const UI_PATH = new URL('../public/index.html', import.meta.url);
 
 export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMessages: BotMessage[] } {
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
+  void app.register(multipart, { limits: { fileSize: MAX_MEDIA_BYTES, files: 1, fields: 5 } });
+  const media = new Map<string, { mime: string; data: Buffer }>();
   const doFetch = deps.fetch ?? fetch;
   const bus = new EventEmitter();
   bus.setMaxListeners(100);
@@ -139,8 +152,18 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     }
     const parsed = graphBodySchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 100, message: 'Cuerpo inválido' } });
+    const body = parsed.data;
+    if (body.type === 'image' && !media.has(body.image.id)) {
+      return reply.code(400).send({ error: { code: 131053, message: 'Id de archivo desconocido' } });
+    }
 
-    const message: BotMessage = { id: `wamid.BOT${Date.now()}${++seq}`, to: parsed.data.to, text: parsed.data.text.body, at: new Date().toISOString() };
+    const message: BotMessage = {
+      id: `wamid.BOT${Date.now()}${++seq}`,
+      to: body.to,
+      text: body.type === 'text' ? body.text.body : (body.image.caption ?? ''),
+      ...(body.type === 'image' ? { image: `/sim-media/${encodeURIComponent(body.image.id)}` } : {}),
+      at: new Date().toISOString(),
+    };
     botMessages.push(message);
     bus.emit('bot', message);
 
@@ -155,6 +178,41 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     }
 
     return { messaging_product: 'whatsapp', contacts: [{ input: message.to, wa_id: message.to }], messages: [{ id: message.id }] };
+  });
+
+  /** Subida de archivos, como /{phone_number_id}/media de Meta. */
+  app.post<{ Params: { version: string; phoneNumberId: string } }>('/:version/:phoneNumberId/media', async (req, reply) => {
+    if (!/^Bearer \S+$/.test(req.headers.authorization ?? '')) {
+      return reply.code(401).send({ error: { code: 190, message: 'Falta el token de acceso' } });
+    }
+    if (req.params.phoneNumberId !== deps.phoneNumberId) {
+      return reply.code(400).send({ error: { code: 100, message: 'phone_number_id desconocido' } });
+    }
+    let file;
+    try {
+      file = await req.file();
+    } catch {
+      return reply.code(400).send({ error: { code: 100, message: 'Se espera multipart/form-data' } });
+    }
+    if (!file) return reply.code(400).send({ error: { code: 100, message: 'Falta el archivo' } });
+    let data: Buffer;
+    try {
+      data = await file.toBuffer();
+    } catch {
+      return reply.code(400).send({ error: { code: 131052, message: 'El archivo supera los 5 MB' } });
+    }
+    if (!MEDIA_TYPES.has(file.mimetype)) {
+      return reply.code(400).send({ error: { code: 131053, message: `Tipo no admitido: ${file.mimetype}` } });
+    }
+    const id = `${Date.now()}${++seq}`;
+    media.set(id, { mime: file.mimetype, data });
+    return { id };
+  });
+
+  app.get<{ Params: { id: string } }>('/sim-media/:id', async (req, reply) => {
+    const item = media.get(req.params.id);
+    if (!item) return reply.code(404).send({ error: { code: 'not_found', message: 'No existe' } });
+    return reply.type(item.mime).header('cache-control', 'private, max-age=3600').send(item.data);
   });
 
   return Object.assign(app, { botMessages });

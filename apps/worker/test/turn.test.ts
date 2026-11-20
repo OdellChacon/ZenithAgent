@@ -5,10 +5,12 @@ import { encryptCredentials } from '@zenith/core';
 import { parseWhatsAppWebhook } from '@zenith/channel-whatsapp';
 import { insertWebhookEvent, withTenant, type Pool } from '@zenith/db';
 import { FALLBACK_REPLY, LlmHttpError } from '@zenith/brain';
-import { syncProducts, type ProductInput } from '@zenith/catalog';
+import { normalizeImage, syncProducts, type ProductInput } from '@zenith/catalog';
+import sharp from 'sharp';
+import { processOutbound as processOutboundBatch } from '../src/outbound.js';
 import { processInboundEvent } from '../src/inbound.js';
 import { processBrainJob } from '../src/brain-job.js';
-import { processOutbound } from '../src/outbound.js';
+import { processOutboundMessage as processOutbound } from '../src/outbound.js';
 import { createCatalogReader, normalizeTerms } from '../src/catalog-reader.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 import { textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
@@ -75,9 +77,11 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
       t.channelAccountId,
       encryptCredentials(JSON.stringify({ accessToken: 'token-prueba' }), masterKey, t.channelAccountId),
     ]);
+    const jpeg = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#c8a27a' } }).jpeg().toBuffer();
+    const photo = await normalizeImage(`data:image/jpeg;base64,${jpeg.toString('base64')}`);
     await withTenant(app, t.tenantId, (c) =>
       syncProducts(c, t.tenantId, 'imm_store', [
-        tile('1', 'Aconna Beige', { surface: 'Piso y pared', finish: 'Mate', usage: 'Interior y exterior', features: ['Antideslizante'] }),
+        tile('1', 'Aconna Beige', { surface: 'Piso y pared', finish: 'Mate', usage: 'Interior y exterior', features: ['Antideslizante'] }, { images: [photo!] }),
         tile('2', 'Marmol Velletri', { surface: 'Pared', finish: 'Brillante', usage: 'Interior y exterior' }, { format: '25x75/1.50m²/8 Piezas', areaPerBoxM2: 1.5, piecesPerBox: 8 }),
         tile('3', 'Sanitario Cascade', { brand: 'Corona', finish: 'Brillante' }, {
           category: 'sanitarios', categoryName: 'Sanitarios', format: null, areaPerBoxM2: null, piecesPerBox: null, inVisualizer: false,
@@ -150,6 +154,49 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
       reason: 'already_answered',
     });
     expect(await processOutbound(outboundDeps(), { tenantId: t.tenantId, outboundMessageId: turn.outboundMessageId })).toEqual({ result: 'skipped' });
+  });
+
+  it('envía las fotos antes del texto y sube cada foto a WhatsApp una sola vez', async () => {
+    const reader = createCatalogReader(app, t.tenantId);
+    const [aconna] = await reader.search({ text: 'aconna', category: null, surface: null, usage: null, limit: 1 });
+    expect(aconna?.has_photo).toBe(true);
+    const [sanitario] = await reader.search({ text: 'cascade', category: null, surface: null, usage: null, limit: 1 });
+    expect(sanitario?.has_photo).toBe(false);
+
+    const calls: string[] = [];
+    let n = 0;
+    const meta = vi.fn<typeof fetch>(async (url, init) => {
+      const path = new URL(String(url)).pathname;
+      if (path.endsWith('/media')) {
+        calls.push('subida');
+        return new Response(JSON.stringify({ id: `media-${++n}` }), { status: 200 });
+      }
+      const body = JSON.parse(String(init?.body));
+      calls.push(body.type === 'image' ? `foto:${body.image.id}:${body.image.caption}` : `texto:${body.text.body}`);
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.P${++n}` }] }), { status: 200 });
+    });
+
+    for (const from of ['584141230011', '584141230012']) {
+      const msg = await customerSays('¿Me envía fotos del Aconna Beige?', from);
+      const turn = await processBrainJob(
+        { pool: app, llm: scriptedLlm([tool('enviar_fotos', { producto_ids: [aconna!.id, sanitario!.id] }), text('Aquí tiene la foto.')]).llm },
+        { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId },
+      );
+      if (turn.result !== 'replied') throw new Error('se esperaba respuesta');
+      expect(turn.outboundMessageIds).toHaveLength(2);
+      expect(turn.outboundMessageIds.at(-1)).toBe(turn.outboundMessageId);
+      const results = await processOutboundBatch({ ...outboundDeps(), fetch: meta }, { tenantId: t.tenantId, outboundMessageIds: turn.outboundMessageIds });
+      expect(results.map((r) => r.result)).toEqual(['sent', 'sent']);
+    }
+
+    // Primera conversación: se sube la foto. Segunda: se reutiliza el id guardado.
+    expect(calls).toEqual([
+      'subida',
+      'foto:media-1:Aconna Beige',
+      'texto:Aquí tiene la foto.',
+      'foto:media-1:Aconna Beige',
+      'texto:Aquí tiene la foto.',
+    ]);
   });
 
   it('si el cliente escribió otra vez, el turno viejo se descarta', async () => {

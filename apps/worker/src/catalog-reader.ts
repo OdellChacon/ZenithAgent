@@ -1,8 +1,11 @@
 import type { CatalogReader, ProductRow, ProductSearch } from '@zenith/brain';
 import { withTenant, type Pool } from '@zenith/db';
 
-const COLUMNS = `id, name, category, category_name, description, format, area_per_box_m2, pieces_per_box,
+const BASE_COLUMNS = `id, name, category, category_name, description, format, area_per_box_m2, pieces_per_box,
                  attributes, price, currency, in_visualizer`;
+/** Columnas leídas directamente de products, incluida si tiene foto. */
+const COLUMNS = `${BASE_COLUMNS},
+                 EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = products.id) AS has_photo`;
 
 // Palabras que no describen el producto y solo meten ruido en la búsqueda.
 const STOPWORDS = new Set([
@@ -44,7 +47,7 @@ export function createCatalogReader(pool: Pool, tenantId: string): CatalogReader
                 AND ($1::text IS NULL OR unaccent(lower(coalesce(category, '') || ' ' || coalesce(category_name, ''))) LIKE '%' || $1 || '%')
                 AND ($2::text IS NULL OR unaccent(lower(coalesce(attributes->>'surface', ''))) LIKE '%' || $2 || '%')
                 AND ($3::text IS NULL OR unaccent(lower(coalesce(attributes->>'usage', ''))) LIKE '%' || $3 || '%'))
-           SELECT ${COLUMNS},
+           SELECT ${BASE_COLUMNS}, has_photo,
                   (SELECT count(*) FROM unnest($4::text[]) AS w WHERE doc LIKE '%' || w || '%')::int AS score
              FROM candidates
             WHERE cardinality($4::text[]) = 0

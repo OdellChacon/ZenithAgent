@@ -104,6 +104,14 @@
             line-height: 1.36; white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: var(--bubble-shadow); }
   .out .bubble { background: var(--out-bg); color: var(--out-ink); background-attachment: var(--out-attach, scroll); }
   .bubble a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+  /* Fotos */
+  .bubble.photo { padding: 3px; width: 250px; max-width: 78%; }
+  .bubble.photo img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: calc(var(--r) - 2px); background: rgba(0,0,0,.06); }
+  .bubble.photo .caption { padding: 5px 6px 4px; }
+  .bubble.photo .caption.only-stamp { position: absolute; right: 8px; bottom: 6px; padding: 0; }
+  .bubble.photo .caption.only-stamp .stamp { margin: 0; color: #fff; text-shadow: 0 0 3px rgba(0,0,0,.6); }
+  .ig .bubble.photo, .ms .bubble.photo { padding: 0; background: none; overflow: hidden; }
+  .ig .bubble.photo .caption, .ms .bubble.photo .caption { background: var(--in-bg); padding: 8px 12px; }
   .out .bubble a { color: var(--out-link, var(--link)); }
   .stamp { float: right; display: inline-flex; align-items: center; gap: 3px; margin: 8px 0 -5px 10px; font-size: 11px; color: var(--stamp); white-space: nowrap; line-height: 1; }
   .out .stamp { color: var(--out-stamp, var(--stamp)); }
@@ -446,7 +454,13 @@
         }
         const stamp = s === 'wa' ? `<span class="stamp">${timeOf(g.at)}${side === 'out' ? statusIcon(g) : ''}</span>` : '';
         const slot = s !== 'wa' && side === 'in' ? (last ? `<div class="avatar sm">${BUSINESS.initials}</div>` : '<span class="slot"></span>') : '';
-        html += `<div class="line ${side}">${slot}<div class="${cls}"${style}>${formatText(g.text, s === 'wa')}${stamp}</div></div>`;
+        if (g.image) {
+          // Foto con pie: en WhatsApp va dentro de la burbuja; en Instagram y Messenger, suelta.
+          const caption = g.text ? `<div class="caption">${formatText(g.text, s === 'wa')}${stamp}</div>` : stamp ? `<div class="caption only-stamp">${stamp}</div>` : '';
+          html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><img src="${escape(g.image)}" alt="${escape(g.text || 'Foto del producto')}" loading="lazy">${caption}</div></div>`;
+        } else {
+          html += `<div class="line ${side}">${slot}<div class="${cls}"${style}>${formatText(g.text, s === 'wa')}${stamp}</div></div>`;
+        }
       });
       html += `</div>`;
       lastAt = new Date(group[group.length - 1].at);
@@ -498,7 +512,7 @@
         const m = JSON.parse(e.data);
         // Al responder el bot, los mensajes anteriores del cliente ya llegaron.
         state.messages.forEach((x) => { if (x.kind === 'customer' && x.status === 'sent') x.status = 'delivered'; });
-        state.messages.push({ id: m.id, kind: 'bot', text: m.text, at: m.at });
+        state.messages.push({ id: m.id, kind: 'bot', text: m.text, at: m.at, ...(m.image ? { image: m.image } : {}) });
         save(); setBusy(-pending); renderChat();
       } catch { /* evento malformado: se ignora */ }
     };

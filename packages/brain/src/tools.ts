@@ -32,7 +32,12 @@ export interface ProductRow {
   price: string | null;
   currency: string | null;
   in_visualizer: boolean;
+  /** Si hay al menos una foto guardada del producto. */
+  has_photo: boolean;
 }
+
+/** Fotos por mensaje: más que esto satura el chat del cliente. */
+export const MAX_PHOTOS_PER_TURN = 3;
 
 export interface ToolContext {
   catalog: CatalogReader;
@@ -42,6 +47,8 @@ export interface ToolContext {
 /** Lo que las herramientas piden al sistema además de responder (se aplica al guardar). */
 export interface ToolEffects {
   handoff: { reason: HandoffReason; summary: string } | null;
+  /** Productos cuya foto hay que enviar antes del texto, en orden. */
+  photos: { productId: string; name: string }[];
 }
 
 // --------------------------------------------------------------------- definiciones
@@ -92,6 +99,22 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
     },
   },
   {
+    name: 'enviar_fotos',
+    description:
+      'Envía al cliente la foto de hasta 3 productos (una por producto), justo antes de tu mensaje. ' +
+      'Úsala cuando el cliente pida fotos o cuando mostrar el producto ayude a decidir. Solo sirve con productos que ' +
+      'devolvió buscar_productos y que tienen "tiene_foto": true. Tu mensaje puede decir que le enviaste las fotos.',
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: {
+        producto_ids: { type: 'array', items: { type: 'string' }, description: 'Ids de buscar_productos, máximo 3.' },
+      },
+      required: ['producto_ids'],
+      additionalProperties: false,
+    },
+  },
+  {
     name: 'derivar_a_asesor',
     description:
       'Pasa la conversación a un asesor humano del negocio. Úsala cuando el cliente pide precio o cotización, quiere comprar, ' +
@@ -126,6 +149,10 @@ const searchInput = z.object({
 const boxesInput = z.object({
   producto_id: z.string().uuid(),
   metros_cuadrados: z.number().positive().max(100_000),
+});
+
+const photosInput = z.object({
+  producto_ids: z.array(z.string().uuid()).min(1).max(10),
 });
 
 const handoffInput = z.object({
@@ -164,6 +191,7 @@ function presentProduct(p: ProductRow) {
     // Los precios no salen de aquí aunque existan: hoy los da un asesor.
     precio: 'lo confirma un asesor',
     en_visualizador: p.in_visualizer,
+    tiene_foto: p.has_photo,
   };
 }
 
@@ -219,6 +247,28 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         desperdicio_aplicado:
           r.wastePercent === null ? 'no definido: el cálculo no incluye desperdicio y un asesor confirma la cantidad final' : `${r.wastePercent}%`,
       });
+    }
+
+    case 'enviar_fotos': {
+      const parsed = photosInput.safeParse(input);
+      if (!parsed.success) return error('Indique producto_ids con los ids que devolvió buscar_productos');
+      const sent: string[] = [];
+      const skipped: string[] = [];
+      for (const id of [...new Set(parsed.data.producto_ids)]) {
+        if (effects.photos.length >= MAX_PHOTOS_PER_TURN) {
+          skipped.push(`${id}: máximo ${MAX_PHOTOS_PER_TURN} fotos por mensaje`);
+          continue;
+        }
+        if (effects.photos.some((p) => p.productId === id)) continue;
+        const product = await ctx.catalog.get(id);
+        if (!product) skipped.push(`${id}: producto no encontrado`);
+        else if (!product.has_photo) skipped.push(`${product.name}: no tiene foto`);
+        else {
+          effects.photos.push({ productId: product.id, name: product.name });
+          sent.push(product.name);
+        }
+      }
+      return json({ fotos_que_se_enviaran: sent, no_enviadas: skipped });
     }
 
     case 'derivar_a_asesor': {

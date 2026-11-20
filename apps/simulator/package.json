@@ -7,6 +7,7 @@
     ".": "./src/server.ts"
   },
   "dependencies": {
+    "@fastify/multipart": "^9.4.0",
     "@zenith/channel-whatsapp": "*",
     "fastify": "^5.12.8",
     "zod": "^4.6.7"
