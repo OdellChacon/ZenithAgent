@@ -11,7 +11,7 @@ import {
   type InboundJobData,
   type OutboundJobData,
 } from '@zenith/core';
-import { createAnthropicLlm } from '@zenith/brain';
+import { createAnthropicLlm, createDisabledLlm } from '@zenith/brain';
 import { createPool, reclaimStaleWebhookEvents } from '@zenith/db';
 import { processBrainJob } from './brain-job.js';
 import { processInboundEvent } from './inbound.js';
@@ -25,6 +25,8 @@ const env = z
     META_GRAPH_API_VERSION: z.string().regex(/^v\d+\.\d+$/, 'Usa la forma vNN.N'),
     // Solo para pruebas locales contra un simulador de Graph API.
     META_GRAPH_BASE_URL: z.string().url().optional(),
+    // none: sin IA (respaldo + asesor). anthropic: Claude; ver la política de regiones antes de usarlo.
+    AI_PROVIDER: z.enum(['none', 'anthropic']).default('none'),
     AI_MODEL: z.string().min(1).default('claude-opus-5-5'),
     AI_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
     WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(8),
@@ -33,12 +35,14 @@ const env = z
   .parse(process.env);
 
 const log = pino({ level: env.LOG_LEVEL });
-if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
-  log.warn('No hay ANTHROPIC_API_KEY: si el SDK no encuentra otra credencial, cada turno responderá con el mensaje de respaldo y derivará a un asesor');
+if (env.AI_PROVIDER === 'none') {
+  log.warn('AI_PROVIDER=none: el bot no usa IA; cada mensaje recibe el respaldo y pasa a un asesor');
+} else if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+  log.warn('No hay ANTHROPIC_API_KEY: si el SDK no encuentra otra credencial, cada turno responderá con el respaldo y derivará a un asesor');
 }
 const pool = createPool(env.DATABASE_URL);
 const masterKey = parseMasterKey(env.ENCRYPTION_MASTER_KEY);
-const llm = createAnthropicLlm();
+const llm = env.AI_PROVIDER === 'anthropic' ? createAnthropicLlm() : createDisabledLlm();
 // BullMQ exige maxRetriesPerRequest: null en las conexiones de los workers.
 const connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
 
@@ -148,4 +152,7 @@ const shutdown = async () => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-log.info({ concurrency: env.WORKER_CONCURRENCY, model: env.AI_MODEL, effort: env.AI_EFFORT }, 'workers iniciados');
+log.info(
+  { concurrency: env.WORKER_CONCURRENCY, provider: env.AI_PROVIDER, ...(env.AI_PROVIDER !== 'none' ? { model: env.AI_MODEL, effort: env.AI_EFFORT } : {}) },
+  'workers iniciados',
+);

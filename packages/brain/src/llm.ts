@@ -19,6 +19,22 @@ export function createAnthropicLlm(opts: { apiKey?: string; timeoutMs?: number }
   return { create: (params) => client.beta.messages.create(params) };
 }
 
+export class LlmUnavailableError extends Error {
+  override name = 'LlmUnavailableError';
+}
+
+/**
+ * Sin proveedor configurado: no se llama a ninguna API. Cada turno termina con el mensaje de
+ * respaldo y el pase a un asesor, así el resto del sistema se puede probar sin costo.
+ */
+export function createDisabledLlm(): LlmClient {
+  return {
+    create: async () => {
+      throw new LlmUnavailableError('No hay proveedor de IA configurado (AI_PROVIDER=none)');
+    },
+  };
+}
+
 /** Errores del proveedor que conviene reintentar más tarde (cola con backoff). */
 export function isRetryableLlmError(err: unknown): boolean {
   if (err instanceof Anthropic.RateLimitError) return true;

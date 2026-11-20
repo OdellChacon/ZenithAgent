@@ -18,7 +18,8 @@
     "db:seed-dev": "tsx --env-file=.env packages/db/src/cli/seed-dev.ts",
     "catalog:sync-imm": "tsx --env-file=.env packages/catalog/src/cli/sync-imm.ts",
     "dev:gateway": "tsx watch --env-file=.env apps/gateway/src/index.ts",
-    "dev:worker": "tsx watch --env-file=.env apps/worker/src/index.ts"
+    "dev:worker": "tsx watch --env-file=.env apps/worker/src/index.ts",
+    "dev:sim": "tsx watch --env-file=.env apps/simulator/src/index.ts"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

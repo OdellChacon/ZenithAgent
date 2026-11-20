@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Simulador ZenithAgent</title>
+<style>
+  :root {
+    --page: #eef0f3; --panel: #ffffff; --ink: #1d2433; --muted: #667085; --line: #e3e6eb; --accent: #2f5bea;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  .layout { display: grid; grid-template-columns: minmax(260px, 340px) auto; gap: 40px; justify-content: center; align-items: start; padding: 32px 16px; }
+  @media (max-width: 760px) { .layout { grid-template-columns: 1fr; gap: 20px; padding: 16px; } }
+
+  /* ---------- panel de control ---------- */
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+  .panel h1 { font-size: 18px; margin: 0 0 4px; }
+  .panel p { color: var(--muted); margin: 0 0 16px; font-size: 13.5px; }
+  .label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 16px 0 6px; }
+  .skins { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+  .skins button { border: 1px solid var(--line); background: #fff; border-radius: 9px; padding: 9px 4px; font: inherit; font-size: 13px; cursor: pointer; }
+  .skins button[aria-pressed="true"] { border-color: var(--accent); background: #eef2ff; color: var(--accent); font-weight: 600; }
+  .field { width: 100%; border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; font: inherit; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .ghost { border: 1px solid var(--line); background: #fff; border-radius: 9px; padding: 9px 12px; font: inherit; font-size: 13.5px; cursor: pointer; white-space: nowrap; }
+  .ghost:hover { background: #f6f7f9; }
+  .meta { font-size: 13px; color: var(--muted); }
+  .meta code { color: var(--ink); background: #f3f4f6; padding: 1px 5px; border-radius: 5px; }
+  .note { margin-top: 16px; padding: 10px 12px; border-radius: 9px; background: #fff8e6; border: 1px solid #f5dfa6; font-size: 13px; color: #6b4e00; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #c4c9d2; }
+  .dot.on { background: #22a45d; }
+
+  /* ---------- teléfono ---------- */
+  .phone { width: 390px; max-width: 100%; height: 760px; max-height: calc(100vh - 64px); border-radius: 44px; background: #111; padding: 12px;
+           box-shadow: 0 30px 60px -20px rgba(16,24,40,.35); }
+  @media (max-width: 760px) { .phone { width: 100%; height: 640px; border-radius: 28px; padding: 8px; } }
+  .screen { position: relative; height: 100%; border-radius: 34px; overflow: hidden; display: flex; flex-direction: column; background: var(--bg); }
+  @media (max-width: 760px) { .screen { border-radius: 22px; } }
+  .topbar { display: flex; align-items: center; gap: 10px; padding: 14px 14px 10px; background: var(--head-bg); color: var(--head-ink); border-bottom: 1px solid var(--head-line); }
+  .back { font-size: 22px; line-height: 1; opacity: .9; }
+  .avatar { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; font-weight: 700; font-size: 14px;
+            background: var(--avatar-bg); color: var(--avatar-ink); flex: none; }
+  .who { flex: 1; min-width: 0; }
+  .who b { display: block; font-size: 15.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .who span { font-size: 12.5px; opacity: .8; }
+  .icons { display: flex; gap: 16px; font-size: 17px; opacity: .85; }
+
+  .chat { flex: 1; overflow-y: auto; padding: 14px 10px 8px; display: flex; flex-direction: column; gap: 4px; background: var(--chat-bg); }
+  .day { align-self: center; font-size: 12px; padding: 4px 10px; border-radius: 8px; margin: 4px 0 8px; background: var(--day-bg); color: var(--day-ink); }
+  .system { align-self: center; max-width: 88%; text-align: center; font-size: 12.5px; padding: 6px 10px; border-radius: 8px; background: #fff3c4; color: #5c4400; margin: 6px 0; }
+  .msg { max-width: 80%; padding: 7px 10px 6px; border-radius: var(--radius); font-size: 14.5px; line-height: 1.38; white-space: pre-wrap; word-wrap: break-word;
+         box-shadow: var(--bubble-shadow); position: relative; }
+  .msg.in  { align-self: flex-start; background: var(--in-bg); color: var(--in-ink); }
+  .msg.out { align-self: flex-end;   background: var(--out-bg); color: var(--out-ink); }
+  .msg + .msg.in, .msg + .msg.out { margin-top: 2px; }
+  .msg .time { display: block; text-align: right; font-size: 11px; opacity: .6; margin-top: 2px; }
+  .typing { align-self: flex-start; background: var(--in-bg); border-radius: var(--radius); padding: 10px 12px; display: flex; gap: 4px; box-shadow: var(--bubble-shadow); }
+  .typing i { width: 7px; height: 7px; border-radius: 50%; background: #9aa1ad; animation: blink 1.2s infinite; }
+  .typing i:nth-child(2) { animation-delay: .2s; } .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .3; } 40% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .typing i { animation: none; opacity: .7; } }
+
+  .composer { display: flex; gap: 8px; align-items: flex-end; padding: 8px 10px 14px; background: var(--composer-bg); border-top: 1px solid var(--composer-line); }
+  .composer textarea { flex: 1; resize: none; border: var(--input-border); background: var(--input-bg); border-radius: 22px; padding: 10px 14px; font: inherit; font-size: 14.5px;
+                       max-height: 110px; outline: none; color: inherit; }
+  .send { width: 42px; height: 42px; border-radius: 50%; border: 0; background: var(--send-bg); color: var(--send-ink); font-size: 17px; cursor: pointer; flex: none; }
+  .send:disabled { opacity: .5; cursor: default; }
+
+  /* ---------- aspecto: WhatsApp ---------- */
+  .skin-whatsapp {
+    --bg: #efeae2; --head-bg: #008069; --head-ink: #fff; --head-line: transparent; --avatar-bg: #dfe5e7; --avatar-ink: #54656f;
+    --chat-bg: #efeae2 radial-gradient(rgba(0,0,0,.035) 1px, transparent 1px) 0 0 / 18px 18px;
+    --day-bg: #fff; --day-ink: #54656f; --in-bg: #fff; --in-ink: #111b21; --out-bg: #d9fdd3; --out-ink: #111b21; --radius: 9px;
+    --bubble-shadow: 0 1px .5px rgba(11,20,26,.13); --composer-bg: #f0f2f5; --composer-line: transparent; --input-bg: #fff; --input-border: 0;
+    --send-bg: #00a884; --send-ink: #fff;
+  }
+  /* ---------- aspecto: Instagram ---------- */
+  .skin-instagram {
+    --bg: #fff; --head-bg: #fff; --head-ink: #000; --head-line: #efefef; --avatar-ink: #fff;
+    --avatar-bg: radial-gradient(circle at 30% 107%, #fdf497 0%, #fdf497 5%, #fd5949 45%, #d6249f 60%, #285aeb 90%);
+    --chat-bg: #fff; --day-bg: transparent; --day-ink: #737373; --in-bg: #efefef; --in-ink: #000;
+    --out-bg: linear-gradient(135deg, #5b51d8, #833ab4 60%, #c13584); --out-ink: #fff; --radius: 20px; --bubble-shadow: none;
+    --composer-bg: #fff; --composer-line: transparent; --input-bg: #fff; --input-border: 1px solid #dbdbdb; --send-bg: #0095f6; --send-ink: #fff;
+  }
+  /* ---------- aspecto: Messenger ---------- */
+  .skin-messenger {
+    --bg: #fff; --head-bg: #fff; --head-ink: #050505; --head-line: #e4e6eb; --avatar-bg: #e4e6eb; --avatar-ink: #050505;
+    --chat-bg: #fff; --day-bg: transparent; --day-ink: #65676b; --in-bg: #f0f0f0; --in-ink: #050505;
+    --out-bg: linear-gradient(180deg, #a033ff, #0084ff); --out-ink: #fff; --radius: 18px; --bubble-shadow: none;
+    --composer-bg: #fff; --composer-line: transparent; --input-bg: #f0f2f5; --input-border: 0; --send-bg: #0084ff; --send-ink: #fff;
+  }
+  .skin-instagram .msg .time, .skin-messenger .msg .time { display: none; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <section class="panel" aria-label="Controles del simulador">
+    <h1>Simulador del bot</h1>
+    <p>Escribe como si fueras un cliente. El mensaje pasa por el sistema real: gateway, colas, worker y base de datos.</p>
+
+    <div class="label">Red social</div>
+    <div class="skins" role="group" aria-label="Aspecto">
+      <button type="button" data-skin="whatsapp">WhatsApp</button>
+      <button type="button" data-skin="instagram">Instagram</button>
+      <button type="button" data-skin="messenger">Messenger</button>
+    </div>
+
+    <div class="label">Cliente</div>
+    <div class="row">
+      <input id="name" class="field" maxlength="60" autocomplete="off" aria-label="Nombre del cliente">
+      <button id="reset" type="button" class="ghost" title="Empieza una conversación nueva con otro número">Nuevo cliente</button>
+    </div>
+    <p class="meta" style="margin-top:8px">Número simulado: <code id="number"></code></p>
+
+    <div class="label">Conexión</div>
+    <span class="status"><span id="dot" class="dot"></span><span id="conn">Conectando…</span></span>
+
+    <div class="note">
+      Por dentro el canal siempre es WhatsApp: Instagram y Messenger solo cambian la apariencia hasta que existan sus conectores.
+      Si un asesor toma la conversación, el bot deja de responder; usa <b>Nuevo cliente</b> para empezar otra.
+    </div>
+  </section>
+
+  <div class="phone">
+    <div id="screen" class="screen skin-whatsapp">
+      <header class="topbar">
+        <span class="back" aria-hidden="true">‹</span>
+        <div class="avatar" aria-hidden="true">IMM</div>
+        <div class="who"><b id="title">Inversiones Mora Mora</b><span id="subtitle">en línea</span></div>
+        <div class="icons" aria-hidden="true" id="icons">📹 📞</div>
+      </header>
+      <main id="chat" class="chat" aria-live="polite"></main>
+      <form id="composer" class="composer">
+        <textarea id="input" rows="1" placeholder="Mensaje" aria-label="Escribe un mensaje" required></textarea>
+        <button id="send" class="send" type="submit" aria-label="Enviar">➤</button>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const store = {
+    get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+    set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* sin almacenamiento: no pasa nada */ } },
+  };
+
+  const SKINS = {
+    whatsapp:  { title: 'Inversiones Mora Mora', subtitle: 'en línea', icons: '📹 📞', placeholder: 'Mensaje' },
+    instagram: { title: 'inversionesmoramora', subtitle: 'Inversiones Mora Mora', icons: '📞 📹', placeholder: 'Mensaje…' },
+    messenger: { title: 'Inversiones Mora Mora', subtitle: 'Activo ahora', icons: '📞 📹', placeholder: 'Aa' },
+  };
+
+  const randomNumber = () => '58414' + String(Math.floor(1000000 + Math.random() * 8999999));
+  let state = store.get('sim-state', null) || { number: randomNumber(), name: 'Cliente de prueba', skin: 'whatsapp', messages: [] };
+  let typingTimer = null;
+  let source = null;
+
+  const save = () => store.set('sim-state', state);
+  const time = (iso) => new Date(iso).toLocaleTimeString('es', { hour: '2-digit', minute: '2-digit' });
+  const escape = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  // Formato de WhatsApp: *negrita*, _cursiva_, ~tachado~. Se escapa antes para no inyectar HTML.
+  const format = (s) => escape(s)
+    .replace(/\*([^*\n]+)\*/g, '<b>$1</b>')
+    .replace(/(^|\s)_([^_\n]+)_(?=\s|$)/g, '$1<i>$2</i>')
+    .replace(/~([^~\n]+)~/g, '<s>$1</s>');
+
+  function render() {
+    const skin = SKINS[state.skin];
+    $('screen').className = 'screen skin-' + state.skin;
+    $('title').textContent = skin.title;
+    $('subtitle').textContent = skin.subtitle;
+    $('icons').textContent = skin.icons;
+    $('input').placeholder = skin.placeholder;
+    $('number').textContent = '+' + state.number;
+    $('name').value = state.name;
+    document.querySelectorAll('[data-skin]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.skin === state.skin)));
+
+    const chat = $('chat');
+    chat.innerHTML = '<div class="day">Hoy</div>';
+    for (const m of state.messages) {
+      const el = document.createElement('div');
+      if (m.kind === 'system') { el.className = 'system'; el.textContent = m.text; }
+      else {
+        el.className = 'msg ' + (m.kind === 'customer' ? 'out' : 'in');
+        el.innerHTML = format(m.text) + '<span class="time">' + time(m.at) + '</span>';
+      }
+      chat.appendChild(el);
+    }
+    if (typingTimer) {
+      const t = document.createElement('div');
+      t.className = 'typing'; t.setAttribute('aria-label', 'El bot está escribiendo');
+      t.innerHTML = '<i></i><i></i><i></i>';
+      chat.appendChild(t);
+    }
+    chat.scrollTop = chat.scrollHeight;
+  }
+
+  function add(kind, text, at = new Date().toISOString()) {
+    state.messages.push({ kind, text, at });
+    save(); render();
+  }
+
+  function setTyping(on) {
+    clearTimeout(typingTimer);
+    typingTimer = on ? setTimeout(() => { typingTimer = null; render(); }, 45000) : null;
+    render();
+  }
+
+  function connect() {
+    if (source) source.close();
+    source = new EventSource('/api/stream?to=' + encodeURIComponent(state.number));
+    source.onopen = () => { $('dot').classList.add('on'); $('conn').textContent = 'Conectado al simulador'; };
+    source.onerror = () => { $('dot').classList.remove('on'); $('conn').textContent = 'Sin conexión, reintentando…'; };
+    source.onmessage = (e) => {
+      try {
+        const m = JSON.parse(e.data);
+        setTyping(false);
+        add('bot', m.text, m.at);
+      } catch { /* evento malformado: se ignora */ }
+    };
+  }
+
+  $('composer').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = $('input').value.trim();
+    if (!text) return;
+    $('input').value = ''; $('input').style.height = '';
+    add('customer', text);
+    setTyping(true);
+    try {
+      const res = await fetch('/api/send', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        setTyping(false);
+        add('system', (body.error && body.error.message) || 'No se pudo enviar el mensaje');
+      }
+    } catch {
+      setTyping(false);
+      add('system', 'El simulador no responde. ¿Está corriendo npm run dev:sim?');
+    }
+  });
+
+  $('input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('composer').requestSubmit(); }
+  });
+  $('input').addEventListener('input', (e) => { e.target.style.height = ''; e.target.style.height = Math.min(e.target.scrollHeight, 110) + 'px'; });
+  $('name').addEventListener('change', (e) => { state.name = e.target.value.trim() || 'Cliente de prueba'; save(); });
+  document.querySelectorAll('[data-skin]').forEach((b) => b.addEventListener('click', () => { state.skin = b.dataset.skin; save(); render(); }));
+  $('reset').addEventListener('click', () => {
+    state = { ...state, number: randomNumber(), messages: [] };
+    setTyping(false); save(); render(); connect();
+  });
+
+  render();
+  connect();
+})();
+</script>
+</body>
+</html>

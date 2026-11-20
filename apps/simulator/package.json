@@ -1,0 +1,14 @@
+{
+  "name": "@zenith/simulator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/server.ts"
+  },
+  "dependencies": {
+    "@zenith/channel-whatsapp": "*",
+    "fastify": "^5.12.8",
+    "zod": "^4.6.7"
+  }
+}

@@ -25,6 +25,7 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 ```
 apps/
   gateway/        Recibe webhooks: firma, guarda una sola vez, encola, responde 200
+  simulator/      Chat de prueba local que hace de cliente y de Meta
   worker/         Tres colas: entrada (contacto, conversación, mensaje), cerebro (turno del bot) y salida (envío)
 config/tenants/   Perfil de cada negocio (datos que el bot conoce; lo que falta va en null)
 packages/
@@ -49,6 +50,23 @@ npm run catalog:sync-imm -- --tenant-id <id que imprime el seed>
 npm run dev:gateway           # en una terminal
 npm run dev:worker            # en otra
 ```
+
+### Simulador de chat (sin número real)
+
+Una página con un teléfono que se ve como WhatsApp, Instagram o Messenger. Lo que escribes pasa por el sistema real (gateway, colas, worker, BD) y el simulador hace de Meta: recibe la respuesta del bot y manda los estados "entregado" y "leído".
+
+```bash
+# en .env: META_GRAPH_BASE_URL=http://localhost:4010
+npm run dev:gateway
+npm run dev:worker
+npm run dev:sim     # abre http://localhost:4010
+```
+
+Por dentro el canal siempre es WhatsApp; Instagram y Messenger solo cambian la apariencia hasta que existan sus conectores.
+
+### Proveedor de IA
+
+`AI_PROVIDER=none` (por defecto) no llama a ninguna IA: cada mensaje recibe el respaldo y pasa a un asesor, para probar el resto del sistema sin costo. `AI_PROVIDER=anthropic` usa Claude, pero **la política de regiones de Anthropic no incluye a Venezuela** ([supported regions](https://www.anthropic.com/legal/supported-regions)), así que no sirve para atender a clientes allí. El proveedor definitivo está pendiente; el cambio se hace en `packages/brain/src/llm.ts` (`LlmClient`).
 
 Pruebas:
 
