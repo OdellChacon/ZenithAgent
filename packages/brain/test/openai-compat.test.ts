@@ -121,6 +121,30 @@ describe('createOpenAiCompatibleLlm', () => {
     ]);
   });
 
+  it('conserva la firma de pensamiento de Gemini y la devuelve en el turno siguiente', async () => {
+    const signature = { google: { thought_signature: 'Eo4BCosBAWkU' } };
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
+      reply(
+        completion(
+          { tool_calls: [{ id: 'c9', type: 'function', function: { name: 'buscar_productos', arguments: '{"limite":2}' }, extra_content: signature }] },
+          'tool_calls',
+        ),
+      ),
+    );
+    const llm = createOpenAiCompatibleLlm({ baseUrl: BASE, apiKey: 'k', fetch: fetchMock });
+    const msg = await llm.create(params());
+    const next = {
+      ...params(),
+      messages: [
+        { role: 'user', content: 'Hola' },
+        { role: 'assistant', content: msg.content },
+        { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'c9', content: '{}' }] },
+      ],
+    } as unknown as CreateParams;
+    const sent = toOpenAiMessages(next);
+    expect(sent[2]).toMatchObject({ role: 'assistant', tool_calls: [{ id: 'c9', extra_content: signature }] });
+  });
+
   it('marca argumentos inválidos para que el bot los rechace y el modelo corrija', async () => {
     const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(
       reply(completion({ tool_calls: [{ function: { name: 'calcular_cajas', arguments: '{no es json' } }] }, 'tool_calls')),
@@ -159,6 +183,25 @@ describe('createOpenAiCompatibleLlm', () => {
       .create(params())
       .catch((e) => e);
     expect(isRetryableLlmError(down)).toBe(true);
+  });
+
+  it('si el modelo está saturado prueba el de respaldo, pero no ante errores permanentes', async () => {
+    const used: string[] = [];
+    const busyFirst = vi.fn<typeof fetch>(async (_u, init) => {
+      const model = JSON.parse(String(init?.body)).model as string;
+      used.push(model);
+      return model === 'principal' ? reply({ error: { message: 'high demand' } }, 503) : reply(completion({ content: 'Hola' }));
+    });
+    const llm = createOpenAiCompatibleLlm({ baseUrl: BASE, apiKey: 'k', fetch: busyFirst, fallbackModels: ['respaldo'] });
+    const msg = await llm.create({ ...params(), model: 'principal' });
+    expect(used).toEqual(['principal', 'respaldo']);
+    expect(msg.content).toEqual([{ type: 'text', text: 'Hola', citations: null }]);
+
+    const badKey = vi.fn<typeof fetch>().mockResolvedValue(reply([{ error: { message: 'Please pass a valid API key' } }], 400));
+    await expect(createOpenAiCompatibleLlm({ baseUrl: BASE, apiKey: 'k', fetch: badKey, fallbackModels: ['respaldo'] }).create(params())).rejects.toThrow(
+      'valid API key',
+    );
+    expect(badKey).toHaveBeenCalledTimes(1);
   });
 
   it('exige https salvo en la máquina local', () => {

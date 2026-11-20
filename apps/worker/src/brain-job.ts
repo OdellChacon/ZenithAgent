@@ -1,8 +1,9 @@
-import { outboundIdempotencyKey, type BrainJobData } from '@zenith/core';
+import { outboundIdempotencyKey, type BrainJobData, type Channel } from '@zenith/core';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 import {
   buildSystemPrompt,
   FALLBACK_REPLY,
+  formatForChannel,
   isRetryableLlmError,
   parseTenantBotSettings,
   runBrainTurn,
@@ -20,6 +21,11 @@ export interface BrainJobDeps {
   config?: Partial<BrainConfig>;
   /** Mensajes previos que se le muestran al modelo. */
   historyLimit?: number;
+  /**
+   * Último intento de la cola: si el proveedor sigue fallando, no se reintenta más y el
+   * cliente recibe el mensaje de respaldo en vez de quedarse sin respuesta.
+   */
+  finalAttempt?: boolean;
 }
 
 export type BrainJobOutcome =
@@ -38,7 +44,9 @@ const REPLY_STEP = 'reply';
 
 async function latestInboundId(client: PoolClient, conversationId: string): Promise<string | null> {
   const { rows } = await client.query<{ id: string }>(
-    `SELECT id FROM messages WHERE conversation_id = $1 AND direction = 'in' ORDER BY created_at DESC, seq DESC LIMIT 1`,
+    // Orden de llegada (seq): la hora de WhatsApp viene al segundo y no sirve para ordenar
+    // un mensaje del cliente contra la respuesta del bot guardada en el mismo segundo.
+    `SELECT id FROM messages WHERE conversation_id = $1 AND direction = 'in' ORDER BY seq DESC LIMIT 1`,
     [conversationId],
   );
   return rows[0]?.id ?? null;
@@ -75,9 +83,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     const tenant = await client.query<{ settings: unknown }>('SELECT settings FROM tenants WHERE id = $1', [job.tenantId]);
     const history = await client.query<HistoryMessage>(
       `SELECT direction, author, type, body FROM (
-         SELECT direction, author, type, body, created_at, seq FROM messages
-          WHERE conversation_id = $1 ORDER BY created_at DESC, seq DESC LIMIT $2) recent
-        ORDER BY created_at, seq`,
+         SELECT direction, author, type, body, seq FROM messages
+          WHERE conversation_id = $1 ORDER BY seq DESC LIMIT $2) recent
+        ORDER BY seq`,
       [job.conversationId, deps.historyLimit ?? 30],
     );
     return { channel: row.channel, recipient: row.recipient, settings: tenant.rows[0]?.settings, history: history.rows };
@@ -103,11 +111,16 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       ...(deps.config ? { config: deps.config } : {}),
     });
   } catch (err) {
-    if (isRetryableLlmError(err)) throw err; // la cola reintenta con backoff
+    if (isRetryableLlmError(err) && !deps.finalAttempt) throw err; // la cola reintenta con backoff
     brain = {
       outcome: 'error',
       reply: FALLBACK_REPLY,
-      handoff: { reason: 'error', summary: 'Falló la llamada al modelo; atender manualmente.' },
+      handoff: {
+        reason: 'error',
+        summary: isRetryableLlmError(err)
+          ? 'El proveedor de IA no respondió tras varios intentos; atender manualmente.'
+          : 'Falló la llamada al modelo; atender manualmente.',
+      },
       usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 },
       iterations: 0,
       stopReason: null,
@@ -116,6 +129,7 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     };
   }
   const latencyMs = Date.now() - started;
+  brain = { ...brain, reply: formatForChannel(brain.reply, snapshot.channel as Channel) };
 
   return withTenant(pool, job.tenantId, async (client): Promise<BrainJobOutcome> => {
     // Mientras pensaba pudo llegar otro mensaje o un asesor pudo tomar la conversación.

@@ -69,7 +69,7 @@ Por dentro el canal siempre es WhatsApp; Instagram y Messenger solo cambian la a
 | `AI_PROVIDER` | Qué hace |
 |---|---|
 | `none` (por defecto) | Sin IA: cada mensaje recibe el respaldo y pasa a un asesor. Sirve para probar el resto del sistema sin costo. |
-| `gemini` | Google Gemini por su API compatible con OpenAI (`GEMINI_API_KEY`, modelo por defecto `gemini-3.8-flash`). Venezuela está en su lista de regiones. **En la capa gratuita Google puede usar y revisar lo enviado, y pide no mandar datos personales: solo para el simulador con datos ficticios.** |
+| `gemini` | Google Gemini por su API compatible con OpenAI (`GEMINI_API_KEY`; modelo por defecto `gemini-3.1-flash-lite`, con `gemini-3.5-flash-lite` de respaldo si está saturado). Los modelos "flash" más grandes no respondieron a tiempo en la capa gratuita. Venezuela está en su lista de regiones. **En la capa gratuita Google puede usar y revisar lo enviado, y pide no mandar datos personales: solo para el simulador con datos ficticios.** |
 | `openai-compatible` | Cualquier API con formato de OpenAI (Ollama, OpenRouter…): `AI_BASE_URL`, `AI_MODEL`, `AI_API_KEY`. |
 | `anthropic` | Claude. La [política de regiones de Anthropic](https://www.anthropic.com/legal/supported-regions) no incluye a Venezuela. |
 

@@ -39,5 +39,7 @@ export function toModelMessages(history: HistoryMessage[]): BetaMessageParam[] {
     }
   }
   while (out.length && out[0]!.role !== 'user') out.shift();
+  // El bot responde al cliente: el historial siempre termina en un mensaje suyo.
+  while (out.length && out[out.length - 1]!.role !== 'user') out.pop();
   return out;
 }

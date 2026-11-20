@@ -4,6 +4,7 @@ import {
   calculateBoxes,
   checkReply,
   FALLBACK_REPLY,
+  formatForChannel,
   parseTenantBotSettings,
   runBrainTurn,
   TenantSettingsError,
@@ -56,6 +57,27 @@ describe('calculateBoxes', () => {
   });
 });
 
+describe('formatForChannel', () => {
+  const md = '### Opciones\n**Aconna Beige** y __Sinai__.\n* Mate\n* Antideslizante\nVea [el visualizador](https://inversionesmoramora.com/#visualizador)';
+
+  it('convierte el Markdown al formato de WhatsApp', () => {
+    expect(formatForChannel(md, 'whatsapp')).toBe(
+      '*Opciones*\n*Aconna Beige* y _Sinai_.\n- Mate\n- Antideslizante\nVea el visualizador: https://inversionesmoramora.com/#visualizador',
+    );
+  });
+
+  it('deja texto plano en Instagram y Messenger', () => {
+    expect(formatForChannel(md, 'instagram')).toBe(
+      'Opciones\nAconna Beige y Sinai.\n- Mate\n- Antideslizante\nVea el visualizador: https://inversionesmoramora.com/#visualizador',
+    );
+    expect(formatForChannel('Le recomiendo el *Aconna Beige*.', 'messenger')).toBe('Le recomiendo el Aconna Beige.');
+  });
+
+  it('no toca el texto que ya está bien', () => {
+    expect(formatForChannel('Necesita 7 cajas (12,6 m²).', 'whatsapp')).toBe('Necesita 7 cajas (12,6 m²).');
+  });
+});
+
 describe('checkReply', () => {
   it('acepta respuestas normales', () => {
     expect(checkReply('  Con gusto le ayudo. ¿Es para piso o pared?  ')).toEqual({
@@ -85,12 +107,22 @@ describe('toModelMessages', () => {
       { direction: 'in', author: 'customer', type: 'text', body: 'Hola' },
       { direction: 'in', author: 'customer', type: 'image', body: null },
       { direction: 'out', author: 'agent', type: 'text', body: 'Buenas tardes' },
+      { direction: 'in', author: 'customer', type: 'text', body: 'Gracias' },
     ]);
-    expect(out).toHaveLength(2);
+    expect(out).toHaveLength(3);
     expect(out[0]?.role).toBe('user');
     expect(out[0]?.content).toContain('Hola');
     expect(out[0]?.content).toContain('envió una imagen');
     expect(out[1]).toEqual({ role: 'assistant', content: 'Buenas tardes' });
+    expect(out[2]).toEqual({ role: 'user', content: 'Gracias' });
+  });
+
+  it('nunca termina en un mensaje del negocio', () => {
+    const out = toModelMessages([
+      { direction: 'in', author: 'customer', type: 'text', body: 'Hola' },
+      { direction: 'out', author: 'bot', type: 'text', body: 'Buenas tardes' },
+    ]);
+    expect(out).toEqual([{ role: 'user', content: 'Hola' }]);
   });
 });
 

@@ -1,5 +1,6 @@
 export * from './boxes.js';
 export * from './brain.js';
+export * from './format.js';
 export * from './history.js';
 export * from './llm.js';
 export * from './openai-compat.js';

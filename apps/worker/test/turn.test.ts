@@ -4,7 +4,7 @@ import type pg from 'pg';
 import { encryptCredentials } from '@zenith/core';
 import { parseWhatsAppWebhook } from '@zenith/channel-whatsapp';
 import { insertWebhookEvent, withTenant, type Pool } from '@zenith/db';
-import { FALLBACK_REPLY } from '@zenith/brain';
+import { FALLBACK_REPLY, LlmHttpError } from '@zenith/brain';
 import { syncProducts, type ProductInput } from '@zenith/catalog';
 import { processInboundEvent } from '../src/inbound.js';
 import { processBrainJob } from '../src/brain-job.js';
@@ -162,6 +162,24 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('ordena por llegada aunque la respuesta del bot tenga una hora posterior al siguiente mensaje', async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const first = await customerSays('Hola', '584141230010', String(now));
+    const reply = await processBrainJob(
+      { pool: app, llm: scriptedLlm([text('Buenas tardes, ¿en qué le ayudo?')]).llm },
+      { tenantId: t.tenantId, conversationId: first.conversationId, triggerMessageId: first.messageId },
+    );
+    expect(reply.result).toBe('replied');
+    // El cliente contesta en el mismo segundo: WhatsApp le pone una hora anterior a la respuesta guardada.
+    const second = await customerSays('Busco sanitarios', '584141230010', String(now));
+    const { llm, calls } = scriptedLlm([text('Con gusto.')]);
+    const turn = await processBrainJob({ pool: app, llm }, { tenantId: t.tenantId, conversationId: second.conversationId, triggerMessageId: second.messageId });
+    expect(turn.result).toBe('replied');
+    const sent = calls[0]!.messages;
+    expect(sent.at(-1)).toMatchObject({ role: 'user', content: 'Busco sanitarios' });
+    expect(sent.map((m) => m.role)).toEqual(['user', 'assistant', 'user']);
+  });
+
   it('al pedir precio deriva al asesor, el bot se calla y el asesor queda avisado', async () => {
     const msg = await customerSays('¿Cuánto cuesta el Aconna Beige?', '584141230003');
     const { llm } = scriptedLlm([
@@ -196,6 +214,22 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
       (await c.query(`SELECT body FROM messages WHERE conversation_id = $1 AND direction = 'out'`, [msg.conversationId])).rows[0]?.body,
     );
     expect(body).toBe(FALLBACK_REPLY);
+  });
+
+  it('si el proveedor está saturado reintenta, y en el último intento responde con el respaldo', async () => {
+    const msg = await customerSays('Hola', '584141230009');
+    const busy = { create: vi.fn().mockRejectedValue(new LlmHttpError('high demand', 503, true)) };
+    const job = { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId };
+
+    await expect(processBrainJob({ pool: app, llm: busy }, job)).rejects.toThrow('high demand');
+    const last = await processBrainJob({ pool: app, llm: busy, finalAttempt: true }, job);
+    expect(last).toMatchObject({ result: 'replied', handoff: true, outcome: 'error' });
+    const state = await withTenant(app, t.tenantId, async (c) => ({
+      body: (await c.query(`SELECT body FROM messages WHERE conversation_id = $1 AND direction = 'out'`, [msg.conversationId])).rows[0]?.body,
+      handoff: (await c.query('SELECT summary FROM handoffs WHERE conversation_id = $1', [msg.conversationId])).rows[0]?.summary,
+    }));
+    expect(state.body).toBe(FALLBACK_REPLY);
+    expect(state.handoff).toContain('no respondió');
   });
 
   it('no envía texto libre fuera de la ventana de 24 h', async () => {

@@ -15,6 +15,7 @@ import {
   createAnthropicLlm,
   createDisabledLlm,
   createOpenAiCompatibleLlm,
+  GEMINI_DEFAULT_FALLBACK_MODELS,
   GEMINI_DEFAULT_MODEL,
   GEMINI_OPENAI_BASE_URL,
   type LlmClient,
@@ -36,6 +37,8 @@ const env = z
     // anthropic: Claude (ver la política de regiones antes de usarlo).
     AI_PROVIDER: z.enum(['none', 'gemini', 'openai-compatible', 'anthropic']).default('none'),
     AI_MODEL: z.string().min(1).optional(),
+    // Modelos de respaldo separados por coma, si el principal está saturado.
+    AI_FALLBACK_MODELS: z.string().optional(),
     GEMINI_API_KEY: z.string().optional(),
     AI_BASE_URL: z.string().url().optional(),
     AI_API_KEY: z.string().optional(),
@@ -46,6 +49,8 @@ const env = z
   .parse(process.env);
 
 const log = pino({ level: env.LOG_LEVEL });
+
+const fallbackModels = env.AI_FALLBACK_MODELS?.split(',').map((m) => m.trim()).filter(Boolean);
 
 function buildLlm(): { llm: LlmClient; model: string } {
   switch (env.AI_PROVIDER) {
@@ -58,12 +63,20 @@ function buildLlm(): { llm: LlmClient; model: string } {
         'Gemini en capa gratuita: Google puede usar y revisar lo enviado. Úsalo solo con datos ficticios (simulador), nunca con clientes reales',
       );
       return {
-        llm: createOpenAiCompatibleLlm({ baseUrl: GEMINI_OPENAI_BASE_URL, apiKey: env.GEMINI_API_KEY, sendReasoningEffort: true }),
+        llm: createOpenAiCompatibleLlm({
+          baseUrl: GEMINI_OPENAI_BASE_URL,
+          apiKey: env.GEMINI_API_KEY.trim(),
+          sendReasoningEffort: true,
+          fallbackModels: fallbackModels ?? GEMINI_DEFAULT_FALLBACK_MODELS,
+        }),
         model: env.AI_MODEL ?? GEMINI_DEFAULT_MODEL,
       };
     case 'openai-compatible':
       if (!env.AI_BASE_URL || !env.AI_MODEL) throw new Error('AI_PROVIDER=openai-compatible necesita AI_BASE_URL y AI_MODEL');
-      return { llm: createOpenAiCompatibleLlm({ baseUrl: env.AI_BASE_URL, apiKey: env.AI_API_KEY ?? 'sin-clave' }), model: env.AI_MODEL };
+      return {
+        llm: createOpenAiCompatibleLlm({ baseUrl: env.AI_BASE_URL, apiKey: env.AI_API_KEY?.trim() || 'sin-clave', fallbackModels: fallbackModels ?? [] }),
+        model: env.AI_MODEL,
+      };
     case 'anthropic':
       if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
         log.warn('No hay ANTHROPIC_API_KEY: si el SDK no encuentra otra credencial, cada turno responderá con el respaldo');
@@ -109,7 +122,8 @@ const inboundWorker = new Worker<InboundJobData>(
 const brainWorker = new Worker<BrainJobData>(
   QUEUES.brain,
   async (job) => {
-    const outcome = await processBrainJob({ pool, llm, config: { model, effort: env.AI_EFFORT } }, job.data);
+    const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
+    const outcome = await processBrainJob({ pool, llm, finalAttempt, config: { model, effort: env.AI_EFFORT } }, job.data);
     log.info({ conversationId: job.data.conversationId, outcome }, 'turno del bot');
     if (outcome.result === 'replied') {
       await outboundQueue.add(

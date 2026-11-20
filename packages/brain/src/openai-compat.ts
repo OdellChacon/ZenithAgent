@@ -17,6 +17,11 @@ export interface OpenAiCompatOptions {
   apiKey: string;
   /** Si se define, el esfuerzo del bot (low/medium/high) se envía como reasoning_effort. */
   sendReasoningEffort?: boolean;
+  /**
+   * Modelos a probar, en orden, si el principal está saturado o no responde a tiempo
+   * (429, 5xx o timeout). Los errores permanentes (clave inválida, petición mala) no saltan.
+   */
+  fallbackModels?: string[];
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
@@ -84,7 +89,11 @@ function blockText(content: unknown): string {
 
 type OaiMessage =
   | { role: 'system' | 'user'; content: string }
-  | { role: 'assistant'; content: string | null; tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[] }
+  | {
+      role: 'assistant';
+      content: string | null;
+      tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string }; extra_content?: unknown }[];
+    }
   | { role: 'tool'; tool_call_id: string; content: string };
 
 /** Traduce los mensajes del formato de Anthropic al de OpenAI. */
@@ -107,7 +116,13 @@ export function toOpenAiMessages(params: CreateParams): OaiMessage[] {
       // Los bloques de pensamiento de otros proveedores no se reenvían.
       const calls = blocks
         .filter((b) => b.type === 'tool_use')
-        .map((b) => ({ id: b.id as string, type: 'function' as const, function: { name: b.name as string, arguments: JSON.stringify(b.input ?? {}) } }));
+        .map((b) => ({
+          id: b.id as string,
+          type: 'function' as const,
+          function: { name: b.name as string, arguments: JSON.stringify(b.input ?? {}) },
+          // Datos propios del proveedor que hay que devolver tal cual (ej. thought_signature de Gemini).
+          ...(b.provider_extra ? { extra_content: b.provider_extra } : {}),
+        }));
       out.push({ role: 'assistant', content: text || null, ...(calls.length ? { tool_calls: calls } : {}) });
       continue;
     }
@@ -130,7 +145,7 @@ interface OaiResponse {
     finish_reason?: string | null;
     message?: {
       content?: string | null;
-      tool_calls?: { id?: string; type?: string; function?: { name?: string; arguments?: string } }[];
+      tool_calls?: { id?: string; type?: string; function?: { name?: string; arguments?: string }; extra_content?: unknown }[];
     };
   }[];
   usage?: { prompt_tokens?: number; completion_tokens?: number; prompt_tokens_details?: { cached_tokens?: number } };
@@ -154,8 +169,7 @@ export function createOpenAiCompatibleLlm(opts: OpenAiCompatOptions): LlmClient 
   const endpoint = new URL('chat/completions', base).toString();
   const doFetch = opts.fetch ?? fetch;
 
-  return {
-    async create(params) {
+  const createOnce = async (params: CreateParams): Promise<BetaMessage> => {
       const schemas = new Map<string, ToolSchemaInfo>();
       const tools = (params.tools ?? []).flatMap((t) => {
         const tool = t as Anthropic.Beta.BetaTool;
@@ -180,7 +194,7 @@ export function createOpenAiCompatibleLlm(opts: OpenAiCompatOptions): LlmClient 
           method: 'POST',
           headers: { Authorization: `Bearer ${opts.apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(opts.timeoutMs ?? 60_000),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 25_000),
         });
       } catch (err) {
         throw new LlmHttpError(`No se pudo conectar con el proveedor de IA: ${(err as Error).message}`, null, true);
@@ -221,7 +235,13 @@ export function createOpenAiCompatibleLlm(opts: OpenAiCompatOptions): LlmClient 
         for (const key of schemas.get(name)?.nullable ?? []) {
           if (!(key in input)) input[key] = null;
         }
-        content.push({ type: 'tool_use', id: call.id || `call_${Date.now()}_${++callSeq}`, name, input });
+        content.push({
+          type: 'tool_use',
+          id: call.id || `call_${Date.now()}_${++callSeq}`,
+          name,
+          input,
+          ...(call.extra_content ? { provider_extra: call.extra_content } : {}),
+        });
       }
 
       const hasCalls = (choice.message.tool_calls ?? []).length > 0;
@@ -242,10 +262,30 @@ export function createOpenAiCompatibleLlm(opts: OpenAiCompatOptions): LlmClient 
           cache_creation_input_tokens: 0,
         },
       } as unknown as BetaMessage;
+  };
+
+  return {
+    async create(params) {
+      const models = [params.model, ...(opts.fallbackModels ?? []).filter((m) => m && m !== params.model)];
+      let lastError: unknown;
+      for (const model of models) {
+        try {
+          return await createOnce({ ...params, model });
+        } catch (err) {
+          lastError = err;
+          if (!(err instanceof LlmHttpError) || !err.retryable) throw err;
+        }
+      }
+      throw lastError;
     },
   };
 }
 
-/** Gemini por su API compatible con OpenAI. */
+/**
+ * Gemini por su API compatible con OpenAI. Medido el 2026-11-20 en la capa gratuita:
+ * gemini-3.8-flash y gemini-3.6-flash no respondieron en 45 s. En conversaciones del simulador,
+ * gemini-3.5-flash-lite tardó entre 9 y 47 s por turno y gemini-3.1-flash-lite unos 3 s.
+ */
 export const GEMINI_OPENAI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/openai/';
-export const GEMINI_DEFAULT_MODEL = 'gemini-3.8-flash';
+export const GEMINI_DEFAULT_MODEL = 'gemini-3.1-flash-lite';
+export const GEMINI_DEFAULT_FALLBACK_MODELS = ['gemini-3.5-flash-lite'];
