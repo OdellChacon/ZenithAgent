@@ -11,7 +11,14 @@ import {
   type InboundJobData,
   type OutboundJobData,
 } from '@zenith/core';
-import { createAnthropicLlm, createDisabledLlm } from '@zenith/brain';
+import {
+  createAnthropicLlm,
+  createDisabledLlm,
+  createOpenAiCompatibleLlm,
+  GEMINI_DEFAULT_MODEL,
+  GEMINI_OPENAI_BASE_URL,
+  type LlmClient,
+} from '@zenith/brain';
 import { createPool, reclaimStaleWebhookEvents } from '@zenith/db';
 import { processBrainJob } from './brain-job.js';
 import { processInboundEvent } from './inbound.js';
@@ -25,9 +32,13 @@ const env = z
     META_GRAPH_API_VERSION: z.string().regex(/^v\d+\.\d+$/, 'Usa la forma vNN.N'),
     // Solo para pruebas locales contra un simulador de Graph API.
     META_GRAPH_BASE_URL: z.string().url().optional(),
-    // none: sin IA (respaldo + asesor). anthropic: Claude; ver la política de regiones antes de usarlo.
-    AI_PROVIDER: z.enum(['none', 'anthropic']).default('none'),
-    AI_MODEL: z.string().min(1).default('claude-opus-5-5'),
+    // none: sin IA (respaldo + asesor). gemini: API de Google. openai-compatible: Ollama, OpenRouter, etc.
+    // anthropic: Claude (ver la política de regiones antes de usarlo).
+    AI_PROVIDER: z.enum(['none', 'gemini', 'openai-compatible', 'anthropic']).default('none'),
+    AI_MODEL: z.string().min(1).optional(),
+    GEMINI_API_KEY: z.string().optional(),
+    AI_BASE_URL: z.string().url().optional(),
+    AI_API_KEY: z.string().optional(),
     AI_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
     WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(8),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
@@ -35,14 +46,34 @@ const env = z
   .parse(process.env);
 
 const log = pino({ level: env.LOG_LEVEL });
-if (env.AI_PROVIDER === 'none') {
-  log.warn('AI_PROVIDER=none: el bot no usa IA; cada mensaje recibe el respaldo y pasa a un asesor');
-} else if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
-  log.warn('No hay ANTHROPIC_API_KEY: si el SDK no encuentra otra credencial, cada turno responderá con el respaldo y derivará a un asesor');
+
+function buildLlm(): { llm: LlmClient; model: string } {
+  switch (env.AI_PROVIDER) {
+    case 'none':
+      log.warn('AI_PROVIDER=none: el bot no usa IA; cada mensaje recibe el respaldo y pasa a un asesor');
+      return { llm: createDisabledLlm(), model: 'ninguno' };
+    case 'gemini':
+      if (!env.GEMINI_API_KEY) throw new Error('AI_PROVIDER=gemini necesita GEMINI_API_KEY');
+      log.warn(
+        'Gemini en capa gratuita: Google puede usar y revisar lo enviado. Úsalo solo con datos ficticios (simulador), nunca con clientes reales',
+      );
+      return {
+        llm: createOpenAiCompatibleLlm({ baseUrl: GEMINI_OPENAI_BASE_URL, apiKey: env.GEMINI_API_KEY, sendReasoningEffort: true }),
+        model: env.AI_MODEL ?? GEMINI_DEFAULT_MODEL,
+      };
+    case 'openai-compatible':
+      if (!env.AI_BASE_URL || !env.AI_MODEL) throw new Error('AI_PROVIDER=openai-compatible necesita AI_BASE_URL y AI_MODEL');
+      return { llm: createOpenAiCompatibleLlm({ baseUrl: env.AI_BASE_URL, apiKey: env.AI_API_KEY ?? 'sin-clave' }), model: env.AI_MODEL };
+    case 'anthropic':
+      if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
+        log.warn('No hay ANTHROPIC_API_KEY: si el SDK no encuentra otra credencial, cada turno responderá con el respaldo');
+      }
+      return { llm: createAnthropicLlm(), model: env.AI_MODEL ?? 'claude-opus-5-5' };
+  }
 }
 const pool = createPool(env.DATABASE_URL);
 const masterKey = parseMasterKey(env.ENCRYPTION_MASTER_KEY);
-const llm = env.AI_PROVIDER === 'anthropic' ? createAnthropicLlm() : createDisabledLlm();
+const { llm, model } = buildLlm();
 // BullMQ exige maxRetriesPerRequest: null en las conexiones de los workers.
 const connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
 
@@ -78,7 +109,7 @@ const inboundWorker = new Worker<InboundJobData>(
 const brainWorker = new Worker<BrainJobData>(
   QUEUES.brain,
   async (job) => {
-    const outcome = await processBrainJob({ pool, llm, config: { model: env.AI_MODEL, effort: env.AI_EFFORT } }, job.data);
+    const outcome = await processBrainJob({ pool, llm, config: { model, effort: env.AI_EFFORT } }, job.data);
     log.info({ conversationId: job.data.conversationId, outcome }, 'turno del bot');
     if (outcome.result === 'replied') {
       await outboundQueue.add(
@@ -153,6 +184,6 @@ process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
 log.info(
-  { concurrency: env.WORKER_CONCURRENCY, provider: env.AI_PROVIDER, ...(env.AI_PROVIDER !== 'none' ? { model: env.AI_MODEL, effort: env.AI_EFFORT } : {}) },
+  { concurrency: env.WORKER_CONCURRENCY, provider: env.AI_PROVIDER, ...(env.AI_PROVIDER !== 'none' ? { model, effort: env.AI_EFFORT } : {}) },
   'workers iniciados',
 );

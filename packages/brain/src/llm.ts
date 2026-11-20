@@ -37,6 +37,7 @@ export function createDisabledLlm(): LlmClient {
 
 /** Errores del proveedor que conviene reintentar más tarde (cola con backoff). */
 export function isRetryableLlmError(err: unknown): boolean {
+  if (err instanceof Error && err.name === 'LlmHttpError') return Boolean((err as Error & { retryable?: boolean }).retryable);
   if (err instanceof Anthropic.RateLimitError) return true;
   if (err instanceof Anthropic.InternalServerError) return true;
   if (err instanceof Anthropic.APIConnectionError) return true; // incluye timeouts

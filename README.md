@@ -66,7 +66,14 @@ Por dentro el canal siempre es WhatsApp; Instagram y Messenger solo cambian la a
 
 ### Proveedor de IA
 
-`AI_PROVIDER=none` (por defecto) no llama a ninguna IA: cada mensaje recibe el respaldo y pasa a un asesor, para probar el resto del sistema sin costo. `AI_PROVIDER=anthropic` usa Claude, pero **la política de regiones de Anthropic no incluye a Venezuela** ([supported regions](https://www.anthropic.com/legal/supported-regions)), así que no sirve para atender a clientes allí. El proveedor definitivo está pendiente; el cambio se hace en `packages/brain/src/llm.ts` (`LlmClient`).
+| `AI_PROVIDER` | Qué hace |
+|---|---|
+| `none` (por defecto) | Sin IA: cada mensaje recibe el respaldo y pasa a un asesor. Sirve para probar el resto del sistema sin costo. |
+| `gemini` | Google Gemini por su API compatible con OpenAI (`GEMINI_API_KEY`, modelo por defecto `gemini-3.8-flash`). Venezuela está en su lista de regiones. **En la capa gratuita Google puede usar y revisar lo enviado, y pide no mandar datos personales: solo para el simulador con datos ficticios.** |
+| `openai-compatible` | Cualquier API con formato de OpenAI (Ollama, OpenRouter…): `AI_BASE_URL`, `AI_MODEL`, `AI_API_KEY`. |
+| `anthropic` | Claude. La [política de regiones de Anthropic](https://www.anthropic.com/legal/supported-regions) no incluye a Venezuela. |
+
+El proveedor para clientes reales sigue pendiente. El adaptador está en `packages/brain/src/openai-compat.ts`.
 
 Pruebas:
 
