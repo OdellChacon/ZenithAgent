@@ -194,7 +194,8 @@ export function createOpenAiCompatibleLlm(opts: OpenAiCompatOptions): LlmClient 
           method: 'POST',
           headers: { Authorization: `Bearer ${opts.apiKey}`, 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-          signal: AbortSignal.timeout(opts.timeoutMs ?? 25_000),
+          // Corto a propósito: si un modelo no responde, conviene pasar pronto al de respaldo.
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000),
         });
       } catch (err) {
         throw new LlmHttpError(`No se pudo conectar con el proveedor de IA: ${(err as Error).message}`, null, true);

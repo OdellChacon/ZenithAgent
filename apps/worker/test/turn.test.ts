@@ -39,7 +39,8 @@ const tile = (externalId: string, name: string, attrs: Record<string, unknown>, 
 describe('normalizeTerms', () => {
   it('quita tildes, signos, palabras cortas y la s final', () => {
     // Igual que unaccent() en Postgres: la ñ también pierde la tilde.
-    expect(normalizeTerms('¿Cerámicas de MADERA para el baño?')).toEqual(['ceramica', 'madera', 'para', 'bano']);
+    expect(normalizeTerms('¿Cerámicas de MADERA para el baño?')).toEqual(['ceramica', 'madera', 'bano']);
+    expect(normalizeTerms('algo tipo madera')).toEqual(['madera']);
     expect(normalizeTerms(null)).toEqual([]);
   });
 });

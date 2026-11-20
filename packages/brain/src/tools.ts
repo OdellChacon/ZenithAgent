@@ -59,7 +59,9 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
       properties: {
         texto: {
           type: ['string', 'null'],
-          description: 'Palabras clave: nombre, estilo, color, acabado o tipo (ej. "madera", "mármol", "antideslizante").',
+          description:
+            'Una o dos palabras clave: aspecto (madera, mármol, piedra, cemento), color, acabado o nombre del modelo. ' +
+            'Ej. "madera", "mármol blanco", "antideslizante".',
         },
         categoria: {
           type: ['string', 'null'],
@@ -148,6 +150,10 @@ function presentProduct(p: ProductRow) {
     formato: p.format,
     m2_por_caja: p.area_per_box_m2 !== null ? Number(p.area_per_box_m2) : null,
     piezas_por_caja: p.pieces_per_box,
+    aspecto: a.design ?? null,
+    color: a.color ?? null,
+    coleccion: a.collection ?? null,
+    trafico: a.traffic ?? null,
     superficie: a.surface ?? null,
     acabado: a.finish ?? null,
     uso: a.usage ?? null,
@@ -171,14 +177,29 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
       const parsed = searchInput.safeParse(input);
       if (!parsed.success) return error('Parámetros inválidos para buscar_productos');
       const { texto, categoria, superficie, uso, limite } = parsed.data;
-      const rows = await ctx.catalog.search({
+      const filters = {
         text: texto || null,
         category: categoria || null,
         surface: superficie,
         usage: uso,
         limit: Math.min(Math.max(limite, 1), 8),
+      };
+      const rows = await ctx.catalog.search(filters);
+      if (rows.length) return json({ resultados: rows.length, productos: rows.map(presentProduct) });
+
+      // Sin coincidencias exactas: se aflojan los filtros una vez, para que el modelo tenga
+      // alternativas reales y no repita búsquedas (cada vuelta cuesta tiempo).
+      const relaxed = filters.text
+        ? { ...filters, text: null }
+        : { ...filters, category: null, usage: null };
+      const similar = await ctx.catalog.search(relaxed);
+      return json({
+        resultados: 0,
+        nota:
+          'No hubo coincidencias exactas. Abajo van los productos más parecidos del catálogo: ofréceselos al cliente. ' +
+          'No digas que no hay stock (no conoces el inventario) y no repitas la búsqueda; si nada encaja, ofrece conseguirlo bajo pedido con un asesor.',
+        sugerencias: similar.map(presentProduct),
       });
-      return json({ resultados: rows.length, productos: rows.map(presentProduct) });
     }
 
     case 'calcular_cajas': {

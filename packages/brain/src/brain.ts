@@ -13,7 +13,8 @@ export interface BrainConfig {
 export const DEFAULT_BRAIN_CONFIG: BrainConfig = {
   model: 'claude-opus-5-5',
   effort: 'medium',
-  maxIterations: 6,
+  // Buscar, calcular y responder caben en 3 vueltas; más suele ser el modelo dando vueltas.
+  maxIterations: 4,
   maxTokens: 16_000,
 };
 

@@ -89,6 +89,7 @@ npm run test:all  # también las de integración (usan la BD local de .env)
 - `webhook_events` no tiene tenant: el gateway guarda antes de saber a quién pertenece el evento. El tenant se resuelve en el worker con `resolve_channel_account`, que solo devuelve ids.
 - Si Redis falla después de guardar un evento, el gateway responde 200 igual y el barrido del worker lo reencola.
 - El catálogo se lee de la API pública de la tienda (`/api/v1/store/*`). La tienda no publica precios: `price` queda vacío y el bot deriva los precios a un asesor.
+- La tienda casi no describe sus productos (no dice si una cerámica es tipo madera o mármol). Al sincronizar con `--manufacturer-catalog` (o `CI_CATALOG_PATH`), cada cerámica se cruza con el catálogo de Cerámica Italia que importa ZenithVisualizer y gana aspecto, color, colección y tráfico. Los precios del fabricante no se copian.
 
 ## Cómo responde el bot
 

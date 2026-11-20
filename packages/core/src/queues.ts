@@ -27,7 +27,7 @@ export interface OutboundJobData {
  * Espera antes de responder: agrupa los mensajes seguidos del cliente ("hola" + "¿tienen…?")
  * en un solo turno del bot.
  */
-export const BRAIN_DEBOUNCE_MS = 4000;
+export const BRAIN_DEBOUNCE_MS = 3000;
 
 /** Máximo de intentos de procesar un evento antes de marcarlo como fallido. */
 export const INBOUND_MAX_ATTEMPTS = 5;

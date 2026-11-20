@@ -180,6 +180,23 @@ describe('runBrainTurn', () => {
     expect(calls[0]).not.toHaveProperty('thinking');
   });
 
+  it('sin coincidencias exactas devuelve sugerencias en una sola vuelta', async () => {
+    const { llm, calls } = scriptedLlm([
+      tool('buscar_productos', { texto: 'roble', categoria: null, superficie: 'piso', uso: null, limite: 3 }),
+      text('No tengo ese nombre exacto, pero le sugiero el Aconna Beige.'),
+    ]);
+    const cat = catalog();
+    cat.search.mockImplementationOnce(async () => []);
+    const res = await runBrainTurn({ ...base, llm, messages: customer('¿Tienen roble?'), tools: { catalog: cat, wastePercent: null } });
+    expect(res.outcome).toBe('replied');
+    expect(cat.search).toHaveBeenCalledTimes(2);
+    expect(cat.search.mock.calls[1]?.[0]).toMatchObject({ text: null, surface: 'piso' });
+    const result = JSON.stringify(calls[1]?.messages.at(-1));
+    expect(result).toContain('sugerencias');
+    expect(result).toContain('Aconna Beige');
+    expect(result).toContain('No digas que no hay stock');
+  });
+
   it('limita la cantidad de resultados aunque el modelo pida más', async () => {
     const { llm } = scriptedLlm([
       tool('buscar_productos', { texto: null, categoria: null, superficie: null, uso: null, limite: 500 }),

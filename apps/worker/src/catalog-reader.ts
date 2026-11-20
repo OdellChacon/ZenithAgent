@@ -4,6 +4,12 @@ import { withTenant, type Pool } from '@zenith/db';
 const COLUMNS = `id, name, category, category_name, description, format, area_per_box_m2, pieces_per_box,
                  attributes, price, currency, in_visualizer`;
 
+// Palabras que no describen el producto y solo meten ruido en la búsqueda.
+const STOPWORDS = new Set([
+  'para', 'con', 'que', 'tipo', 'algo', 'busco', 'una', 'uno', 'unos', 'unas', 'los', 'las', 'del', 'por', 'como', 'mas',
+  'tienen', 'tiene', 'quiero', 'parecido', 'estilo', 'color', 'sea', 'muy', 'mi', 'casa',
+]);
+
 /** Minúsculas, sin tildes ni signos: lo mismo que hace unaccent(lower()) del lado de la BD. */
 export function normalizeTerms(text: string | null): string[] {
   if (!text) return [];
@@ -13,7 +19,7 @@ export function normalizeTerms(text: string | null): string[] {
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
-    .filter((w) => w.length >= 3);
+    .filter((w) => w.length >= 3 && !STOPWORDS.has(w));
   // Se quita la "s" final para que "ceramicas" encuentre "ceramica" y viceversa.
   return [...new Set(words.map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w)))].slice(0, 8);
 }
