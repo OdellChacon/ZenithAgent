@@ -1,0 +1,30 @@
+{
+  "name": "zenith-agent",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:all": "node --env-file=.env node_modules/vitest/vitest.mjs run",
+    "db:migrate": "tsx --env-file=.env packages/db/src/cli/migrate.ts",
+    "db:seed-dev": "tsx --env-file=.env packages/db/src/cli/seed-dev.ts",
+    "catalog:sync-imm": "tsx --env-file=.env packages/catalog/src/cli/sync-imm.ts",
+    "dev:gateway": "tsx watch --env-file=.env apps/gateway/src/index.ts",
+    "dev:worker": "tsx watch --env-file=.env apps/worker/src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12"
+  }
+}

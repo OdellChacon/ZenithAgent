@@ -1,0 +1,13 @@
+{
+  "name": "@zenith/db",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@zenith/core": "*",
+    "pg": "^8.23.1"
+  }
+}
