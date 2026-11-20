@@ -38,7 +38,7 @@ const REPLY_STEP = 'reply';
 
 async function latestInboundId(client: PoolClient, conversationId: string): Promise<string | null> {
   const { rows } = await client.query<{ id: string }>(
-    `SELECT id FROM messages WHERE conversation_id = $1 AND direction = 'in' ORDER BY created_at DESC, id DESC LIMIT 1`,
+    `SELECT id FROM messages WHERE conversation_id = $1 AND direction = 'in' ORDER BY created_at DESC, seq DESC LIMIT 1`,
     [conversationId],
   );
   return rows[0]?.id ?? null;
@@ -75,9 +75,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     const tenant = await client.query<{ settings: unknown }>('SELECT settings FROM tenants WHERE id = $1', [job.tenantId]);
     const history = await client.query<HistoryMessage>(
       `SELECT direction, author, type, body FROM (
-         SELECT direction, author, type, body, created_at, id FROM messages
-          WHERE conversation_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2) recent
-        ORDER BY created_at, id`,
+         SELECT direction, author, type, body, created_at, seq FROM messages
+          WHERE conversation_id = $1 ORDER BY created_at DESC, seq DESC LIMIT $2) recent
+        ORDER BY created_at, seq`,
       [job.conversationId, deps.historyLimit ?? 30],
     );
     return { channel: row.channel, recipient: row.recipient, settings: tenant.rows[0]?.settings, history: history.rows };
