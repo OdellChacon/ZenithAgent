@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import pg from 'pg';
-import { encryptCredentials, parseMasterKey } from '@zenith/core';
+import { encryptCredentials, hashPassword, parseMasterKey } from '@zenith/core';
 
 /**
  * Crea o actualiza el tenant de Inversiones Mora Mora (config/tenants/inversiones-mora-mora.json)
@@ -59,8 +59,26 @@ try {
     ]);
   }
 
+  // Usuario del panel para desarrollo (correo y contraseña en .env, nunca en el repo).
+  const panelEmail = process.env.DEV_PANEL_EMAIL?.trim().toLowerCase();
+  const panelPassword = process.env.DEV_PANEL_PASSWORD;
+  let panelNote = ' Sin usuario del panel (define DEV_PANEL_EMAIL y DEV_PANEL_PASSWORD).';
+  if (panelEmail && panelPassword) {
+    const user = await client.query<{ id: string }>(
+      `INSERT INTO users (email, name, password_hash) VALUES ($1, 'Asesor de prueba', $2)
+       ON CONFLICT ((lower(email))) DO UPDATE SET password_hash = EXCLUDED.password_hash
+       RETURNING id`,
+      [panelEmail, await hashPassword(panelPassword)],
+    );
+    await client.query(
+      `INSERT INTO memberships (user_id, tenant_id, role) VALUES ($1, $2, 'owner') ON CONFLICT (user_id, tenant_id) DO NOTHING`,
+      [user.rows[0]!.id, tenantId],
+    );
+    panelNote = ` Usuario del panel listo: ${panelEmail}.`;
+  }
+
   await client.query('COMMIT');
-  console.log(`Tenant listo: ${tenantId}${accessToken ? ' (con credenciales de WhatsApp cifradas)' : ' (sin credenciales de envío)'}`);
+  console.log(`Tenant listo: ${tenantId}${accessToken ? ' (con credenciales de WhatsApp cifradas)' : ' (sin credenciales de envío)'}.${panelNote}`);
 } catch (err) {
   await client.query('ROLLBACK').catch(() => undefined);
   console.error((err as Error).message);

@@ -10,7 +10,7 @@
     "node": ">=20.6"
   },
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p apps/panel/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:all": "node --env-file=.env node_modules/vitest/vitest.mjs run",
@@ -19,10 +19,15 @@
     "catalog:sync-imm": "tsx --env-file=.env packages/catalog/src/cli/sync-imm.ts",
     "dev:gateway": "tsx watch --env-file=.env apps/gateway/src/index.ts",
     "dev:worker": "tsx watch --env-file=.env apps/worker/src/index.ts",
-    "dev:sim": "tsx watch --env-file=.env apps/simulator/src/index.ts"
+    "dev:sim": "tsx watch --env-file=.env apps/simulator/src/index.ts",
+    "dev:api": "tsx watch --env-file=.env apps/api/src/index.ts",
+    "dev:panel": "npm run dev -w @zenith/panel",
+    "build:panel": "npm run build -w @zenith/panel",
+    "user:create": "tsx --env-file=.env apps/api/src/cli/create-user.ts"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
+    "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.23.1",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3",

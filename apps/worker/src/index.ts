@@ -7,9 +7,12 @@ import {
   INBOUND_MAX_ATTEMPTS,
   parseMasterKey,
   QUEUES,
+  tenantEventsChannel,
   type BrainJobData,
   type InboundJobData,
+  type NotifyJobData,
   type OutboundJobData,
+  type PanelEvent,
 } from '@zenith/core';
 import {
   createAnthropicLlm,
@@ -24,6 +27,8 @@ import { createPool, reclaimStaleWebhookEvents } from '@zenith/db';
 import { processBrainJob } from './brain-job.js';
 import { processInboundEvent } from './inbound.js';
 import { processOutbound } from './outbound.js';
+import { processNotifyJob } from './notify.js';
+import { createLogMailer, createSmtpMailer } from './mailer.js';
 
 const env = z
   .object({
@@ -43,6 +48,14 @@ const env = z
     AI_BASE_URL: z.string().url().optional(),
     AI_API_KEY: z.string().optional(),
     AI_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
+    // Avisos a los asesores.
+    PANEL_URL: z.string().url().default('http://localhost:5180'),
+    SMTP_HOST: z.string().optional(),
+    SMTP_PORT: z.coerce.number().int().min(1).max(65535).default(587),
+    SMTP_SECURE: z.enum(['true', 'false']).default('false'),
+    SMTP_USER: z.string().optional(),
+    SMTP_PASS: z.string().optional(),
+    SMTP_FROM: z.string().optional(),
     WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(64).default(8),
     LOG_LEVEL: z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace']).default('info'),
   })
@@ -93,12 +106,39 @@ const connection = new Redis(env.REDIS_URL, { maxRetriesPerRequest: null });
 const inboundQueue = new Queue<InboundJobData>(QUEUES.inbound, { connection });
 const brainQueue = new Queue<BrainJobData>(QUEUES.brain, { connection });
 const outboundQueue = new Queue<OutboundJobData>(QUEUES.outbound, { connection });
+const notifyQueue = new Queue<NotifyJobData>(QUEUES.notify, { connection });
+
+// Conexión aparte para publicar eventos al panel (las de BullMQ quedan bloqueadas esperando jobs).
+const publisher = new Redis(env.REDIS_URL, { maxRetriesPerRequest: 3 });
+async function publish(tenantId: string, event: PanelEvent) {
+  try {
+    await publisher.publish(tenantEventsChannel(tenantId), JSON.stringify(event));
+  } catch (err) {
+    // El panel en vivo es un extra: si falla, el asesor igual ve todo al recargar.
+    log.warn({ err: (err as Error).message }, 'no se pudo publicar un evento al panel');
+  }
+}
+
+const mailer = env.SMTP_HOST
+  ? createSmtpMailer({
+      host: env.SMTP_HOST,
+      port: env.SMTP_PORT,
+      secure: env.SMTP_SECURE === 'true',
+      ...(env.SMTP_USER ? { user: env.SMTP_USER } : {}),
+      ...(env.SMTP_PASS ? { pass: env.SMTP_PASS } : {}),
+      from: env.SMTP_FROM ?? env.SMTP_USER ?? 'ZenithAgent <no-reply@localhost>',
+    })
+  : createLogMailer((msg, data) => log.warn(data, msg));
+if (!env.SMTP_HOST) log.warn('SMTP no configurado: los avisos por correo a los asesores solo quedan en el log');
 
 const inboundWorker = new Worker<InboundJobData>(
   QUEUES.inbound,
   async (job) => {
     const outcome = await processInboundEvent(pool, job.data.webhookEventId);
     log.info({ webhookEventId: job.data.webhookEventId, outcome: outcome.result }, 'evento procesado');
+    if (outcome.result === 'message' && !outcome.duplicate) {
+      await publish(outcome.tenantId, { type: 'message.new', conversationId: outcome.conversationId, direction: 'in', author: 'customer' });
+    }
     if (outcome.result === 'message' && !outcome.duplicate && outcome.mode === 'bot') {
       // La espera agrupa ráfagas de mensajes; si llega otro, este turno se descarta solo.
       await brainQueue.add(
@@ -131,10 +171,30 @@ const brainWorker = new Worker<BrainJobData>(
         { tenantId: job.data.tenantId, outboundMessageIds: outcome.outboundMessageIds },
         { jobId: outcome.outboundMessageId, attempts: 5, backoff: { type: 'exponential', delay: 3000 }, removeOnComplete: 1000 },
       );
+      const { tenantId, conversationId } = job.data;
+      await publish(tenantId, { type: 'message.new', conversationId, direction: 'out', author: 'bot' });
+      if (outcome.handoffId) {
+        await publish(tenantId, { type: 'handoff.requested', conversationId, reason: 'nuevo' });
+        await notifyQueue.add(
+          'handoff',
+          { tenantId, conversationId, handoffId: outcome.handoffId },
+          { jobId: outcome.handoffId, attempts: 5, backoff: { type: 'exponential', delay: 10_000 }, removeOnComplete: 1000 },
+        );
+      }
     }
     return outcome;
   },
   { connection, concurrency: env.WORKER_CONCURRENCY },
+);
+
+const notifyWorker = new Worker<NotifyJobData>(
+  QUEUES.notify,
+  async (job) => {
+    const outcome = await processNotifyJob({ pool, mailer, panelUrl: env.PANEL_URL }, job.data);
+    log.info({ handoffId: job.data.handoffId, outcome }, 'aviso a asesores');
+    return outcome;
+  },
+  { connection, concurrency: 2 },
 );
 
 const outboundWorker = new Worker<OutboundJobData>(
@@ -159,6 +219,7 @@ for (const [name, worker] of [
   ['inbound', inboundWorker],
   ['brain', brainWorker],
   ['outbound', outboundWorker],
+  ['notify', notifyWorker],
 ] as const) {
   worker.on('failed', (job, err) => log.error({ queue: name, jobId: job?.id, attempts: job?.attemptsMade, err: err.message }, 'falló un job'));
 }
@@ -188,9 +249,10 @@ void sweep();
 
 const shutdown = async () => {
   clearInterval(sweepTimer);
-  await Promise.all([inboundWorker.close(), brainWorker.close(), outboundWorker.close()]);
-  await Promise.all([inboundQueue.close(), brainQueue.close(), outboundQueue.close()]);
+  await Promise.all([inboundWorker.close(), brainWorker.close(), outboundWorker.close(), notifyWorker.close()]);
+  await Promise.all([inboundQueue.close(), brainQueue.close(), outboundQueue.close(), notifyQueue.close()]);
   connection.disconnect();
+  publisher.disconnect();
   await pool.end();
   process.exit(0);
 };

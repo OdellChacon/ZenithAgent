@@ -16,7 +16,8 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 | Sincronización del catálogo de la tienda de Mora Mora | Hecho |
 | Cerebro con IA: búsqueda en catálogo, cálculo de cajas, pase a asesor | Hecho |
 | Envío de respuestas por WhatsApp respetando la ventana de 24 h | Hecho |
-| Panel para asesores (tomar conversaciones derivadas) | Pendiente |
+| Panel para asesores: bandeja, tomar, responder, devolver al bot | Hecho |
+| Avisos al derivar: en vivo en el panel (sonido y notificación) y por correo | Hecho |
 | Visión (identificar piezas por foto) y cotización en PDF | Pendiente (F1.5) |
 | Plantillas de WhatsApp y seguimiento fuera de 24 h | Pendiente |
 
@@ -26,6 +27,8 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 apps/
   gateway/        Recibe webhooks: firma, guarda una sola vez, encola, responde 200
   simulator/      Chat de prueba local que hace de cliente y de Meta
+  api/            API del panel de asesores (sesiones, bandeja, respuestas, eventos en vivo)
+  panel/          Panel de asesores (React + Vite)
   worker/         Tres colas: entrada (contacto, conversación, mensaje), cerebro (turno del bot) y salida (envío)
 config/tenants/   Perfil de cada negocio (datos que el bot conoce; lo que falta va en null)
 packages/
@@ -63,6 +66,20 @@ npm run dev:sim     # abre http://localhost:4010
 ```
 
 Por dentro el canal siempre es WhatsApp; Instagram y Messenger solo cambian la apariencia hasta que existan sus conectores.
+
+### Panel de asesores
+
+```bash
+npm run dev:api     # API en :3100
+npm run dev:panel   # panel en http://localhost:5180
+```
+
+- Usuario de desarrollo: `DEV_PANEL_EMAIL` y `DEV_PANEL_PASSWORD` en `.env`, creado por `npm run db:seed-dev`.
+- Otros usuarios: `npm run user:create -- --tenant-id <uuid> --email ana@negocio.com --name "Ana" [--role agent|admin|owner]` (imprime una contraseña temporal una sola vez).
+- Cuando el bot deriva, el panel avisa en vivo (sonido, contador en la pestaña y notificación del sistema si se activan los avisos) y el worker manda un correo a los asesores con el resumen y el enlace. Sin `SMTP_HOST` el correo solo queda en el log.
+- El asesor toma la conversación (el bot se calla), responde desde el panel mientras la ventana de 24 h esté abierta, y al terminar la devuelve al bot o la cierra.
+- Seguridad: contraseñas con scrypt, sesiones con cookie `HttpOnly` + `SameSite=Strict` (solo el hash del token en la BD), cabecera `x-zenith-csrf` obligatoria en los cambios, límite de intentos de login por correo y por IP, y RLS por negocio en todos los datos.
+- En producción, `npm run build:panel` y la API sirve el panel compilado.
 
 ### Proveedor de IA
 

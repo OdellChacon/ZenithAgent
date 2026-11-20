@@ -5,6 +5,7 @@ export const QUEUES = {
   inbound: 'inbound',
   brain: 'brain',
   outbound: 'outbound',
+  notify: 'notify',
 } as const;
 
 export interface InboundJobData {

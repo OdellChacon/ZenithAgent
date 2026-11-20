@@ -23,5 +23,7 @@
     "apps/*/src",
     "apps/*/test",
     "vitest.config.ts"
-  ]
+  ],
+  // El panel (React, navegador) tiene su propio tsconfig.
+  "exclude": ["apps/panel"]
 }

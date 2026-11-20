@@ -1,0 +1,226 @@
+import { randomUUID } from 'node:crypto';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type pg from 'pg';
+import type { PanelEvent } from '@zenith/core';
+import type { Pool } from '@zenith/db';
+import { buildApi } from '../src/server.js';
+import { hashPassword, verifyPassword } from '@zenith/core';
+import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
+
+describe('contraseñas', () => {
+  it('verifica la contraseña correcta y rechaza otras', async () => {
+    const hash = await hashPassword('una-clave-larga');
+    expect(hash).toMatch(/^scrypt\$32768\$8\$1\$/);
+    expect(await verifyPassword('una-clave-larga', hash)).toBe(true);
+    expect(await verifyPassword('otra-clave-larga', hash)).toBe(false);
+    expect(await verifyPassword('x', 'formato-raro')).toBe(false);
+  });
+
+  it('exige un largo mínimo', async () => {
+    await expect(hashPassword('corta')).rejects.toThrow('al menos');
+  });
+});
+
+describe.skipIf(!hasDb)('API del panel', () => {
+  let owner: pg.Pool;
+  let pool: Pool;
+  let t: Awaited<ReturnType<typeof seedTenant>>;
+  let other: Awaited<ReturnType<typeof seedTenant>>;
+  const run = randomUUID().slice(0, 8);
+  const PASSWORD = 'clave-de-prueba-123';
+  const users: Record<'ana' | 'beto' | 'admin' | 'ajeno', { id: string; email: string }> = {} as never;
+  const enqueued: { tenantId: string; ids: string[] }[] = [];
+  const published: PanelEvent[] = [];
+  let app: ReturnType<typeof buildApi>;
+
+  const headers = (cookie?: string, csrf = true) => ({ ...(cookie ? { cookie } : {}), ...(csrf ? { 'x-zenith-csrf': '1' } : {}) });
+
+  async function login(email: string, password = PASSWORD) {
+    const res = await app.inject({ method: 'POST', url: '/api/v1/auth/login', headers: headers(), payload: { email, password } });
+    const set = res.headers['set-cookie'];
+    const cookie = (Array.isArray(set) ? set[0] : set)?.split(';')[0];
+    return { res, cookie: cookie ?? '' };
+  }
+
+  async function seedConversation(tenantId: string, channelAccountId: string, opts: { hoursSinceInbound?: number; name?: string } = {}) {
+    const contact = await owner.query<{ id: string }>('INSERT INTO contacts (tenant_id, name, phone) VALUES ($1, $2, $3) RETURNING id', [
+      tenantId,
+      opts.name ?? 'Carla Prueba',
+      '584141119999',
+    ]);
+    await owner.query(`INSERT INTO contact_identities (tenant_id, contact_id, channel, external_user_id) VALUES ($1, $2, 'whatsapp', $3)`, [
+      tenantId,
+      contact.rows[0]!.id,
+      `5841411${Math.floor(Math.random() * 1e5)}`,
+    ]);
+    const lastInbound = new Date(Date.now() - (opts.hoursSinceInbound ?? 0.1) * 3_600_000);
+    const conv = await owner.query<{ id: string }>(
+      `INSERT INTO conversations (tenant_id, contact_id, channel_account_id, mode, last_inbound_at, window_expires_at)
+       VALUES ($1, $2, $3, 'human', $4, $5) RETURNING id`,
+      [tenantId, contact.rows[0]!.id, channelAccountId, lastInbound, new Date(lastInbound.getTime() + 24 * 3_600_000)],
+    );
+    const id = conv.rows[0]!.id;
+    await owner.query(`INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body) VALUES ($1, $2, 'in', 'customer', 'text', '¿Precio del Aconna?')`, [
+      tenantId,
+      id,
+    ]);
+    await owner.query(`INSERT INTO handoffs (tenant_id, conversation_id, reason, summary) VALUES ($1, $2, 'precio', 'Pide precio del Aconna Beige.')`, [
+      tenantId,
+      id,
+    ]);
+    return id;
+  }
+
+  beforeAll(async () => {
+    ({ owner, app: pool } = await setupDb());
+    t = await seedTenant(owner, 'panel');
+    other = await seedTenant(owner, 'panel-otro');
+    const hash = await hashPassword(PASSWORD);
+    for (const [key, tenantId, role] of [
+      ['ana', t.tenantId, 'agent'],
+      ['beto', t.tenantId, 'agent'],
+      ['admin', t.tenantId, 'admin'],
+      ['ajeno', other.tenantId, 'agent'],
+    ] as const) {
+      const email = `${key}-${run}@prueba.test`;
+      const u = await owner.query<{ id: string }>('INSERT INTO users (email, name, password_hash) VALUES ($1, $2, $3) RETURNING id', [email, key, hash]);
+      await owner.query('INSERT INTO memberships (user_id, tenant_id, role) VALUES ($1, $2, $3)', [u.rows[0]!.id, tenantId, role]);
+      users[key] = { id: u.rows[0]!.id, email };
+    }
+    app = buildApi({
+      pool,
+      secureCookies: false,
+      enqueueOutbound: async (tenantId, ids) => void enqueued.push({ tenantId, ids }),
+      publish: async (_tenantId, event) => void published.push(event),
+      subscribe: async () => async () => undefined,
+    });
+  });
+
+  afterAll(async () => {
+    if (owner) {
+      await owner.query('DELETE FROM users WHERE id = ANY($1)', [Object.values(users).map((u) => u.id)]);
+      await owner.query('DELETE FROM tenants WHERE id = ANY($1)', [[t?.tenantId, other?.tenantId].filter(Boolean)]);
+      await owner.end();
+    }
+    await pool?.end();
+  });
+
+  it('inicia sesión con cookie segura y rechaza credenciales malas sin decir cuál falló', async () => {
+    const ok = await login(users.ana.email);
+    expect(ok.res.statusCode).toBe(200);
+    const cookie = String(ok.res.headers['set-cookie']);
+    expect(cookie).toContain('HttpOnly');
+    expect(cookie).toContain('SameSite=Strict');
+
+    const bad = await login(users.ana.email, 'otra-clave-equivocada');
+    const unknown = await login(`nadie-${run}@prueba.test`);
+    expect(bad.res.statusCode).toBe(401);
+    expect(unknown.res.statusCode).toBe(401);
+    expect(bad.res.json().error.message).toBe(unknown.res.json().error.message);
+  });
+
+  it('bloquea tras muchos intentos fallidos', async () => {
+    const email = `fuerza-${run}@prueba.test`;
+    for (let i = 0; i < 10; i++) await login(email, 'mala-clave-0000');
+    expect((await login(email, 'mala-clave-0000')).res.statusCode).toBe(429);
+  });
+
+  it('exige sesión y la cabecera de seguridad en los cambios', async () => {
+    expect((await app.inject({ method: 'GET', url: '/api/v1/conversations' })).statusCode).toBe(401);
+    const { cookie } = await login(users.ana.email);
+    const id = await seedConversation(t.tenantId, t.channelAccountId);
+    const noCsrf = await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(cookie, false) });
+    expect(noCsrf.statusCode).toBe(403);
+  });
+
+  it('muestra los derivados en Pendientes y un asesor de otro negocio no los ve', async () => {
+    const id = await seedConversation(t.tenantId, t.channelAccountId, { name: 'Cliente Pendiente' });
+    const { cookie } = await login(users.ana.email);
+    const list = await app.inject({ method: 'GET', url: '/api/v1/conversations?view=pending', headers: headers(cookie) });
+    const item = list.json().items.find((i: { id: string }) => i.id === id);
+    expect(item).toMatchObject({ contactName: 'Cliente Pendiente', mode: 'human', assignedTo: null, handoff: { reason: 'precio' } });
+
+    const ajeno = await login(users.ajeno.email);
+    const otherList = await app.inject({ method: 'GET', url: '/api/v1/conversations?view=all', headers: headers(ajeno.cookie) });
+    expect(otherList.json().items.map((i: { id: string }) => i.id)).not.toContain(id);
+    expect((await app.inject({ method: 'GET', url: `/api/v1/conversations/${id}`, headers: headers(ajeno.cookie) })).statusCode).toBe(404);
+    expect((await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(ajeno.cookie) })).statusCode).toBe(404);
+  });
+
+  it('tomar, responder y devolver al bot', async () => {
+    const id = await seedConversation(t.tenantId, t.channelAccountId);
+    const ana = await login(users.ana.email);
+    const beto = await login(users.beto.email);
+    const admin = await login(users.admin.email);
+
+    // Sin tomarla no se puede responder.
+    const early = await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/messages`, headers: headers(ana.cookie), payload: { text: 'Hola' } });
+    expect(early.json().error.code).toBe('not_assigned');
+
+    expect((await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(ana.cookie) })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(beto.cookie) })).statusCode).toBe(409);
+    expect(published).toContainEqual({ type: 'conversation.updated', conversationId: id });
+
+    const clientId = randomUUID();
+    const send = () =>
+      app.inject({
+        method: 'POST',
+        url: `/api/v1/conversations/${id}/messages`,
+        headers: headers(ana.cookie),
+        payload: { text: 'Buenas tardes, le envío la cotización.', clientId },
+      });
+    expect((await send()).statusCode).toBe(200);
+    expect((await send()).statusCode).toBe(200); // doble clic: no duplica
+    expect(enqueued.filter((e) => e.tenantId === t.tenantId)).toHaveLength(1);
+
+    const { rows } = await owner.query(
+      `SELECT m.author, m.sent_by_user_id, o.payload FROM messages m JOIN outbound_messages o ON o.message_id = m.id WHERE m.conversation_id = $1`,
+      [id],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ author: 'agent', sent_by_user_id: users.ana.id, payload: { kind: 'text', author: 'agent' } });
+
+    const detail = await app.inject({ method: 'GET', url: `/api/v1/conversations/${id}`, headers: headers(ana.cookie) });
+    expect(detail.json()).toMatchObject({ assignedTo: { id: users.ana.id }, window: { state: 'FREE' }, handoff: { reason: 'precio' } });
+    expect(detail.json().messages.at(-1)).toMatchObject({ author: 'agent', sentBy: 'ana', delivery: 'queued' });
+
+    // Otro asesor no puede devolverla; un administrador sí.
+    const finish = (cookie: string) =>
+      app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/finish`, headers: headers(cookie), payload: { action: 'release' } });
+    expect((await finish(beto.cookie)).statusCode).toBe(403);
+    expect((await finish(admin.cookie)).statusCode).toBe(200);
+    const state = await owner.query('SELECT c.mode, c.assigned_user_id, h.taken_by, h.returned_at FROM conversations c JOIN handoffs h ON h.conversation_id = c.id WHERE c.id = $1', [id]);
+    expect(state.rows[0]).toMatchObject({ mode: 'bot', assigned_user_id: null, taken_by: users.ana.id });
+    expect(state.rows[0].returned_at).not.toBeNull();
+  });
+
+  it('no deja escribir texto libre con la ventana de 24 h cerrada', async () => {
+    const id = await seedConversation(t.tenantId, t.channelAccountId, { hoursSinceInbound: 30 });
+    const { cookie } = await login(users.ana.email);
+    await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(cookie) });
+    const res = await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/messages`, headers: headers(cookie), payload: { text: 'Hola' } });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().error.code).toBe('window_closed');
+  });
+
+  it('cerrar la sesión invalida la cookie', async () => {
+    const { cookie } = await login(users.ana.email);
+    expect((await app.inject({ method: 'POST', url: '/api/v1/auth/logout', headers: headers(cookie) })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: headers(cookie) })).statusCode).toBe(401);
+  });
+
+  it('devuelve los datos del usuario y su negocio', async () => {
+    const { cookie } = await login(users.admin.email);
+    const me = await app.inject({ method: 'GET', url: '/api/v1/auth/me', headers: headers(cookie) });
+    expect(me.json()).toMatchObject({ id: users.admin.id, role: 'admin', tenant: { id: t.tenantId } });
+  });
+
+  it('valida los ids y el texto', async () => {
+    const { cookie } = await login(users.ana.email);
+    expect((await app.inject({ method: 'GET', url: '/api/v1/conversations/no-es-uuid', headers: headers(cookie) })).statusCode).toBe(404);
+    const id = await seedConversation(t.tenantId, t.channelAccountId);
+    await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(cookie) });
+    const empty = await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/messages`, headers: headers(cookie), payload: { text: '   ' } });
+    expect(empty.statusCode).toBe(400);
+  });
+});
