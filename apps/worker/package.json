@@ -7,6 +7,8 @@
     ".": "./src/inbound.ts"
   },
   "dependencies": {
+    "@zenith/brain": "*",
+    "@zenith/channel-whatsapp": "*",
     "@zenith/core": "*",
     "@zenith/db": "*",
     "bullmq": "^5.81.5",

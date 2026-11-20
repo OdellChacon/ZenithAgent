@@ -13,9 +13,13 @@ export interface WhatsAppSendConfig {
   graphApiVersion: string;
   phoneNumberId: string;
   accessToken: string;
+  /** Solo para pruebas locales contra un simulador. Por defecto, Graph API de Meta. */
+  graphBaseUrl?: string;
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
+
+const DEFAULT_GRAPH_BASE_URL = 'https://graph.facebook.com';
 
 export type SendResult =
   | { ok: true; externalMessageId: string }
@@ -35,7 +39,11 @@ export async function sendWhatsAppText(config: WhatsAppSendConfig, to: string, b
   if (text.length > WHATSAPP_MAX_TEXT_LENGTH) throw new WhatsAppSendError('El mensaje supera el largo máximo');
 
   const doFetch = config.fetch ?? fetch;
-  const url = `https://graph.facebook.com/${config.graphApiVersion}/${encodeURIComponent(config.phoneNumberId)}/messages`;
+  const base = new URL(config.graphBaseUrl ?? DEFAULT_GRAPH_BASE_URL);
+  if (base.protocol !== 'https:' && base.hostname !== 'localhost' && base.hostname !== '127.0.0.1') {
+    throw new WhatsAppSendError('La URL de Graph API debe usar https');
+  }
+  const url = new URL(`/${config.graphApiVersion}/${encodeURIComponent(config.phoneNumberId)}/messages`, base).toString();
 
   let res: Response;
   try {

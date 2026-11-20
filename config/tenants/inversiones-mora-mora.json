@@ -1,0 +1,35 @@
+{
+  "name": "Inversiones Mora Mora",
+  "slug": "inversiones-mora-mora",
+  "timezone": "America/Caracas",
+  "currency": "USD",
+  "locale": "es",
+  "settings": {
+    "catalog": {
+      "source": "imm_store",
+      "baseUrl": "https://inversionesmoramora.com"
+    },
+    "business": {
+      "name": "Inversiones Mora Mora",
+      "description": "Centro de inspiración en San Cristóbal (Táchira, Venezuela) con cerámicas, ceranattos, porcelanato, sanitarios, lavamanos, muebles de baño y grama artificial de alta gama. Acompañan cada proyecto del cliente, del boceto al último detalle, con servicio personalizado.",
+      "address": "Av. 19 de Abril, Casa 6-85, Sector La Concordia, San Cristóbal, Táchira.",
+      "phones": ["+58 414-7110965", "0276-3471346"],
+      "email": "centrodeinspiracionimm@gmail.com",
+      "instagram": "@inversionesmoramora",
+      "website": "https://inversionesmoramora.com",
+      "hours": null,
+      "paymentMethods": null,
+      "delivery": null,
+      "specialOrders": "Si un producto no está en el catálogo, el negocio lo puede conseguir bajo pedido para el proyecto del cliente; un asesor lo gestiona.",
+      "visualizer": {
+        "name": "IMM Visualizer",
+        "description": "App gratuita para Android: el cliente sube una foto de su espacio y ve al instante cómo luce cada acabado en paredes y pisos, antes de comprar.",
+        "url": "https://inversionesmoramora.com/#visualizador"
+      },
+      "notes": []
+    },
+    "boxes": {
+      "wastePercent": null
+    }
+  }
+}

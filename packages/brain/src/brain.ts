@@ -1,0 +1,149 @@
+import type Anthropic from '@anthropic-ai/sdk';
+import type { BetaMessageParam, LlmClient } from './llm.js';
+import { TOOL_DEFINITIONS, runTool, type HandoffReason, type ToolContext, type ToolEffects } from './tools.js';
+import { checkReply } from './validate.js';
+
+export interface BrainConfig {
+  model: string;
+  effort: 'low' | 'medium' | 'high';
+  maxIterations: number;
+  maxTokens: number;
+}
+
+export const DEFAULT_BRAIN_CONFIG: BrainConfig = {
+  model: 'claude-opus-5-5',
+  effort: 'medium',
+  maxIterations: 6,
+  maxTokens: 16_000,
+};
+
+export type BrainOutcome = 'replied' | 'handoff' | 'blocked_by_validator' | 'refusal' | 'error';
+
+export interface BrainResult {
+  outcome: BrainOutcome;
+  /** Texto a enviar al cliente (siempre hay uno, aunque sea el mensaje de respaldo). */
+  reply: string;
+  handoff: { reason: HandoffReason | 'seguridad' | 'error'; summary: string } | null;
+  usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
+  iterations: number;
+  stopReason: string | null;
+  model: string;
+  error?: string;
+}
+
+export const FALLBACK_REPLY =
+  'Gracias por escribirnos. Un asesor de nuestro equipo continuará la atención en breve para ayudarle con su consulta.';
+
+/**
+ * Un turno del bot: el modelo conversa con las herramientas del catálogo hasta tener una
+ * respuesta final. Si algo sale mal (límite de iteraciones, rechazo, respuesta con precios),
+ * no se improvisa: se responde con el mensaje de respaldo y se deriva a un asesor.
+ */
+export async function runBrainTurn(params: {
+  llm: LlmClient;
+  system: string;
+  messages: BetaMessageParam[];
+  tools: ToolContext;
+  config?: Partial<BrainConfig>;
+}): Promise<BrainResult> {
+  const config = { ...DEFAULT_BRAIN_CONFIG, ...params.config };
+  const messages = [...params.messages];
+  const effects: ToolEffects = { handoff: null };
+  const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
+  let iterations = 0;
+  let stopReason: string | null = null;
+  let model = config.model;
+
+  const fail = (outcome: BrainOutcome, summary: string, error?: string): BrainResult => ({
+    outcome,
+    reply: FALLBACK_REPLY,
+    handoff: effects.handoff ?? { reason: outcome === 'refusal' ? 'seguridad' : 'error', summary },
+    usage,
+    iterations,
+    stopReason,
+    model,
+    ...(error ? { error } : {}),
+  });
+
+  if (!messages.length) return fail('error', 'Conversación sin mensajes del cliente');
+
+  while (iterations < config.maxIterations) {
+    iterations++;
+    const response = await params.llm.create({
+      model: config.model,
+      max_tokens: config.maxTokens,
+      // Claude Opus 5.5 piensa de forma adaptativa por defecto; el esfuerzo controla cuánto.
+      output_config: { effort: config.effort },
+      // Si el modelo rechaza por un filtro de seguridad, la API reintenta con el modelo de respaldo.
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      // El prompt de sistema y las herramientas son estables por tenant: se cachean.
+      cache_control: { type: 'ephemeral' },
+      system: params.system,
+      tools: TOOL_DEFINITIONS,
+      messages,
+    });
+
+    model = response.model;
+    stopReason = response.stop_reason;
+    usage.inputTokens += response.usage.input_tokens;
+    usage.outputTokens += response.usage.output_tokens;
+    usage.cacheReadTokens += response.usage.cache_read_input_tokens ?? 0;
+
+    if (response.stop_reason === 'refusal') {
+      return fail('refusal', 'El modelo rechazó responder esta conversación');
+    }
+
+    // Se devuelve el contenido completo (incluidos los bloques de pensamiento) sin tocarlo.
+    messages.push({ role: 'assistant', content: response.content as Anthropic.Beta.BetaContentBlockParam[] });
+
+    if (response.stop_reason === 'pause_turn') continue;
+
+    const toolUses = response.content.filter((b): b is Anthropic.Beta.BetaToolUseBlock => b.type === 'tool_use');
+
+    if (response.stop_reason === 'tool_use' && toolUses.length) {
+      const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+      for (const call of toolUses) {
+        let outcome;
+        try {
+          outcome = await runTool(call.name, call.input, params.tools, effects);
+        } catch {
+          // Un fallo de BD en una herramienta no tumba el turno: el modelo recibe el error y deriva.
+          outcome = { content: JSON.stringify({ error: 'Error interno de la herramienta' }), isError: true };
+        }
+        results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.content, is_error: outcome.isError });
+      }
+      // Todos los resultados van juntos en un único mensaje.
+      messages.push({ role: 'user', content: results });
+      continue;
+    }
+
+    if (response.stop_reason === 'max_tokens') return fail('error', 'La respuesta superó el límite de tokens');
+
+    const text = response.content
+      .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
+      .map((b) => b.text)
+      .join('\n')
+      .trim();
+
+    const check = checkReply(text);
+    if (!check.ok) {
+      return {
+        ...fail('blocked_by_validator', `Respuesta bloqueada por el validador (${check.reason})`),
+        error: check.reason,
+      };
+    }
+
+    return {
+      outcome: effects.handoff ? 'handoff' : 'replied',
+      reply: check.text,
+      handoff: effects.handoff,
+      usage,
+      iterations,
+      stopReason,
+      model,
+    };
+  }
+
+  return fail('error', 'Se alcanzó el máximo de iteraciones con herramientas');
+}

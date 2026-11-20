@@ -10,7 +10,15 @@ import {
 } from '@zenith/db';
 
 export type InboundOutcome =
-  | { result: 'message'; tenantId: string; conversationId: string; messageId: string; duplicate: boolean }
+  | {
+      result: 'message';
+      tenantId: string;
+      conversationId: string;
+      messageId: string;
+      duplicate: boolean;
+      /** Modo de la conversación: solo en 'bot' responde la IA. */
+      mode: 'bot' | 'human';
+    }
   | { result: 'status'; tenantId: string; updated: number }
   | { result: 'ignored'; reason: string }
   | { result: 'failed'; reason: string }
@@ -108,16 +116,17 @@ async function storeMessage(
 
   // La ventana se mide desde el último mensaje del usuario, aunque lleguen desordenados.
   const occurredAt = new Date(event.occurredAt);
-  await client.query(
+  const updated = await client.query<{ mode: 'bot' | 'human' }>(
     `UPDATE conversations
         SET last_inbound_at = GREATEST(COALESCE(last_inbound_at, $2), $2),
             window_expires_at = GREATEST(COALESCE(window_expires_at, $3), $3),
             updated_at = now()
-      WHERE id = $1`,
+      WHERE id = $1
+      RETURNING mode`,
     [conversationId, occurredAt, windowExpiresAt(occurredAt)],
   );
 
-  return { result: 'message', tenantId, conversationId, messageId, duplicate };
+  return { result: 'message', tenantId, conversationId, messageId, duplicate, mode: updated.rows[0]!.mode };
 }
 
 async function upsertContact(
