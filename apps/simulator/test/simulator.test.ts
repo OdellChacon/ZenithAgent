@@ -121,6 +121,47 @@ describe('simulador: papel de Meta', () => {
     expect(res.statusCode).toBe(400);
   });
 
+  it('el cliente manda una foto: el webhook lleva su id y se baja como en la Graph API', async () => {
+    const { app, sent } = setup();
+    const form = new FormData();
+    form.append('from', '584141234567');
+    form.append('name', 'Ana');
+    form.append('caption', '¿Tienen algo así?');
+    form.append('file', new Blob([new Uint8Array([0xff, 0xd8, 0xff, 0xd9])], { type: 'image/jpeg' }), 'foto.jpg');
+    const req = new Request('http://x', { method: 'POST', body: form });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/send-image',
+      headers: { 'content-type': req.headers.get('content-type')! },
+      payload: Buffer.from(await req.arrayBuffer()),
+    });
+    expect(res.statusCode).toBe(200);
+    const [event] = parseWhatsAppWebhook(JSON.parse(sent[0]!.body));
+    expect(event).toMatchObject({ kind: 'message', text: '¿Tienen algo así?', media: [{ type: 'image', mimeType: 'image/jpeg' }] });
+    const mediaId = (event as { media: { externalMediaId: string }[] }).media[0]!.externalMediaId;
+
+    expect((await app.inject({ method: 'GET', url: `/v21.0/${mediaId}` })).statusCode).toBe(401);
+    const info = await app.inject({ method: 'GET', url: `/v21.0/${mediaId}`, headers: { authorization: 'Bearer t', host: 'localhost:4010' } });
+    expect(info.json()).toMatchObject({ url: `http://localhost:4010/sim-media/${mediaId}`, mime_type: 'image/jpeg', file_size: 4 });
+  });
+
+  it('rechaza fotos del cliente sin número válido', async () => {
+    const { app, gateway } = setup();
+    const form = new FormData();
+    form.append('from', 'abc');
+    form.append('name', 'Ana');
+    form.append('file', new Blob([new Uint8Array([0xff, 0xd8])], { type: 'image/jpeg' }), 'foto.jpg');
+    const req = new Request('http://x', { method: 'POST', body: form });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/api/send-image',
+      headers: { 'content-type': req.headers.get('content-type')! },
+      payload: Buffer.from(await req.arrayBuffer()),
+    });
+    expect(res.statusCode).toBe(400);
+    expect(gateway).not.toHaveBeenCalled();
+  });
+
   it('el stream exige un número válido', async () => {
     expect((await setup().app.inject({ method: 'GET', url: '/api/stream?to=abc' })).statusCode).toBe(400);
   });

@@ -18,7 +18,8 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 | Envío de respuestas por WhatsApp respetando la ventana de 24 h | Hecho |
 | Panel para asesores: bandeja, tomar, responder, devolver al bot | Hecho |
 | Avisos al derivar: en vivo en el panel (sonido y notificación) y por correo | Hecho |
-| Visión (identificar piezas por foto) y cotización en PDF | Pendiente (F1.5) |
+| Visión: el bot mira las fotos del cliente y busca lo más parecido del catálogo | Hecho |
+| Cotización en PDF | Pendiente (F1.5) |
 | Plantillas de WhatsApp y seguimiento fuera de 24 h | Pendiente |
 
 ## Estructura
@@ -64,6 +65,8 @@ npm run dev:gateway
 npm run dev:worker
 npm run dev:sim     # abre http://localhost:4010
 ```
+
+Los íconos de clip, cámara o galería del teléfono mandan una foto como cliente (lo escrito en la caja va como pie de foto). La foto queda en el simulador y el worker la baja como lo haría de Meta.
 
 Por dentro el canal siempre es WhatsApp; Instagram y Messenger solo cambian la apariencia hasta que existan sus conectores.
 
@@ -113,6 +116,7 @@ npm run test:all  # también las de integración (usan la BD local de .env)
 1. Llega un mensaje y se espera 4 s por si el cliente sigue escribiendo; si llega otro, solo responde el último turno.
 2. El modelo (según `AI_PROVIDER`) recibe el historial reciente, el perfil del negocio y cuatro herramientas: `buscar_productos`, `calcular_cajas`, `enviar_fotos` y `derivar_a_asesor`.
    Las fotos de cada producto se guardan al sincronizar el catálogo (WebP pasa a JPEG, que es lo que acepta WhatsApp). Al enviarlas, cada foto se sube a WhatsApp una vez y su id se reutiliza 25 días; las fotos salen antes del texto.
+   Si el cliente mandó fotos desde la última respuesta (máximo 3), el worker las baja de WhatsApp (`GET /{media_id}` y luego la url con el token; el token solo va a hosts de Meta o al simulador local), las achica a 1024 px en JPEG sin metadatos y se las pasa al modelo. El modelo describe aspecto, color y formato, busca lo más parecido y lo muestra con fotos, sin asegurar que es el mismo producto. Si una foto no baja, recibe una nota y le pide al cliente que la describa.
 3. Los productos y las cajas salen de la BD y del código, nunca del modelo. Las herramientas no le muestran precios.
 4. Antes de enviar, un validador bloquea cualquier respuesta con montos. Si el modelo falla, rechaza o se enreda, el cliente recibe un mensaje de respaldo y la conversación pasa a un asesor.
 5. Al derivar, la conversación queda en modo `human`: el bot deja de responder y el pase queda en `handoffs`.

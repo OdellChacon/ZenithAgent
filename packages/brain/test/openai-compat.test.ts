@@ -42,6 +42,33 @@ describe('portableSchema', () => {
 });
 
 describe('toOpenAiMessages', () => {
+  it('manda las fotos del cliente como image_url con data URL', () => {
+    const out = toOpenAiMessages({
+      model: 'm',
+      max_tokens: 10,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '[El cliente envió esta foto:]' },
+            { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } },
+            { type: 'text', text: '¿Tienen algo así?' },
+          ],
+        },
+      ],
+    });
+    expect(out).toEqual([
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: '[El cliente envió esta foto:]' },
+          { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,QUJD' } },
+          { type: 'text', text: '¿Tienen algo así?' },
+        ],
+      },
+    ]);
+  });
+
   it('traduce sistema, llamadas a herramientas y sus resultados', () => {
     const params = {
       model: 'm',

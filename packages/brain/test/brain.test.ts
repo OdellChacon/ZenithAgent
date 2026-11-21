@@ -8,6 +8,7 @@ import {
   parseTenantBotSettings,
   runBrainTurn,
   TenantSettingsError,
+  pendingCustomerImages,
   toModelMessages,
   type CatalogReader,
   type ProductRow,
@@ -116,6 +117,43 @@ describe('toModelMessages', () => {
     expect(out[0]?.content).toContain('envió una imagen');
     expect(out[1]).toEqual({ role: 'assistant', content: 'Buenas tardes' });
     expect(out[2]).toEqual({ role: 'user', content: 'Gracias' });
+  });
+
+  it('pone la foto del cliente como imagen cuando está descargada', () => {
+    const images = new Map([['m2', { mediaType: 'image/jpeg' as const, base64: 'QUJD' }]]);
+    const out = toModelMessages(
+      [
+        { id: 'm1', direction: 'in', author: 'customer', type: 'text', body: 'Hola' },
+        { id: 'm2', direction: 'in', author: 'customer', type: 'image', body: '¿Tienen algo así?' },
+      ],
+      images,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0]?.content).toEqual([
+      { type: 'text', text: 'Hola' },
+      { type: 'text', text: '[El cliente envió esta foto:]' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } },
+      { type: 'text', text: '¿Tienen algo así?' },
+    ]);
+  });
+
+  it('sin la foto descargada deja una nota de texto', () => {
+    const out = toModelMessages([{ id: 'm1', direction: 'in', author: 'customer', type: 'image', body: null }], new Map());
+    expect(typeof out[0]?.content).toBe('string');
+    expect(out[0]?.content).toContain('no tienes a la vista');
+  });
+
+  it('solo marca como pendientes las fotos posteriores a la última respuesta', () => {
+    const pending = pendingCustomerImages([
+      { id: 'a', direction: 'in', author: 'customer', type: 'image', body: null },
+      { id: 'b', direction: 'out', author: 'bot', type: 'text', body: 'Recibido' },
+      { id: 'c', direction: 'in', author: 'customer', type: 'image', body: null },
+      { id: 'd', direction: 'in', author: 'customer', type: 'text', body: 'y esta' },
+      { id: 'e', direction: 'in', author: 'customer', type: 'image', body: null },
+    ]);
+    expect(pending.map((m) => m.id)).toEqual(['c', 'e']);
+    const many = Array.from({ length: 5 }, (_, i) => ({ id: `i${i}`, direction: 'in' as const, author: 'customer' as const, type: 'image', body: null }));
+    expect(pendingCustomerImages(many).map((m) => m.id)).toEqual(['i2', 'i3', 'i4']);
   });
 
   it('nunca termina en un mensaje del negocio', () => {

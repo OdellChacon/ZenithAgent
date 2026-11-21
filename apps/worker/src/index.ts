@@ -163,7 +163,21 @@ const brainWorker = new Worker<BrainJobData>(
   QUEUES.brain,
   async (job) => {
     const finalAttempt = job.attemptsMade + 1 >= (job.opts.attempts ?? 1);
-    const outcome = await processBrainJob({ pool, llm, finalAttempt, config: { model, effort: env.AI_EFFORT } }, job.data);
+    const outcome = await processBrainJob(
+      {
+        pool,
+        llm,
+        finalAttempt,
+        config: { model, effort: env.AI_EFFORT },
+        media: {
+          masterKey,
+          graphApiVersion: env.META_GRAPH_API_VERSION,
+          ...(env.META_GRAPH_BASE_URL ? { graphBaseUrl: env.META_GRAPH_BASE_URL } : {}),
+          log: (msg, data) => log.warn(data, msg),
+        },
+      },
+      job.data,
+    );
     log.info({ conversationId: job.data.conversationId, outcome }, 'turno del bot');
     if (outcome.result === 'replied') {
       await outboundQueue.add(

@@ -87,8 +87,11 @@ function blockText(content: unknown): string {
   return '';
 }
 
+type OaiContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+
 type OaiMessage =
-  | { role: 'system' | 'user'; content: string }
+  | { role: 'system'; content: string }
+  | { role: 'user'; content: string | OaiContentPart[] }
   | {
       role: 'assistant';
       content: string | null;
@@ -106,7 +109,7 @@ export function toOpenAiMessages(params: CreateParams): OaiMessage[] {
     const role = m.role as string;
     if (typeof m.content === 'string') {
       if (role === 'assistant') out.push({ role: 'assistant', content: m.content });
-      else out.push({ role: role === 'system' ? 'system' : 'user', content: m.content });
+      else out.push(role === 'system' ? { role: 'system', content: m.content } : { role: 'user', content: m.content });
       continue;
     }
     const blocks = m.content as unknown as Array<{ type: string; [k: string]: unknown }>;
@@ -132,8 +135,22 @@ export function toOpenAiMessages(params: CreateParams): OaiMessage[] {
         out.push({ role: 'tool', tool_call_id: b.tool_use_id as string, content: blockText(b.content) });
       }
     }
-    const text = blocks.filter((b) => b.type === 'text').map((b) => b.text as string).join('');
-    if (text) out.push({ role: role === 'system' ? 'system' : 'user', content: text });
+    const hasImage = blocks.some((b) => b.type === 'image');
+    if (hasImage && role !== 'system') {
+      // Fotos del cliente: texto e imágenes en orden, las imágenes como data URL.
+      const parts: OaiContentPart[] = [];
+      for (const b of blocks) {
+        if (b.type === 'text' && b.text) parts.push({ type: 'text', text: b.text as string });
+        const source = b.source as { type?: string; media_type?: string; data?: string } | undefined;
+        if (b.type === 'image' && source?.type === 'base64' && source.media_type && source.data) {
+          parts.push({ type: 'image_url', image_url: { url: `data:${source.media_type};base64,${source.data}` } });
+        }
+      }
+      if (parts.length) out.push({ role: 'user', content: parts });
+      continue;
+    }
+    const text = blocks.filter((b) => b.type === 'text').map((b) => b.text as string).join('\n\n');
+    if (text) out.push(role === 'system' ? { role: 'system', content: text } : { role: 'user', content: text });
   }
   return out;
 }

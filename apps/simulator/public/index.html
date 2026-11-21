@@ -134,6 +134,8 @@
   .composer .icon svg { width: 24px; height: 24px; fill: currentColor; }
   .input-wrap { flex: 1; display: flex; align-items: flex-end; min-height: 44px; background: var(--input-bg); border: var(--input-border); border-radius: 24px; padding: 0 4px; box-shadow: var(--input-shadow, none); }
   .input-wrap .icon { color: var(--input-icon); }
+  .composer [data-pick] { cursor: pointer; }
+  .composer [data-pick]:focus-visible { outline: 2px solid var(--composer-icon); outline-offset: -4px; border-radius: 50%; }
   textarea { flex: 1; resize: none; border: 0; outline: none; background: transparent; color: var(--ink-app); font: inherit; font-size: 16px; line-height: 1.3; padding: 11px 6px; max-height: 120px; min-height: 44px; }
   textarea::placeholder { color: var(--placeholder); }
   .action { width: 44px; height: 44px; border-radius: 50%; border: 0; display: grid; place-items: center; flex: none; cursor: pointer; background: var(--action-bg); color: var(--action-ink); }
@@ -267,6 +269,7 @@
       <header id="topbar" class="topbar"></header>
       <main id="chat" class="chat" aria-live="polite"></main>
       <form id="composer" class="composer"></form>
+      <input id="picker" type="file" accept="image/*" hidden>
       <div class="gesture" aria-hidden="true"><i></i></div>
     </div>
   </div>
@@ -371,19 +374,24 @@
     const placeholder = s === 'wa' ? 'Mensaje' : s === 'ig' ? 'Mensaje…' : 'Aa';
     const ta = `<textarea id="input" rows="1" placeholder="${placeholder}" aria-label="Escribe un mensaje"></textarea>`;
     $('composer').innerHTML = s === 'wa'
-      ? `<div class="input-wrap"><span class="icon">${svg('emoji')}</span>${ta}<span class="icon">${svg('attach')}</span><span class="icon" data-empty>${svg('camera')}</span></div>
+      ? `<div class="input-wrap"><span class="icon">${svg('emoji')}</span>${ta}<span class="icon" data-pick>${svg('attach')}</span><span class="icon" data-empty data-pick>${svg('camera')}</span></div>
          <button class="action" type="submit" aria-label="Enviar"><span data-empty>${svg('mic')}</span><span data-full hidden>${svg('send')}</span></button>`
       : s === 'ig'
-      ? `<div class="input-wrap"><span class="action" aria-hidden="true">${svg('camera')}</span>${ta}
-           <span class="icon" data-empty>${svg('micOutline')}</span><span class="icon" data-empty>${svg('imageOutline')}</span><span class="icon" data-empty>${svg('sticker')}</span>
+      ? `<div class="input-wrap"><span class="action" data-pick>${svg('camera')}</span>${ta}
+           <span class="icon" data-empty>${svg('micOutline')}</span><span class="icon" data-empty data-pick>${svg('imageOutline')}</span><span class="icon" data-empty>${svg('sticker')}</span>
            <button class="text-send" type="submit" data-full hidden>Enviar</button></div>`
-      : `<span class="icon" data-empty>${svg('plus')}</span><span class="icon" data-empty>${svg('camera')}</span><span class="icon" data-empty>${svg('image')}</span><span class="icon" data-empty>${svg('mic')}</span>
+      : `<span class="icon" data-empty>${svg('plus')}</span><span class="icon" data-empty data-pick>${svg('camera')}</span><span class="icon" data-empty data-pick>${svg('image')}</span><span class="icon" data-empty>${svg('mic')}</span>
          <div class="input-wrap">${ta}<span class="icon">${svg('emoji')}</span></div>
          <button class="action" type="submit" aria-label="Enviar"><span data-empty>${svg('like')}</span><span data-full hidden>${svg('send')}</span></button>`;
 
     const input = $('input');
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('composer').requestSubmit(); } });
     input.addEventListener('input', () => { autosize(); toggleComposer(); });
+    $('composer').querySelectorAll('[data-pick]').forEach((el) => {
+      el.setAttribute('role', 'button'); el.tabIndex = 0; el.title = 'Enviar una foto';
+      el.addEventListener('click', () => $('picker').click());
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('picker').click(); } });
+    });
     toggleComposer();
   }
 
@@ -457,7 +465,7 @@
         if (g.image) {
           // Foto con pie: en WhatsApp va dentro de la burbuja; en Instagram y Messenger, suelta.
           const caption = g.text ? `<div class="caption">${formatText(g.text, s === 'wa')}${stamp}</div>` : stamp ? `<div class="caption only-stamp">${stamp}</div>` : '';
-          html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><img src="${escape(g.image)}" alt="${escape(g.text || 'Foto del producto')}" loading="lazy">${caption}</div></div>`;
+          html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><img src="${escape(g.image)}" alt="${escape(g.text || (side === 'out' ? 'Foto enviada' : 'Foto del producto'))}" loading="lazy">${caption}</div></div>`;
         } else {
           html += `<div class="line ${side}">${slot}<div class="${cls}"${style}>${formatText(g.text, s === 'wa')}${stamp}</div></div>`;
         }
@@ -519,27 +527,20 @@
   }
 
   // ------------------------------------------------------------------ envío
-  $('composer').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const input = $('input');
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = ''; autosize(); toggleComposer(); input.focus();
-    const msg = { id: 'c' + Date.now(), kind: 'customer', text, at: new Date().toISOString(), status: 'sending' };
+  /** Manda un mensaje del cliente y actualiza su estado según responda el simulador. */
+  async function deliver(msg, request) {
     state.messages.push(msg); save(); renderChat();
     setBusy(1);
     try {
-      const res = await fetch('/api/send', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text }),
-      });
+      const res = await request();
+      const body = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
         msg.status = 'failed';
         state.messages.push({ kind: 'system', text: (body.error && body.error.message) || 'No se pudo enviar el mensaje', at: new Date().toISOString() });
         setBusy(-1);
       } else {
         msg.status = 'sent';
+        if (body.image) msg.image = body.image;
         // Meta confirma la entrega al teléfono de la empresa casi de inmediato.
         setTimeout(() => { if (msg.status === 'sent') { msg.status = 'delivered'; save(); renderChat(); } }, 700);
       }
@@ -549,6 +550,53 @@
       setBusy(-1);
     }
     save(); renderChat();
+  }
+
+  $('composer').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const input = $('input');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = ''; autosize(); toggleComposer(); input.focus();
+    const msg = { id: 'c' + Date.now(), kind: 'customer', text, at: new Date().toISOString(), status: 'sending' };
+    void deliver(msg, () => fetch('/api/send', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text }),
+    }));
+  });
+
+  /** Como WhatsApp: la foto se comprime a JPEG antes de enviarse (lado mayor 1600 px). */
+  async function compress(file) {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.round(bitmap.width * scale); canvas.height = Math.round(bitmap.height * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+    return new Promise((resolve, reject) => canvas.toBlob((b) => (b ? resolve(b) : reject(new Error('sin imagen'))), 'image/jpeg', 0.85));
+  }
+
+  $('picker').addEventListener('change', async (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (!file) return;
+    let blob;
+    try { blob = await compress(file); } catch {
+      state.messages.push({ kind: 'system', text: 'No se pudo leer esa imagen', at: new Date().toISOString() }); save(); renderChat(); return;
+    }
+    // Lo escrito en la caja va como pie de foto, como en WhatsApp.
+    const input = $('input');
+    const caption = input.value.trim();
+    input.value = ''; autosize(); toggleComposer();
+    const msg = { id: 'c' + Date.now(), kind: 'customer', text: caption, image: URL.createObjectURL(blob), at: new Date().toISOString(), status: 'sending' };
+    const form = new FormData();
+    form.append('from', state.number);
+    form.append('name', state.name || 'Cliente de prueba');
+    if (caption) form.append('caption', caption);
+    form.append('file', blob, 'foto.jpg');
+    void deliver(msg, () => fetch('/api/send-image', { method: 'POST', body: form }));
   });
 
   // ------------------------------------------------------------------ controles
@@ -573,7 +621,7 @@
   tick(); setInterval(tick, 15000);
 
   // Mensajes que quedaron "enviando" de una sesión anterior.
-  state.messages.forEach((m) => { if (m.status === 'sending') m.status = 'failed'; });
+  state.messages.forEach((m) => { if (m.status === 'sending') m.status = 'failed'; if (m.image && m.image.startsWith('blob:')) delete m.image; });
   renderAll();
   connect();
 })();

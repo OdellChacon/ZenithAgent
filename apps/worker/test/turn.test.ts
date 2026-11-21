@@ -13,7 +13,7 @@ import { processBrainJob } from '../src/brain-job.js';
 import { processOutboundMessage as processOutbound } from '../src/outbound.js';
 import { createCatalogReader, normalizeTerms } from '../src/catalog-reader.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
-import { textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
+import { imageWebhook, textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
 import { scriptedLlm, text, tool } from '../../../packages/brain/test/fake-llm.js';
 import moraMora from '../../../config/tenants/inversiones-mora-mora.json' with { type: 'json' };
 
@@ -197,6 +197,59 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
       'foto:media-1:Aconna Beige',
       'texto:Aquí tiene la foto.',
     ]);
+  });
+
+  it('el modelo ve la foto que manda el cliente, achicada y sin metadatos', async () => {
+    seq++;
+    const payload = structuredClone(imageWebhook);
+    const value = payload.entry[0]!.changes[0]!.value as { metadata: { phone_number_id: string }; messages: unknown[]; contacts: { wa_id: string }[] };
+    value.metadata.phone_number_id = t.phoneNumberId;
+    value.contacts[0]!.wa_id = '584141230099';
+    value.messages = [{ from: '584141230099', id: `wamid.IMG${Date.now()}${seq}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'image', image: { id: 'media-foto-1', mime_type: 'image/jpeg', caption: '¿Tienen algo así?' } }];
+    const [event] = parseWhatsAppWebhook(payload);
+    const msg = await processInboundEvent(app, (await insertWebhookEvent(app, event!, payload))!);
+    if (msg.result !== 'message') throw new Error('se esperaba un mensaje');
+
+    const big = await sharp({ create: { width: 3000, height: 2000, channels: 3, background: '#d9c7a8' } })
+      .withMetadata({ exif: { IFD0: { Copyright: 'dato-privado' } } })
+      .jpeg()
+      .toBuffer();
+    const meta = vi.fn<typeof fetch>(async (url) => {
+      if (String(url).endsWith('/v21.0/media-foto-1')) {
+        return new Response(JSON.stringify({ url: 'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1', mime_type: 'image/jpeg' }), { status: 200 });
+      }
+      return new Response(new Uint8Array(big), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+    });
+    const { llm, calls } = scriptedLlm([text('Gracias por la foto. Se parece mucho a nuestro *Aconna Beige*.')]);
+    const turn = await processBrainJob(
+      { pool: app, llm, media: { masterKey, graphApiVersion: 'v21.0', fetch: meta } },
+      { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId },
+    );
+    expect(turn).toMatchObject({ result: 'replied' });
+    expect((meta.mock.calls[0]![1]?.headers as Record<string, string>).Authorization).toBe('Bearer token-prueba');
+
+    const content = calls[0]!.messages.at(-1)!.content as { type: string; text?: string; source?: { data: string } }[];
+    expect(content.map((b) => b.type)).toEqual(['text', 'image', 'text']);
+    expect(content[2]?.text).toBe('¿Tienen algo así?');
+    const seen = Buffer.from(content[1]!.source!.data, 'base64');
+    const info = await sharp(seen).metadata();
+    expect(Math.max(info.width!, info.height!)).toBe(1024);
+    expect(info.exif).toBeUndefined();
+
+    // Sin acceso a la foto, el turno igual responde con la nota de texto.
+    const failing = scriptedLlm([text('¿Podría describirme el producto?')]);
+    const down = vi.fn<typeof fetch>(async () => new Response('{}', { status: 404 }));
+    seq++;
+    value.messages = [{ from: '584141230099', id: `wamid.IMG${Date.now()}${seq}`, timestamp: String(Math.floor(Date.now() / 1000)), type: 'image', image: { id: 'media-foto-2', mime_type: 'image/jpeg' } }];
+    const [event2] = parseWhatsAppWebhook(payload);
+    const msg2 = await processInboundEvent(app, (await insertWebhookEvent(app, event2!, payload))!);
+    if (msg2.result !== 'message') throw new Error('se esperaba un mensaje');
+    const turn2 = await processBrainJob(
+      { pool: app, llm: failing.llm, media: { masterKey, graphApiVersion: 'v21.0', fetch: down } },
+      { tenantId: t.tenantId, conversationId: msg2.conversationId, triggerMessageId: msg2.messageId },
+    );
+    expect(turn2).toMatchObject({ result: 'replied' });
+    expect(JSON.stringify(failing.calls[0]!.messages.at(-1))).toContain('no tienes a la vista');
   });
 
   it('si el cliente escribió otra vez, el turno viejo se descarta', async () => {

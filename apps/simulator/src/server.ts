@@ -31,6 +31,12 @@ export interface BotMessage {
   at: string;
 }
 
+const customerSchema = z.object({
+  from: z.string().regex(/^\d{8,15}$/, 'Número inválido'),
+  name: z.string().trim().min(1).max(60),
+  caption: z.string().trim().max(1024).optional(),
+});
+
 const sendSchema = z.object({
   from: z.string().regex(/^\d{8,15}$/, 'Número inválido'),
   name: z.string().trim().min(1).max(60),
@@ -55,7 +61,7 @@ const UI_PATH = new URL('../public/index.html', import.meta.url);
 
 export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMessages: BotMessage[] } {
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024 });
-  void app.register(multipart, { limits: { fileSize: MAX_MEDIA_BYTES, files: 1, fields: 5 } });
+  void app.register(multipart, { limits: { fileSize: MAX_MEDIA_BYTES, files: 1, fields: 5, fieldSize: 2048 } });
   const media = new Map<string, { mime: string; data: Buffer }>();
   const doFetch = deps.fetch ?? fetch;
   const bus = new EventEmitter();
@@ -118,6 +124,64 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
       return reply.code(502).send({ error: { code: 'gateway_rejected', message: `El gateway respondió ${status}` } });
     }
     return { ok: true, id };
+  });
+
+  /**
+   * Foto del cliente (multipart: from, name y caption antes del archivo). Queda guardada como
+   * la guardaría Meta y el webhook solo lleva su id: el worker la baja por la Graph API.
+   */
+  app.post('/api/send-image', async (req, reply) => {
+    const bad = (message: string) => reply.code(400).send({ error: { code: 'invalid_input', message } });
+    let file;
+    try {
+      file = await req.file();
+    } catch {
+      return bad('Se espera multipart/form-data');
+    }
+    if (!file) return bad('Falta la foto');
+    let data: Buffer;
+    try {
+      data = await file.toBuffer();
+    } catch {
+      return bad('La foto supera los 5 MB');
+    }
+    if (!MEDIA_TYPES.has(file.mimetype)) return bad('Solo JPEG o PNG');
+    const field = (name: string) => {
+      const f = file.fields[name];
+      const one = Array.isArray(f) ? f[0] : f;
+      return one && 'value' in one && typeof one.value === 'string' ? one.value : undefined;
+    };
+    const caption = field('caption')?.trim();
+    const parsed = customerSchema.safeParse({ from: field('from'), name: field('name'), ...(caption ? { caption } : {}) });
+    if (!parsed.success) return bad(parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const { from, name } = parsed.data;
+
+    const mediaId = `${Date.now()}${++seq}`;
+    media.set(mediaId, { mime: file.mimetype, data });
+    const id = `wamid.SIM${Date.now()}${++seq}`;
+    let status: number;
+    try {
+      status = await postWebhook(
+        envelope({
+          contacts: [{ profile: { name }, wa_id: from }],
+          messages: [
+            {
+              from,
+              id,
+              timestamp: String(Math.floor(Date.now() / 1000)),
+              type: 'image',
+              image: { id: mediaId, mime_type: file.mimetype, ...(parsed.data.caption ? { caption: parsed.data.caption } : {}) },
+            },
+          ],
+        }),
+      );
+    } catch {
+      return reply.code(502).send({ error: { code: 'gateway_unreachable', message: `No se pudo conectar con el gateway en ${deps.gatewayUrl}` } });
+    }
+    if (status !== 200) {
+      return reply.code(502).send({ error: { code: 'gateway_rejected', message: `El gateway respondió ${status}` } });
+    }
+    return { ok: true, id, image: `/sim-media/${mediaId}` };
   });
 
   /** Mensajes del bot para un cliente, en vivo (Server-Sent Events). */
@@ -207,6 +271,24 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     const id = `${Date.now()}${++seq}`;
     media.set(id, { mime: file.mimetype, data });
     return { id };
+  });
+
+  /** Como GET /{media_id} de Meta: devuelve la url para descargar el archivo (con el token). */
+  app.get<{ Params: { version: string; mediaId: string } }>('/:version/:mediaId', async (req, reply) => {
+    if (!/^v\d+\.\d+$/.test(req.params.version)) return reply.code(404).send({ error: { code: 'not_found', message: 'No existe' } });
+    if (!/^Bearer \S+$/.test(req.headers.authorization ?? '')) {
+      return reply.code(401).send({ error: { code: 190, message: 'Falta el token de acceso' } });
+    }
+    const item = media.get(req.params.mediaId);
+    if (!item) return reply.code(404).send({ error: { code: 100, message: 'Id de archivo desconocido' } });
+    const origin = `${req.protocol}://${req.headers.host ?? 'localhost'}`;
+    return {
+      messaging_product: 'whatsapp',
+      id: req.params.mediaId,
+      url: `${origin}/sim-media/${encodeURIComponent(req.params.mediaId)}`,
+      mime_type: item.mime,
+      file_size: item.data.length,
+    };
   });
 
   app.get<{ Params: { id: string } }>('/sim-media/:id', async (req, reply) => {

@@ -6,14 +6,17 @@ import {
   formatForChannel,
   isRetryableLlmError,
   parseTenantBotSettings,
+  pendingCustomerImages,
   runBrainTurn,
   toModelMessages,
   type BrainConfig,
   type BrainResult,
   type HistoryMessage,
   type LlmClient,
+  type ModelImage,
 } from '@zenith/brain';
 import { createCatalogReader } from './catalog-reader.js';
+import { loadCustomerImages, type CustomerMediaDeps, type PendingImage } from './customer-images.js';
 
 export interface BrainJobDeps {
   pool: Pool;
@@ -26,6 +29,8 @@ export interface BrainJobDeps {
    * cliente recibe el mensaje de respaldo en vez de quedarse sin respuesta.
    */
   finalAttempt?: boolean;
+  /** Para que el modelo vea las fotos del cliente. Sin esto, solo recibe una nota de texto. */
+  media?: CustomerMediaDeps;
 }
 
 export type BrainJobOutcome =
@@ -45,9 +50,11 @@ export type BrainJobOutcome =
 
 interface Snapshot {
   channel: string;
+  channelAccountId: string;
+  credentialsEnc: Buffer | null;
   recipient: string;
   settings: unknown;
-  history: HistoryMessage[];
+  history: (HistoryMessage & { external_media_id: string | null })[];
 }
 
 const REPLY_STEP = 'reply';
@@ -72,8 +79,15 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
   const key = outboundIdempotencyKey(job.conversationId, job.triggerMessageId, REPLY_STEP);
 
   const snapshot = await withTenant(pool, job.tenantId, async (client): Promise<Snapshot | BrainJobOutcome> => {
-    const conv = await client.query<{ mode: string; status: string; channel: string; recipient: string | null }>(
-      `SELECT c.mode, c.status, ca.channel,
+    const conv = await client.query<{
+      mode: string;
+      status: string;
+      channel: string;
+      channel_account_id: string;
+      credentials_enc: Buffer | null;
+      recipient: string | null;
+    }>(
+      `SELECT c.mode, c.status, ca.channel, ca.id AS channel_account_id, ca.credentials_enc,
               (SELECT ci.external_user_id FROM contact_identities ci
                 WHERE ci.contact_id = c.contact_id AND ci.channel = ca.channel LIMIT 1) AS recipient
          FROM conversations c JOIN channel_accounts ca ON ca.id = c.channel_account_id
@@ -91,14 +105,21 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     if (answered.rowCount) return { result: 'skipped', reason: 'already_answered' };
 
     const tenant = await client.query<{ settings: unknown }>('SELECT settings FROM tenants WHERE id = $1', [job.tenantId]);
-    const history = await client.query<HistoryMessage>(
-      `SELECT direction, author, type, body FROM (
-         SELECT direction, author, type, body, seq FROM messages
+    const history = await client.query<HistoryMessage & { external_media_id: string | null }>(
+      `SELECT id, direction, author, type, body, external_media_id FROM (
+         SELECT id, direction, author, type, body, seq, attachments->0->>'externalMediaId' AS external_media_id FROM messages
           WHERE conversation_id = $1 ORDER BY seq DESC LIMIT $2) recent
         ORDER BY seq`,
       [job.conversationId, deps.historyLimit ?? 30],
     );
-    return { channel: row.channel, recipient: row.recipient, settings: tenant.rows[0]?.settings, history: history.rows };
+    return {
+      channel: row.channel,
+      channelAccountId: row.channel_account_id,
+      credentialsEnc: row.credentials_enc,
+      recipient: row.recipient,
+      settings: tenant.rows[0]?.settings,
+      history: history.rows,
+    };
   });
 
   if ('result' in snapshot) return snapshot;
@@ -111,12 +132,26 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
   }
 
   const started = Date.now();
+  // Las fotos que el cliente mandó desde la última respuesta se bajan para que el modelo las vea.
+  let images: Map<string, ModelImage> | undefined;
+  if (deps.media) {
+    const pending = pendingCustomerImages(snapshot.history).map((m) => ({
+      ...m,
+      externalMediaId: (m as Snapshot['history'][number]).external_media_id,
+    })) as PendingImage[];
+    images = await loadCustomerImages(
+      deps.media,
+      { channel: snapshot.channel, channelAccountId: snapshot.channelAccountId, credentialsEnc: snapshot.credentialsEnc },
+      pending,
+    );
+  }
+
   let brain: BrainResult;
   try {
     brain = await runBrainTurn({
       llm: deps.llm,
       system: buildSystemPrompt(settings),
-      messages: toModelMessages(snapshot.history),
+      messages: toModelMessages(snapshot.history, images),
       tools: { catalog: createCatalogReader(pool, job.tenantId), wastePercent: settings.boxes.wastePercent },
       ...(deps.config ? { config: deps.config } : {}),
     });
