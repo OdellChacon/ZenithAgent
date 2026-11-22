@@ -11,6 +11,14 @@ export interface CatalogReader {
   get(productId: string): Promise<ProductRow | null>;
 }
 
+/** Descripción visual de un producto hecha por el modelo de visión a partir de su foto. */
+export interface ProductLook {
+  aspecto: string[];
+  colores: string[];
+  patron: string | null;
+  descripcion: string;
+}
+
 export interface ProductSearch {
   text: string | null;
   category: string | null;
@@ -29,6 +37,8 @@ export interface ProductRow {
   area_per_box_m2: string | null;
   pieces_per_box: number | null;
   attributes: Record<string, unknown>;
+  /** Lo que se ve en la foto del producto (ver ProductLook), o null si aún no se describió. */
+  look?: ProductLook | null;
   price: string | null;
   currency: string | null;
   in_visualizer: boolean;
@@ -58,7 +68,8 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
     name: 'buscar_productos',
     description:
       'Busca productos activos en el catálogo del negocio. Úsala antes de recomendar o mencionar cualquier producto. ' +
-      'Devuelve nombre, categoría, formato, m² por caja, superficie, acabado, uso y características. ' +
+      'Devuelve nombre, categoría, formato, m² por caja, superficie, acabado, uso, características y "como_se_ve" (cómo se ve en su foto). ' +
+      'Los resultados vienen ordenados por cuántas palabras coinciden: los primeros son los más parecidos. ' +
       'Si no hay resultados, prueba con menos filtros o con otras palabras.',
     strict: true,
     input_schema: {
@@ -67,7 +78,7 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
         texto: {
           type: ['string', 'null'],
           description:
-            'Una o dos palabras clave: aspecto (madera, mármol, piedra, cemento), color, acabado o nombre del modelo. ' +
+            'De una a tres palabras clave: aspecto (madera, mármol, piedra, cemento), color, acabado o nombre del modelo. ' +
             'Ej. "madera", "mármol blanco", "antideslizante".',
         },
         categoria: {
@@ -177,8 +188,10 @@ function presentProduct(p: ProductRow) {
     formato: p.format,
     m2_por_caja: p.area_per_box_m2 !== null ? Number(p.area_per_box_m2) : null,
     piezas_por_caja: p.pieces_per_box,
-    aspecto: a.design ?? null,
-    color: a.color ?? null,
+    aspecto: a.design ?? p.look?.aspecto ?? null,
+    color: a.color ?? (p.look?.colores.length ? p.look.colores.join(', ') : null),
+    // Descrito por IA a partir de la foto del catálogo: sirve para comparar con lo que pide el cliente.
+    como_se_ve: p.look ? [p.look.descripcion, p.look.patron ? `patrón: ${p.look.patron}` : ''].filter(Boolean).join(' · ') : null,
     coleccion: a.collection ?? null,
     trafico: a.traffic ?? null,
     superficie: a.surface ?? null,

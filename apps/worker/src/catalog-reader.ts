@@ -2,7 +2,7 @@ import type { CatalogReader, ProductRow, ProductSearch } from '@zenith/brain';
 import { withTenant, type Pool } from '@zenith/db';
 
 const BASE_COLUMNS = `id, name, category, category_name, description, format, area_per_box_m2, pieces_per_box,
-                 attributes, price, currency, in_visualizer`;
+                 attributes, look, price, currency, in_visualizer`;
 /** Columnas leídas directamente de products, incluida si tiene foto. */
 const COLUMNS = `${BASE_COLUMNS},
                  EXISTS (SELECT 1 FROM product_images pi WHERE pi.product_id = products.id) AS has_photo`;
@@ -41,7 +41,7 @@ export function createCatalogReader(pool: Pool, tenantId: string): CatalogReader
           `WITH candidates AS (
              SELECT ${COLUMNS},
                     unaccent(lower(name || ' ' || coalesce(description, '') || ' ' || coalesce(category_name, '') || ' ' ||
-                                   coalesce(format, '') || ' ' || attributes::text)) AS doc
+                                   coalesce(format, '') || ' ' || attributes::text || ' ' || coalesce(look::text, ''))) AS doc
                FROM products
               WHERE active
                 AND ($1::text IS NULL OR unaccent(lower(coalesce(category, '') || ' ' || coalesce(category_name, ''))) LIKE '%' || $1 || '%')

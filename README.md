@@ -51,6 +51,7 @@ docker compose --env-file .env up -d
 npm run db:migrate
 npm run db:seed-dev           # tenant de Mora Mora + número de WhatsApp de prueba
 npm run catalog:sync-imm -- --tenant-id <id que imprime el seed>
+npm run catalog:describe -- --tenant-id <id>   # opcional: describe la foto de cada producto (necesita AI_PROVIDER)
 npm run dev:gateway           # en una terminal
 npm run dev:worker            # en otra
 ```
@@ -109,6 +110,7 @@ npm run test:all  # también las de integración (usan la BD local de .env)
 - `webhook_events` no tiene tenant: el gateway guarda antes de saber a quién pertenece el evento. El tenant se resuelve en el worker con `resolve_channel_account`, que solo devuelve ids.
 - Si Redis falla después de guardar un evento, el gateway responde 200 igual y el barrido del worker lo reencola.
 - El catálogo se lee de la API pública de la tienda (`/api/v1/store/*`). La tienda no publica precios: `price` queda vacío y el bot deriva los precios a un asesor.
+- `catalog:describe` mira la foto de cada producto con el modelo de visión y guarda aspecto, colores, patrón y una frase (`products.look`). Así el bot encuentra piezas que la tienda no describe (ej. *Archi Cenizo*, que no tiene ni color) y las compara con la foto del cliente. Solo procesa productos nuevos o con foto cambiada; la sincronización no lo borra. Las fotos del catálogo son públicas.
 - La tienda casi no describe sus productos (no dice si una cerámica es tipo madera o mármol). Al sincronizar con `--manufacturer-catalog` (o `CI_CATALOG_PATH`), cada cerámica se cruza con el catálogo de Cerámica Italia que importa ZenithVisualizer y gana aspecto, color, colección y tráfico. Los precios del fabricante no se copian.
 
 ## Cómo responde el bot
