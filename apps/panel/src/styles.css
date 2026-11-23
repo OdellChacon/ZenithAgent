@@ -131,9 +131,45 @@ button { font: inherit; color: inherit; }
 .composer textarea { flex: 1; font: inherit; resize: vertical; min-height: 44px; max-height: 180px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); }
 .composer .hint { margin: 0; padding: 6px 0; }
 
+/* Secciones */
+.sections { display: flex; gap: 4px; flex: 1; justify-content: center; }
+.section-link { padding: 7px 14px; border-radius: 9px; color: var(--muted); text-decoration: none; font-weight: 600; font-size: 14px; }
+.section-link:hover { background: var(--bg); }
+.section-link.on { background: var(--accent-soft); color: var(--ink); }
+
+/* Etiquetas */
+.chip.tag { background: var(--accent-soft); color: var(--accent); border-color: transparent; display: inline-flex; align-items: center; gap: 4px; }
+.chip.tag button { border: 0; background: none; padding: 0 0 0 2px; cursor: pointer; color: inherit; font-size: 14px; line-height: 1; }
+.chip.warn-chip { background: var(--warn-soft); color: var(--warn); border-color: transparent; }
+button.chip.tag { cursor: pointer; font: inherit; font-size: 11.5px; }
+button.chip.tag.on { background: var(--accent); color: var(--accent-ink); }
+button.chip.tag.on .muted { color: inherit; opacity: .8; }
+.tag-editor .chips { align-items: center; }
+.tag-input { font: inherit; font-size: 13px; border: 1px dashed var(--line); border-radius: 10px; padding: 2px 9px; background: transparent; color: var(--ink); min-width: 130px; }
+.tag-input:focus { outline: none; border-style: solid; border-color: var(--accent); }
+.tag-editor .error { margin-top: 4px; }
+.conv-tags { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 8px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.conv-tags .tag-editor { flex: 1; min-width: 200px; }
+.btn.small { padding: 4px 10px; font-size: 13px; }
+
+/* Contactos */
+.contact-filters { padding: 10px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+.search { font: inherit; width: 100%; padding: 8px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg); color: var(--ink); }
+.tag-filter { max-height: 76px; overflow-y: auto; }
+.contact-body { overflow-y: auto; padding: 16px; display: grid; gap: 16px; align-content: start; }
+.field { display: grid; gap: 6px; }
+.field .label { font-size: 12.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.field p { margin: 0; }
+.field textarea { font: inherit; resize: vertical; padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--bg); color: var(--ink); }
+.check { display: flex; gap: 8px; align-items: center; font-size: 14px; cursor: pointer; }
+.contact-body .notice { margin: 0; }
+.conv-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--panel); }
+.conv-list li:last-child .item { border-bottom: 0; }
+
 /* Móvil: un panel a la vez */
 @media (max-width: 760px) {
   .topbar { flex-wrap: wrap; }
+  .sections { order: 3; flex-basis: 100%; justify-content: flex-start; }
   .user { display: none; }
   .workspace { grid-template-columns: 1fr; }
   .workspace.has-selection .inbox, .workspace:not(.has-selection) .conversation, .workspace:not(.has-selection) .empty-pane { display: none; }

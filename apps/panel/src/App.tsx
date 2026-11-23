@@ -4,17 +4,31 @@ import { alertHandoff, setUnseen } from './alerts';
 import { Login } from './Login';
 import { Inbox } from './Inbox';
 import { Conversation } from './Conversation';
-import { Header } from './Header';
+import { Contacts } from './Contacts';
+import { Header, type Section } from './Header';
 
-/** Rutas: /, /conversaciones/:id. Sin dependencias de router. */
-function parsePath(path: string): string | null {
-  const m = /^\/conversaciones\/([0-9a-f-]{36})\/?$/i.exec(path);
-  return m ? m[1]! : null;
+interface Route {
+  section: Section;
+  id: string | null;
+}
+
+/** Rutas: /, /conversaciones/:id, /contactos, /contactos/:id. Sin dependencias de router. */
+function parsePath(path: string): Route {
+  const conv = /^\/conversaciones\/([0-9a-f-]{36})\/?$/i.exec(path);
+  if (conv) return { section: 'inbox', id: conv[1]! };
+  const contact = /^\/contactos(?:\/([0-9a-f-]{36}))?\/?$/i.exec(path);
+  if (contact) return { section: 'contacts', id: contact[1] ?? null };
+  return { section: 'inbox', id: null };
+}
+
+function toPath(route: Route): string {
+  if (route.section === 'contacts') return route.id ? `/contactos/${route.id}` : '/contactos';
+  return route.id ? `/conversaciones/${route.id}` : '/';
 }
 
 export function App() {
   const [me, setMe] = useState<Me | null | undefined>(undefined);
-  const [selected, setSelected] = useState<string | null>(() => parsePath(location.pathname));
+  const [route, setRoute] = useState<Route>(() => parsePath(location.pathname));
   // Cada evento en vivo sube este contador y las vistas vuelven a pedir sus datos.
   const [tick, setTick] = useState(0);
   const [live, setLive] = useState(false);
@@ -30,14 +44,15 @@ export function App() {
 
   useEffect(() => void loadMe(), [loadMe]);
 
-  const open = useCallback((id: string | null) => {
-    setSelected(id);
-    history.pushState(null, '', id ? `/conversaciones/${id}` : '/');
+  const go = useCallback((next: Route) => {
+    setRoute(next);
+    history.pushState(null, '', toPath(next));
     setUnseen(0);
   }, []);
+  const open = useCallback((id: string | null) => go({ section: 'inbox', id }), [go]);
 
   useEffect(() => {
-    const onPop = () => setSelected(parsePath(location.pathname));
+    const onPop = () => setRoute(parsePath(location.pathname));
     window.addEventListener('popstate', onPop);
     return () => window.removeEventListener('popstate', onPop);
   }, []);
@@ -75,20 +90,34 @@ export function App() {
     setMe(null);
   };
 
+  const selected = route.id;
+
   return (
     <div className="app">
-      <Header me={me} live={live} onLogout={logout} />
-      <div className={`workspace ${selected ? 'has-selection' : ''}`}>
-        <Inbox me={me} tick={tick} selected={selected} onSelect={open} />
-        {selected ? (
-          <Conversation key={selected} id={selected} me={me} tick={tick} onClose={() => open(null)} onChanged={() => setTick((t) => t + 1)} />
-        ) : (
-          <div className="empty-pane">
-            <p>Elige una conversación de la bandeja.</p>
-            <p className="muted">Las derivadas por el bot aparecen en “Pendientes” y te avisamos con un sonido.</p>
-          </div>
-        )}
-      </div>
+      <Header me={me} live={live} section={route.section} onNavigate={(section) => go({ section, id: null })} onLogout={logout} />
+      {route.section === 'contacts' ? (
+        <Contacts tick={tick} selected={selected} onSelect={(id) => go({ section: 'contacts', id })} onOpenConversation={open} />
+      ) : (
+        <div className={`workspace ${selected ? 'has-selection' : ''}`}>
+          <Inbox me={me} tick={tick} selected={selected} onSelect={open} />
+          {selected ? (
+            <Conversation
+              key={selected}
+              id={selected}
+              me={me}
+              tick={tick}
+              onClose={() => open(null)}
+              onChanged={() => setTick((t) => t + 1)}
+              onOpenContact={(id) => go({ section: 'contacts', id })}
+            />
+          ) : (
+            <div className="empty-pane">
+              <p>Elige una conversación de la bandeja.</p>
+              <p className="muted">Las derivadas por el bot aparecen en “Pendientes” y te avisamos con un sonido.</p>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }

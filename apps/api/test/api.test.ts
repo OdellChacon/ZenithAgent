@@ -223,4 +223,72 @@ describe.skipIf(!hasDb)('API del panel', () => {
     const empty = await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/messages`, headers: headers(cookie), payload: { text: '   ' } });
     expect(empty.statusCode).toBe(400);
   });
+  it('lista contactos con etiquetas y señales, los filtra y los edita', async () => {
+    const convId = await seedConversation(t.tenantId, t.channelAccountId, { name: 'Daniela Contacto' });
+    const contactId = (await owner.query<{ contact_id: string }>('SELECT contact_id FROM conversations WHERE id = $1', [convId])).rows[0]!.contact_id;
+    // El bot le mostró la foto de un producto: queda como interés del contacto.
+    const product = await owner.query<{ id: string }>(
+      `INSERT INTO products (tenant_id, source, external_id, name, category, category_name) VALUES ($1, 'prueba', $2, 'Archi Cenizo', 'ceramicas', 'Cerámicas') RETURNING id`,
+      [t.tenantId, `p-${run}`],
+    );
+    const image = await owner.query<{ id: string }>(
+      `INSERT INTO product_images (tenant_id, product_id, position, mime_type, data, bytes, sha256) VALUES ($1, $2, 0, 'image/jpeg', $3, 1, 'x') RETURNING id`,
+      [t.tenantId, product.rows[0]!.id, Buffer.from([0])],
+    );
+    await owner.query(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments) VALUES ($1, $2, 'out', 'bot', 'image', 'Archi Cenizo', $3)`,
+      [t.tenantId, convId, JSON.stringify([{ productImageId: image.rows[0]!.id }])],
+    );
+
+    const { cookie } = await login(users.ana.email);
+    const get = (url: string, c = cookie) => app.inject({ method: 'GET', url, headers: headers(c) });
+    const patch = (payload: unknown, c = cookie, csrf = true) =>
+      app.inject({ method: 'PATCH', url: `/api/v1/contacts/${contactId}`, headers: headers(c, csrf), payload: payload as object });
+
+    const listed = (await get('/api/v1/contacts?q=daniela')).json().items;
+    expect(listed).toHaveLength(1);
+    expect(listed[0]).toMatchObject({
+      id: contactId,
+      name: 'Daniela Contacto',
+      channels: ['whatsapp'],
+      tags: [],
+      optOutFollowups: false,
+      lastHandoffReason: 'precio',
+      followupSent: false,
+      conversation: { id: convId, mode: 'human', waitingAdvisor: true },
+      interest: { products: ['Archi Cenizo'], categories: ['Cerámicas'] },
+    });
+
+    // Etiquetas: se normalizan (sin #, minúsculas, sin repetir) y se validan.
+    expect((await patch({ tags: ['#Arquitecto', 'arquitecto', '  Obra   grande '] })).statusCode).toBe(200);
+    expect((await get(`/api/v1/contacts/${contactId}`)).json()).toMatchObject({
+      tags: ['arquitecto', 'obra grande'],
+      conversations: [{ id: convId, channel: 'whatsapp' }],
+    });
+    expect((await patch({ tags: ['<script>'] })).statusCode).toBe(400);
+    expect((await patch({ tags: Array.from({ length: 16 }, (_, i) => `t${i}`) })).statusCode).toBe(400);
+    expect((await patch({ precio: 1 })).statusCode).toBe(400);
+    expect((await patch({})).statusCode).toBe(400);
+    expect((await patch({ tags: ['x'] }, cookie, false)).statusCode).toBe(403);
+
+    // Notas y "no enviar seguimientos".
+    expect((await patch({ notes: '  Prefiere que le escriban en la tarde. ', optOutFollowups: true })).statusCode).toBe(200);
+    const after = (await get(`/api/v1/contacts/${contactId}`)).json();
+    expect(after).toMatchObject({ notes: 'Prefiere que le escriban en la tarde.', optOutFollowups: true, tags: ['arquitecto', 'obra grande'] });
+
+    // Filtro por etiqueta, búsqueda por etiqueta y por teléfono, y lista de etiquetas con conteo.
+    expect((await get('/api/v1/contacts?tag=arquitecto')).json().items.map((i: { id: string }) => i.id)).toEqual([contactId]);
+    expect((await get('/api/v1/contacts?q=obra')).json().items.map((i: { id: string }) => i.id)).toContain(contactId);
+    expect((await get('/api/v1/contacts?q=%25')).statusCode).toBe(200);
+    expect((await get('/api/v1/contact-tags')).json().items).toEqual(expect.arrayContaining([{ tag: 'arquitecto', count: 1 }]));
+    // La conversación también muestra las etiquetas del contacto.
+    expect((await get(`/api/v1/conversations/${convId}`)).json().contact).toMatchObject({ id: contactId, tags: ['arquitecto', 'obra grande'] });
+
+    // Otro negocio no ve ni edita el contacto.
+    const ajeno = await login(users.ajeno.email);
+    expect((await get(`/api/v1/contacts/${contactId}`, ajeno.cookie)).statusCode).toBe(404);
+    expect((await patch({ tags: ['hack'] }, ajeno.cookie)).statusCode).toBe(404);
+    expect((await get('/api/v1/contacts?q=daniela', ajeno.cookie)).json().items).toEqual([]);
+    expect((await get('/api/v1/contact-tags', ajeno.cookie)).json().items).toEqual([]);
+  });
 });

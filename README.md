@@ -21,6 +21,7 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 | Visión: el bot mira las fotos del cliente y busca lo más parecido del catálogo | Hecho |
 | Cotización en PDF | Pendiente (F1.5) |
 | Seguimiento automático: mensaje del bot en 24 h y plantilla aprobada después | Hecho (la plantilla falta aprobarla en Meta) |
+| Contactos con etiquetas, notas y señales automáticas en el panel | Hecho |
 
 ## Estructura
 
@@ -84,6 +85,7 @@ npm run dev:panel   # panel en http://localhost:5180
 - Otros usuarios: `npm run user:create -- --tenant-id <uuid> --email ana@negocio.com --name "Ana" [--role agent|admin|owner]` (imprime una contraseña temporal una sola vez).
 - Cuando el bot deriva, el panel avisa en vivo (sonido, contador en la pestaña y notificación del sistema si se activan los avisos) y el worker manda un correo a los asesores con el resumen y el enlace. Sin `SMTP_HOST` el correo solo queda en el log.
 - El asesor toma la conversación (el bot se calla), responde desde el panel mientras la ventana de 24 h esté abierta, y al terminar la devuelve al bot o la cierra.
+- **Contactos** (`/contactos`): lista de clientes con búsqueda (nombre, teléfono o etiqueta) y filtro por etiqueta. Las etiquetas las pone el equipo (en la ficha o arriba de la conversación; se guardan en minúsculas, máximo 15). Además cada contacto muestra señales que salen de los datos, no de la IA: qué productos le mostró el bot, si pidió precio, si espera o tiene asesor, si recibió seguimiento y si pidió que no le escriban. En la ficha hay notas del equipo y la opción de no enviarle seguimientos.
 - Seguridad: contraseñas con scrypt, sesiones con cookie `HttpOnly` + `SameSite=Strict` (solo el hash del token en la BD), cabecera `x-zenith-csrf` obligatoria en los cambios, límite de intentos de login por correo y por IP, y RLS por negocio en todos los datos.
 - En producción, `npm run build:panel` y la API sirve el panel compilado.
 

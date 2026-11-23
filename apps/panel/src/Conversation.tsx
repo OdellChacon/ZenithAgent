@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
 import { api, ApiError, CHANNEL_LABELS, REASON_LABELS, type ConversationDetail, type Me, type Message } from './api';
 import { clock, remaining } from './time';
+import { TagEditor } from './TagEditor';
 
 const DELIVERY_LABELS: Record<string, string> = {
   queued: 'En cola',
@@ -52,12 +53,14 @@ export function Conversation({
   tick,
   onClose,
   onChanged,
+  onOpenContact,
 }: {
   id: string;
   me: Me;
   tick: number;
   onClose: () => void;
   onChanged: () => void;
+  onOpenContact: (contactId: string) => void;
 }) {
   const [data, setData] = useState<ConversationDetail | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +172,18 @@ export function Conversation({
             </>
           )}
         </div>
+      </div>
+
+      <div className="conv-tags">
+        <TagEditor
+          compact
+          contactId={data.contact.id}
+          tags={data.contact.tags}
+          onSaved={(tags) => setData({ ...data, contact: { ...data.contact, tags } })}
+        />
+        <button className="btn ghost small" type="button" onClick={() => onOpenContact(data.contact.id)}>
+          Ver ficha
+        </button>
       </div>
 
       {data.handoff && !data.handoff.returnedAt && (

@@ -179,7 +179,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
   async function loadConversation(c: PoolClient, id: string) {
     const { rows } = await c.query(
       `SELECT c.id, c.mode, c.status, c.assigned_user_id, u.name AS assigned_name, c.last_inbound_at, c.window_expires_at,
-              ct.name AS contact_name, ct.phone AS contact_phone, ca.channel,
+              ct.id AS contact_id, ct.name AS contact_name, ct.phone AS contact_phone, ct.tags AS contact_tags, ca.channel,
               (SELECT ci.external_user_id FROM contact_identities ci
                 WHERE ci.contact_id = c.contact_id AND ci.channel = ca.channel LIMIT 1) AS recipient
          FROM conversations c
@@ -198,8 +198,10 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           assigned_name: string | null;
           last_inbound_at: Date | null;
           window_expires_at: Date | null;
+          contact_id: string;
           contact_name: string | null;
           contact_phone: string | null;
+          contact_tags: string[];
           channel: Channel;
           recipient: string | null;
         }
@@ -240,7 +242,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       mode: conv.mode,
       status: conv.status,
       channel: conv.channel,
-      contact: { name: conv.contact_name ?? 'Cliente sin nombre', phone: conv.contact_phone },
+      contact: { id: conv.contact_id, name: conv.contact_name ?? 'Cliente sin nombre', phone: conv.contact_phone, tags: conv.contact_tags },
       assignedTo: conv.assigned_user_id ? { id: conv.assigned_user_id, name: conv.assigned_name } : null,
       window: {
         // Lo que puede hacer un asesor ahora: FREE = texto libre; fuera de eso, no se puede escribir.
@@ -380,6 +382,230 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     if (result === 'not_found') return err(reply, 404, 'not_found', 'Conversación no encontrada');
     if (result === 'forbidden') return err(reply, 403, 'forbidden', 'Esta conversación la atiende otro asesor');
     await deps.publish(u.tenantId, { type: 'conversation.updated', conversationId: req.params.id });
+    return { ok: true };
+  });
+
+  // ---------------------------------------------------------------- contactos
+
+  /**
+   * Resumen de cada contacto: sus etiquetas (las pone el equipo) y señales que salen de los
+   * datos, no de la IA: qué productos le mostró el bot, si pidió precio, si lo atiende un
+   * asesor, si recibió seguimiento y si pidió que no le escriban.
+   */
+  const CONTACT_SUMMARY = `
+    SELECT ct.id, ct.name, ct.phone, ct.tags, ct.opt_out_followups, ct.notes, ct.created_at,
+           (SELECT array_agg(DISTINCT ci.channel::text) FROM contact_identities ci WHERE ci.contact_id = ct.id) AS channels,
+           lc.id AS conversation_id, lc.mode, lc.status, lc.assigned_user_id, lc.updated_at AS last_activity_at,
+           (SELECT h.reason FROM handoffs h JOIN conversations c2 ON c2.id = h.conversation_id
+             WHERE c2.contact_id = ct.id ORDER BY h.requested_at DESC LIMIT 1) AS last_handoff_reason,
+           EXISTS (SELECT 1 FROM followups f JOIN conversations c3 ON c3.id = f.conversation_id
+                    WHERE c3.contact_id = ct.id AND f.status = 'sent') AS followup_sent,
+           shown.products, shown.categories
+      FROM contacts ct
+      LEFT JOIN LATERAL (SELECT c.id, c.mode, c.status, c.assigned_user_id, c.updated_at FROM conversations c
+                          WHERE c.contact_id = ct.id ORDER BY (c.status <> 'closed') DESC, c.updated_at DESC LIMIT 1) lc ON true
+      LEFT JOIN LATERAL (
+        SELECT (array_agg(name ORDER BY last_seen DESC))[1:3] AS products,
+               (array_agg(DISTINCT category) FILTER (WHERE category IS NOT NULL))[1:3] AS categories
+          FROM (SELECT p.name, coalesce(p.category_name, p.category) AS category, max(m.created_at) AS last_seen
+                  FROM messages m
+                  JOIN conversations c4 ON c4.id = m.conversation_id AND c4.contact_id = ct.id
+                  JOIN product_images pi ON pi.id = (m.attachments->0->>'productImageId')::uuid
+                  JOIN products p ON p.id = pi.product_id
+                 WHERE m.author = 'bot' AND m.type = 'image'
+                 GROUP BY p.name, coalesce(p.category_name, p.category)) seen
+      ) shown ON true`;
+
+  type ContactRow = {
+    id: string;
+    name: string | null;
+    phone: string | null;
+    tags: string[];
+    opt_out_followups: boolean;
+    notes: string | null;
+    created_at: Date;
+    channels: string[] | null;
+    conversation_id: string | null;
+    mode: 'bot' | 'human' | null;
+    status: string | null;
+    assigned_user_id: string | null;
+    last_activity_at: Date | null;
+    last_handoff_reason: string | null;
+    followup_sent: boolean;
+    products: string[] | null;
+    categories: string[] | null;
+  };
+
+  const presentContact = (r: ContactRow) => ({
+    id: r.id,
+    name: r.name ?? 'Cliente sin nombre',
+    phone: r.phone,
+    channels: r.channels ?? [],
+    tags: r.tags,
+    notes: r.notes,
+    optOutFollowups: r.opt_out_followups,
+    lastActivityAt: r.last_activity_at ?? r.created_at,
+    conversation: r.conversation_id
+      ? {
+          id: r.conversation_id,
+          mode: r.mode,
+          status: r.status,
+          waitingAdvisor: r.mode === 'human' && !r.assigned_user_id && r.status !== 'closed',
+        }
+      : null,
+    lastHandoffReason: r.last_handoff_reason,
+    followupSent: r.followup_sent,
+    interest: { products: r.products ?? [], categories: r.categories ?? [] },
+  });
+
+  /** Etiquetas en minúsculas, sin # ni espacios de más. */
+  const tagSchema = z
+    .string()
+    .transform((t) => t.trim().replace(/^#+/, '').replace(/\s+/g, ' ').toLocaleLowerCase('es'))
+    .pipe(
+      z
+        .string()
+        .min(1, 'Etiqueta vacía')
+        .max(30, 'Cada etiqueta tiene como máximo 30 caracteres')
+        .regex(/^[\p{L}\p{N} _-]+$/u, 'Usa letras, números, espacios, - o _'),
+    );
+
+  const contactListSchema = z.object({
+    q: z.string().trim().max(80).optional(),
+    tag: tagSchema.optional(),
+  });
+
+  // % y _ son comodines de LIKE: se escapan para buscar el texto tal cual.
+  const likeEscape = (s: string) => s.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+
+  app.get('/api/v1/contacts', async (req, reply) => {
+    const parsed = contactListSchema.safeParse(req.query);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Filtro inválido');
+    const { q, tag } = parsed.data;
+    const digits = q?.replace(/\D/g, '') ?? '';
+    const rows = await tenant(req, async (c) =>
+      (
+        await c.query<ContactRow>(
+          `${CONTACT_SUMMARY}
+            WHERE ($1::text IS NULL OR ct.name ILIKE '%' || $1 || '%' OR ($2 <> '' AND ct.phone LIKE '%' || $2 || '%')
+                   OR EXISTS (SELECT 1 FROM unnest(ct.tags) tg WHERE tg ILIKE '%' || $1 || '%'))
+              AND ($3::text IS NULL OR $3 = ANY (ct.tags))
+            ORDER BY coalesce(lc.updated_at, ct.created_at) DESC
+            LIMIT 200`,
+          [q ? likeEscape(q) : null, digits, tag ?? null],
+        )
+      ).rows,
+    );
+    return { items: rows.map(presentContact) };
+  });
+
+  app.get('/api/v1/contact-tags', async (req) => {
+    const rows = await tenant(req, async (c) =>
+      (
+        await c.query<{ tag: string; count: number }>(
+          `SELECT tg AS tag, count(*)::int AS count FROM contacts, unnest(tags) tg GROUP BY tg ORDER BY count(*) DESC, tg LIMIT 100`,
+        )
+      ).rows,
+    );
+    return { items: rows };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/v1/contacts/:id', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Contacto no encontrado');
+    const data = await tenant(req, async (c) => {
+      const contact = (await c.query<ContactRow>(`${CONTACT_SUMMARY} WHERE ct.id = $1`, [req.params.id])).rows[0];
+      if (!contact) return null;
+      const conversations = await c.query<{
+        id: string;
+        mode: string;
+        status: string;
+        channel: string;
+        created_at: Date;
+        updated_at: Date;
+        last_body: string | null;
+        last_author: string | null;
+        last_type: string | null;
+      }>(
+        `SELECT c.id, c.mode, c.status, ca.channel, c.created_at, c.updated_at,
+                lm.body AS last_body, lm.author AS last_author, lm.type AS last_type
+           FROM conversations c
+           JOIN channel_accounts ca ON ca.id = c.channel_account_id
+           LEFT JOIN LATERAL (SELECT body, author, type FROM messages m
+                               WHERE m.conversation_id = c.id ORDER BY seq DESC LIMIT 1) lm ON true
+          WHERE c.contact_id = $1
+          ORDER BY c.updated_at DESC
+          LIMIT 20`,
+        [req.params.id],
+      );
+      return { contact, conversations: conversations.rows };
+    });
+    if (!data) return err(reply, 404, 'not_found', 'Contacto no encontrado');
+    return {
+      ...presentContact(data.contact),
+      conversations: data.conversations.map((r) => ({
+        id: r.id,
+        mode: r.mode,
+        status: r.status,
+        channel: r.channel,
+        startedAt: r.created_at,
+        updatedAt: r.updated_at,
+        lastMessage: r.last_author ? { body: r.last_body, author: r.last_author, type: r.last_type } : null,
+      })),
+    };
+  });
+
+  const contactPatchSchema = z
+    .object({
+      name: z.string().trim().min(1, 'El nombre no puede quedar vacío').max(80).optional(),
+      tags: z
+        .array(tagSchema)
+        .max(15, 'Máximo 15 etiquetas por contacto')
+        .transform((tags) => [...new Set(tags)])
+        .optional(),
+      notes: z
+        .string()
+        .max(2000, 'Las notas tienen como máximo 2000 caracteres')
+        .transform((n) => n.trim() || null)
+        .nullable()
+        .optional(),
+      optOutFollowups: z.boolean().optional(),
+    })
+    .strict()
+    .refine((v) => Object.keys(v).length > 0, 'No hay cambios');
+
+  app.patch<{ Params: { id: string } }>('/api/v1/contacts/:id', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Contacto no encontrado');
+    const parsed = contactPatchSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const v = parsed.data;
+    const updated = await tenant(req, async (c) => {
+      const { rows } = await c.query<{ id: string; conversation_id: string | null }>(
+        `UPDATE contacts SET
+            name = CASE WHEN $2 THEN $3 ELSE name END,
+            tags = CASE WHEN $4 THEN $5::text[] ELSE tags END,
+            notes = CASE WHEN $6 THEN $7 ELSE notes END,
+            opt_out_followups = CASE WHEN $8 THEN $9 ELSE opt_out_followups END,
+            updated_at = now()
+          WHERE id = $1
+          RETURNING id, (SELECT id FROM conversations WHERE contact_id = $1 ORDER BY updated_at DESC LIMIT 1) AS conversation_id`,
+        [
+          req.params.id,
+          v.name !== undefined,
+          v.name ?? null,
+          v.tags !== undefined,
+          v.tags ?? [],
+          v.notes !== undefined,
+          v.notes ?? null,
+          v.optOutFollowups !== undefined,
+          v.optOutFollowups ?? false,
+        ],
+      );
+      return rows[0] ?? null;
+    });
+    if (!updated) return err(reply, 404, 'not_found', 'Contacto no encontrado');
+    if (updated.conversation_id) {
+      await deps.publish(user(req).tenantId, { type: 'conversation.updated', conversationId: updated.conversation_id });
+    }
     return { ok: true };
   });
 

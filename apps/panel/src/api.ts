@@ -41,11 +41,46 @@ export interface ConversationDetail {
   mode: 'bot' | 'human';
   status: string;
   channel: string;
-  contact: { name: string; phone: string | null };
+  contact: { id: string; name: string; phone: string | null; tags: string[] };
   assignedTo: { id: string; name: string } | null;
   window: { state: WindowState; expiresAt: string | null };
   handoff: { reason: string; summary: string | null; requestedAt: string; takenAt: string | null; returnedAt: string | null } | null;
   messages: Message[];
+}
+
+export interface ContactSummary {
+  id: string;
+  name: string;
+  phone: string | null;
+  channels: string[];
+  tags: string[];
+  notes: string | null;
+  optOutFollowups: boolean;
+  lastActivityAt: string;
+  conversation: { id: string; mode: 'bot' | 'human'; status: string; waitingAdvisor: boolean } | null;
+  lastHandoffReason: string | null;
+  followupSent: boolean;
+  /** Productos que el bot le mostró con foto (los más recientes) y sus categorías. */
+  interest: { products: string[]; categories: string[] };
+}
+
+export interface ContactDetail extends ContactSummary {
+  conversations: {
+    id: string;
+    mode: string;
+    status: string;
+    channel: string;
+    startedAt: string;
+    updatedAt: string;
+    lastMessage: { body: string | null; author: string; type: string } | null;
+  }[];
+}
+
+export interface ContactPatch {
+  name?: string;
+  tags?: string[];
+  notes?: string | null;
+  optOutFollowups?: boolean;
 }
 
 export class ApiError extends Error {
@@ -58,7 +93,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`/api/v1${path}`, {
@@ -66,9 +101,9 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown):
       credentials: 'same-origin',
       headers: {
         Accept: 'application/json',
-        ...(method === 'POST' ? { 'Content-Type': 'application/json', 'x-zenith-csrf': '1' } : {}),
+        ...(method !== 'GET' ? { 'Content-Type': 'application/json', 'x-zenith-csrf': '1' } : {}),
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : method === 'POST' ? { body: '{}' } : {}),
+      ...(body !== undefined ? { body: JSON.stringify(body) } : method !== 'GET' ? { body: '{}' } : {}),
     });
   } catch {
     throw new ApiError(0, 'network', 'No hay conexión con el servidor');
@@ -88,6 +123,16 @@ export const api = {
   send: (id: string, text: string, clientId: string) =>
     request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/messages`, { text, clientId }),
   finish: (id: string, action: 'release' | 'close') => request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/finish`, { action }),
+  contacts: (filters: { q?: string; tag?: string }) => {
+    const params = new URLSearchParams();
+    if (filters.q) params.set('q', filters.q);
+    if (filters.tag) params.set('tag', filters.tag);
+    const qs = params.toString();
+    return request<{ items: ContactSummary[] }>('GET', `/contacts${qs ? `?${qs}` : ''}`);
+  },
+  contact: (id: string) => request<ContactDetail>('GET', `/contacts/${encodeURIComponent(id)}`),
+  contactTags: () => request<{ items: { tag: string; count: number }[] }>('GET', '/contact-tags'),
+  updateContact: (id: string, patch: ContactPatch) => request<{ ok: true }>('PATCH', `/contacts/${encodeURIComponent(id)}`, patch),
 };
 
 export const REASON_LABELS: Record<string, string> = {
