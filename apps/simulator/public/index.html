@@ -249,6 +249,13 @@
     </div>
     <div class="meta-line">Número simulado: <code id="number"></code></div>
 
+    <div class="label">Asesor desde la app del negocio</div>
+    <form id="agentForm" class="row">
+      <input id="agentText" class="field" maxlength="4096" autocomplete="off" placeholder="Responder como asesor…" aria-label="Mensaje del asesor desde el teléfono de la tienda">
+      <button type="submit" class="ghost">Enviar</button>
+    </form>
+    <div class="meta-line">Simula que alguien de la tienda contesta desde WhatsApp Business: el bot se calla en este chat.</div>
+
     <div class="label">Estado</div>
     <div class="status"><span id="dot" class="dot"></span><span id="conn">Conectando…</span></div>
 
@@ -562,6 +569,28 @@
     }
     save(); renderChat();
   }
+
+  $('agentForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const input = $('agentText');
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = '';
+    try {
+      const res = await fetch('/api/agent-reply', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ to: state.number, text }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        state.messages.push({ kind: 'system', text: (body.error && body.error.message) || 'No se pudo enviar el mensaje del asesor', at: new Date().toISOString() });
+        save(); renderChat();
+      }
+    } catch {
+      state.messages.push({ kind: 'system', text: 'El simulador no responde.', at: new Date().toISOString() });
+      save(); renderChat();
+    }
+  });
 
   $('composer').addEventListener('submit', (e) => {
     e.preventDefault();

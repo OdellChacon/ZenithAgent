@@ -88,3 +88,26 @@ export const statusWebhook = {
     },
   ],
 };
+
+/** Copia de mensajes que el negocio mandó desde la app (coexistencia), con la forma de Meta. */
+export function echoWebhook(echoes: Record<string, unknown>[]) {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: 'WABA_ID',
+        changes: [
+          {
+            field: 'smb_message_echoes',
+            value: {
+              messaging_product: 'whatsapp',
+              metadata: { display_phone_number: '584140000000', phone_number_id: PHONE_NUMBER_ID },
+              contacts: [{ wa_id: '584141112233', user_id: 'VE.123' }],
+              message_echoes: echoes,
+            },
+          },
+        ],
+      },
+    ],
+  };
+}

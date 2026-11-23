@@ -8,6 +8,7 @@ import {
   type Pool,
   type PoolClient,
 } from '@zenith/db';
+import { parseTakeoverSettings } from '@zenith/brain';
 
 export type InboundOutcome =
   | {
@@ -18,6 +19,16 @@ export type InboundOutcome =
       duplicate: boolean;
       /** Modo de la conversación: solo en 'bot' responde la IA. */
       mode: 'bot' | 'human';
+      /** El bot retomó la conversación porque el asesor dejó de escribir desde la app. */
+      resumed: boolean;
+    }
+  | {
+      /** Un asesor escribió desde la app de WhatsApp Business: el bot se calla en ese chat. */
+      result: 'agent_echo';
+      tenantId: string;
+      conversationId: string;
+      messageId: string;
+      duplicate: boolean;
     }
   | { result: 'status'; tenantId: string; updated: number }
   | { result: 'ignored'; reason: string }
@@ -53,7 +64,13 @@ export async function processInboundEvent(pool: Pool, webhookEventId: string): P
       const outcome =
         event.kind === 'status'
           ? await applyStatus(client, account.tenantId, event)
-          : await storeMessage(client, account.tenantId, account.channelAccountId, event);
+          : event.kind === 'echo'
+            ? await storeAgentEcho(client, account.tenantId, account.channelAccountId, event)
+            : await storeMessage(client, account.tenantId, account.channelAccountId, event);
+      if (outcome.result === 'ignored') {
+        await finishWebhookEvent(client, row.id, 'ignored', outcome.reason);
+        return outcome;
+      }
       await finishWebhookEvent(client, row.id, 'processed');
       return outcome;
     });
@@ -114,6 +131,8 @@ async function storeMessage(
     if (!messageId) throw new Error('No se encontró el mensaje duplicado');
   }
 
+  const resumed = await resumeBotIfAgentLeft(client, tenantId, conversationId);
+
   // La ventana se mide desde el último mensaje del usuario, aunque lleguen desordenados.
   const occurredAt = new Date(event.occurredAt);
   const updated = await client.query<{ mode: 'bot' | 'human' }>(
@@ -126,7 +145,85 @@ async function storeMessage(
     [conversationId, occurredAt, windowExpiresAt(occurredAt)],
   );
 
-  return { result: 'message', tenantId, conversationId, messageId, duplicate, mode: updated.rows[0]!.mode };
+  return { result: 'message', tenantId, conversationId, messageId, duplicate, mode: updated.rows[0]!.mode, resumed };
+}
+
+/**
+ * Si un asesor atendió desde la app y lleva más de `resumeBotAfterMinutes` sin escribir, el
+ * bot vuelve a atender. No toca chats tomados desde el panel (esos se devuelven a mano).
+ */
+async function resumeBotIfAgentLeft(client: PoolClient, tenantId: string, conversationId: string): Promise<boolean> {
+  const tenant = await client.query<{ settings: unknown }>('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
+  const { resumeBotAfterMinutes } = parseTakeoverSettings(tenant.rows[0]?.settings);
+  if (resumeBotAfterMinutes <= 0) return false;
+  const { rowCount } = await client.query(
+    `UPDATE conversations SET mode = 'bot', agent_active_at = NULL, updated_at = now()
+      WHERE id = $1 AND mode = 'human' AND assigned_user_id IS NULL
+        AND agent_active_at < now() - make_interval(mins => $2)`,
+    [conversationId, resumeBotAfterMinutes],
+  );
+  if (!rowCount) return false;
+  await client.query('UPDATE handoffs SET returned_at = now() WHERE conversation_id = $1 AND returned_at IS NULL', [conversationId]);
+  return true;
+}
+
+/**
+ * Guarda lo que un asesor mandó desde la app de WhatsApp Business y calla al bot en ese chat.
+ * Si había un pase a asesor esperando, queda como atendido. No mueve la ventana de 24 h:
+ * según Meta, los mensajes de la app no la abren ni la extienden.
+ */
+async function storeAgentEcho(
+  client: PoolClient,
+  tenantId: string,
+  channelAccountId: string,
+  event: ParsedEvent,
+): Promise<InboundOutcome> {
+  const to = event.to;
+  if (!to) throw new Error('Copia de mensaje sin destinatario');
+
+  // Lo que manda la API no debería volver como copia; si vuelve, es del bot y no cuenta.
+  const own = await client.query('SELECT 1 FROM outbound_messages WHERE tenant_id = $1 AND external_message_id = $2', [
+    tenantId,
+    event.externalMessageId,
+  ]);
+  if (own.rowCount) return { result: 'ignored', reason: 'copia de un mensaje enviado por la API' };
+
+  const contactId = await upsertContact(client, tenantId, event.channel, to);
+  const conversationId = await openConversation(client, tenantId, channelAccountId, contactId);
+
+  const type = event.media?.[0]?.type ?? (event.unsupportedType ? event.unsupportedType : 'text');
+  const inserted = await client.query<{ id: string }>(
+    `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments, external_message_id, created_at)
+     VALUES ($1, $2, 'out', 'agent', $3, $4, $5, $6, $7)
+     ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING
+     RETURNING id`,
+    [tenantId, conversationId, type, event.text ?? null, JSON.stringify(event.media ?? []), event.externalMessageId ?? null, event.occurredAt],
+  );
+  let messageId = inserted.rows[0]?.id;
+  const duplicate = !messageId;
+  if (!messageId) {
+    const existing = await client.query<{ id: string }>('SELECT id FROM messages WHERE tenant_id = $1 AND external_message_id = $2', [
+      tenantId,
+      event.externalMessageId,
+    ]);
+    messageId = existing.rows[0]?.id;
+    if (!messageId) throw new Error('No se encontró el mensaje duplicado');
+  }
+
+  const occurredAt = new Date(event.occurredAt);
+  await client.query(
+    `UPDATE conversations
+        SET mode = 'human',
+            agent_active_at = GREATEST(COALESCE(agent_active_at, $2), $2),
+            last_outbound_at = GREATEST(COALESCE(last_outbound_at, $2), $2),
+            updated_at = now()
+      WHERE id = $1`,
+    [conversationId, occurredAt],
+  );
+  await client.query('UPDATE handoffs SET taken_at = now() WHERE conversation_id = $1 AND returned_at IS NULL AND taken_at IS NULL', [
+    conversationId,
+  ]);
+  return { result: 'agent_echo', tenantId, conversationId, messageId, duplicate };
 }
 
 async function upsertContact(

@@ -9,7 +9,7 @@ import {
   WhatsAppPayloadError,
   WhatsAppSendError,
 } from '../src/index.js';
-import { imageWebhook, PHONE_NUMBER_ID, statusWebhook, textWebhook } from './fixtures.js';
+import { echoWebhook, imageWebhook, PHONE_NUMBER_ID, statusWebhook, textWebhook } from './fixtures.js';
 
 const SECRET = 'app-secret-de-prueba';
 
@@ -82,6 +82,50 @@ describe('parseWhatsAppWebhook', () => {
     const body = textWebhook();
     body.entry[0]!.changes.unshift({ field: 'messages', value: { nada: true } } as never);
     expect(parseWhatsAppWebhook(body)).toHaveLength(1);
+  });
+
+  it('traduce la copia de lo que el negocio mandó desde la app', () => {
+    const events = parseWhatsAppWebhook(
+      echoWebhook([
+        { from: '584140000000', to: '584141112233', to_user_id: 'VE.123', id: 'wamid.E1', timestamp: '1763632900', type: 'text', text: { body: 'Le paso la cotización' } },
+        { from: '584140000000', to: '584141112233', id: 'wamid.E2', timestamp: 1763632901, type: 'image', image: { id: 'MEDIA9', mime_type: 'image/jpeg', caption: 'Así queda' } },
+        { from: '584140000000', to: '584141112233', id: 'wamid.E3', timestamp: '1763632902', type: 'location' },
+      ]),
+    );
+    expect(events).toEqual([
+      {
+        channel: 'whatsapp',
+        channelExternalAccountId: PHONE_NUMBER_ID,
+        externalEventId: 'echo:wamid.E1',
+        externalMessageId: 'wamid.E1',
+        kind: 'echo',
+        occurredAt: new Date(1763632900 * 1000).toISOString(),
+        to: { externalUserId: '584141112233', phone: '584141112233' },
+        text: 'Le paso la cotización',
+      },
+      expect.objectContaining({
+        kind: 'echo',
+        externalMessageId: 'wamid.E2',
+        text: 'Así queda',
+        media: [{ type: 'image', externalMediaId: 'MEDIA9', mimeType: 'image/jpeg', caption: 'Así queda' }],
+      }),
+      expect.objectContaining({ kind: 'echo', externalMessageId: 'wamid.E3', unsupportedType: 'location' }),
+    ]);
+  });
+
+  it('no trata como mensaje nuevo una edición, un borrado ni una copia sin destinatario', () => {
+    const events = parseWhatsAppWebhook(
+      echoWebhook([
+        { from: '584140000000', to: '584141112233', id: 'wamid.E4', timestamp: '1763632903', type: 'revoke', revoke: { original_message_id: 'wamid.E1' } },
+        { from: '584140000000', to: '584141112233', id: 'wamid.E5', timestamp: '1763632904', type: 'edit', edit: { original_message_id: 'wamid.E1' } },
+        { from: '584140000000', to_user_id: 'VE.123', id: 'wamid.E6', timestamp: '1763632905', type: 'text', text: { body: 'Hola' } },
+      ]),
+    );
+    expect(events.map((e) => [e.kind, e.unsupportedType])).toEqual([
+      ['unsupported', 'echo_revoke'],
+      ['unsupported', 'echo_edit'],
+      ['unsupported', 'echo_sin_destinatario'],
+    ]);
   });
 });
 

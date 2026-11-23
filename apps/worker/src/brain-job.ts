@@ -298,7 +298,7 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
 
     let handoffId: string | undefined;
     if (brain.handoff) {
-      await client.query(`UPDATE conversations SET mode = 'human', updated_at = now() WHERE id = $1`, [job.conversationId]);
+      await client.query(`UPDATE conversations SET mode = 'human', agent_active_at = NULL, updated_at = now() WHERE id = $1`, [job.conversationId]);
       const handoff = await client.query<{ id: string }>(
         `INSERT INTO handoffs (tenant_id, conversation_id, reason, summary) VALUES ($1, $2, $3, $4) RETURNING id`,
         [job.tenantId, job.conversationId, brain.handoff.reason, brain.handoff.summary.slice(0, 1000)],

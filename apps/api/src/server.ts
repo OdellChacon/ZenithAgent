@@ -135,7 +135,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       (
         await c.query(
           `SELECT c.id, ct.name AS contact_name, ca.channel, c.mode, c.status, c.assigned_user_id, u.name AS assigned_name,
-                  c.window_expires_at, c.updated_at,
+                  c.window_expires_at, c.updated_at, c.agent_active_at,
                   lm.body AS last_body, lm.author AS last_author, lm.type AS last_type, lm.created_at AS last_at,
                   h.reason AS handoff_reason, h.summary AS handoff_summary, h.requested_at AS handoff_at
              FROM conversations c
@@ -149,7 +149,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
                                  ORDER BY requested_at DESC LIMIT 1) h ON true
             WHERE c.status <> 'closed'
               AND CASE $1
-                    WHEN 'pending' THEN c.mode = 'human' AND c.assigned_user_id IS NULL
+                    WHEN 'pending' THEN c.mode = 'human' AND c.assigned_user_id IS NULL AND c.agent_active_at IS NULL
                     WHEN 'mine' THEN c.assigned_user_id = $2
                     ELSE true END
             ORDER BY CASE WHEN $1 = 'pending' THEN h.requested_at END ASC NULLS LAST, c.updated_at DESC
@@ -166,6 +166,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         mode: r.mode,
         status: r.status,
         assignedTo: r.assigned_user_id ? { id: r.assigned_user_id, name: r.assigned_name } : null,
+        agentPhoneAt: r.agent_active_at,
         lastMessage: r.last_at ? { body: r.last_body, author: r.last_author, type: r.last_type, at: r.last_at } : null,
         handoff: r.handoff_at ? { reason: r.handoff_reason, summary: r.handoff_summary, requestedAt: r.handoff_at } : null,
         windowExpiresAt: r.window_expires_at,
@@ -178,7 +179,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
 
   async function loadConversation(c: PoolClient, id: string) {
     const { rows } = await c.query(
-      `SELECT c.id, c.mode, c.status, c.assigned_user_id, u.name AS assigned_name, c.last_inbound_at, c.window_expires_at,
+      `SELECT c.id, c.mode, c.status, c.assigned_user_id, u.name AS assigned_name, c.last_inbound_at, c.window_expires_at, c.agent_active_at,
               ct.id AS contact_id, ct.name AS contact_name, ct.phone AS contact_phone, ct.tags AS contact_tags, ca.channel,
               (SELECT ci.external_user_id FROM contact_identities ci
                 WHERE ci.contact_id = c.contact_id AND ci.channel = ca.channel LIMIT 1) AS recipient
@@ -198,6 +199,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           assigned_name: string | null;
           last_inbound_at: Date | null;
           window_expires_at: Date | null;
+          agent_active_at: Date | null;
           contact_id: string;
           contact_name: string | null;
           contact_phone: string | null;
@@ -244,6 +246,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       channel: conv.channel,
       contact: { id: conv.contact_id, name: conv.contact_name ?? 'Cliente sin nombre', phone: conv.contact_phone, tags: conv.contact_tags },
       assignedTo: conv.assigned_user_id ? { id: conv.assigned_user_id, name: conv.assigned_name } : null,
+      /** Cuándo escribió por última vez un asesor desde la app de WhatsApp Business. */
+      agentPhoneAt: conv.agent_active_at,
       window: {
         // Lo que puede hacer un asesor ahora: FREE = texto libre; fuera de eso, no se puede escribir.
         state: windowState({ channel: conv.channel, lastInboundAt: conv.last_inbound_at, now: now(), author: 'agent' }),
@@ -373,7 +377,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (!canAct(u, conv.assigned_user_id)) return 'forbidden' as const;
       // Devolver: el bot vuelve a responder. Cerrar: la próxima vez que escriba el cliente empieza una conversación nueva.
       await c.query(
-        `UPDATE conversations SET mode = 'bot', assigned_user_id = NULL, status = $2, updated_at = now() WHERE id = $1`,
+        `UPDATE conversations SET mode = 'bot', assigned_user_id = NULL, agent_active_at = NULL, status = $2, updated_at = now() WHERE id = $1`,
         [conv.id, parsed.data.action === 'close' ? 'closed' : 'open'],
       );
       await c.query('UPDATE handoffs SET returned_at = now() WHERE conversation_id = $1 AND returned_at IS NULL', [conv.id]);
@@ -395,14 +399,14 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
   const CONTACT_SUMMARY = `
     SELECT ct.id, ct.name, ct.phone, ct.tags, ct.opt_out_followups, ct.notes, ct.created_at,
            (SELECT array_agg(DISTINCT ci.channel::text) FROM contact_identities ci WHERE ci.contact_id = ct.id) AS channels,
-           lc.id AS conversation_id, lc.mode, lc.status, lc.assigned_user_id, lc.updated_at AS last_activity_at,
+           lc.id AS conversation_id, lc.mode, lc.status, lc.assigned_user_id, lc.agent_active_at, lc.updated_at AS last_activity_at,
            (SELECT h.reason FROM handoffs h JOIN conversations c2 ON c2.id = h.conversation_id
              WHERE c2.contact_id = ct.id ORDER BY h.requested_at DESC LIMIT 1) AS last_handoff_reason,
            EXISTS (SELECT 1 FROM followups f JOIN conversations c3 ON c3.id = f.conversation_id
                     WHERE c3.contact_id = ct.id AND f.status = 'sent') AS followup_sent,
            shown.products, shown.categories
       FROM contacts ct
-      LEFT JOIN LATERAL (SELECT c.id, c.mode, c.status, c.assigned_user_id, c.updated_at FROM conversations c
+      LEFT JOIN LATERAL (SELECT c.id, c.mode, c.status, c.assigned_user_id, c.agent_active_at, c.updated_at FROM conversations c
                           WHERE c.contact_id = ct.id ORDER BY (c.status <> 'closed') DESC, c.updated_at DESC LIMIT 1) lc ON true
       LEFT JOIN LATERAL (
         SELECT (array_agg(name ORDER BY last_seen DESC))[1:3] AS products,
@@ -429,6 +433,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     mode: 'bot' | 'human' | null;
     status: string | null;
     assigned_user_id: string | null;
+    agent_active_at: Date | null;
     last_activity_at: Date | null;
     last_handoff_reason: string | null;
     followup_sent: boolean;
@@ -450,7 +455,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           id: r.conversation_id,
           mode: r.mode,
           status: r.status,
-          waitingAdvisor: r.mode === 'human' && !r.assigned_user_id && r.status !== 'closed',
+          waitingAdvisor: r.mode === 'human' && !r.assigned_user_id && !r.agent_active_at && r.status !== 'closed',
         }
       : null,
     lastHandoffReason: r.last_handoff_reason,

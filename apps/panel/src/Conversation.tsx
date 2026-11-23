@@ -24,7 +24,7 @@ function Bubble({ m }: { m: Message }) {
             ? 'Bot · seguimiento'
             : 'Bot'
         : m.author === 'agent'
-          ? (m.sentBy ?? 'Asesor')
+          ? (m.sentBy ?? 'Asesor · desde el teléfono')
           : 'Sistema';
   return (
     <div className={`msg ${m.direction} ${m.author}`}>
@@ -34,6 +34,8 @@ function Bubble({ m }: { m: Message }) {
           <img src={`/api/v1/product-images/${m.imageId}`} alt={m.body ?? 'Foto del producto'} loading="lazy" />
           {m.body && <figcaption>{m.body}</figcaption>}
         </figure>
+      ) : m.type !== 'text' && m.author === 'agent' && !m.sentBy ? (
+        <p className="muted">[{m.type === 'image' ? 'Foto' : m.type === 'audio' ? 'Nota de voz' : m.type === 'video' ? 'Video' : 'Archivo'} enviado desde el teléfono]{m.body ? ` ${m.body}` : ''}</p>
       ) : m.type !== 'text' && m.direction === 'in' ? (
         <p className="muted">[{m.type === 'image' ? 'Foto' : m.type === 'audio' ? 'Nota de voz' : 'Archivo'} del cliente]{m.body ? ` ${m.body}` : ''}</p>
       ) : (
@@ -133,6 +135,7 @@ export function Conversation({
 
   let status: { label: string; tone: string };
   if (data.mode === 'bot') status = { label: 'Lo atiende el bot', tone: 'muted-chip' };
+  else if (!data.assignedTo && data.agentPhoneAt) status = { label: 'Lo atiende un asesor desde el teléfono', tone: 'ok' };
   else if (!data.assignedTo) status = { label: 'Esperando asesor', tone: 'hot' };
   else status = { label: mine ? 'Lo atiendes tú' : `Lo atiende ${data.assignedTo.name}`, tone: 'ok' };
 

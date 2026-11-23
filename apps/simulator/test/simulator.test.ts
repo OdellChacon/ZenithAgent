@@ -26,6 +26,21 @@ describe('simulador: papel de cliente', () => {
     expect(event).toMatchObject({ kind: 'message', channelExternalAccountId: PHONE, text: 'Hola', from: { externalUserId: '584141234567', displayName: 'Ana' } });
   });
 
+  it('el asesor responde desde la app: el cliente lo recibe y el sistema recibe la copia', async () => {
+    const { app, sent } = setup();
+    const res = await app.inject({ method: 'POST', url: '/api/agent-reply', payload: { to: '584141234567', text: 'Le escribo por la cotización' } });
+    expect(res.statusCode).toBe(200);
+    expect(verifyMetaSignature(Buffer.from(sent[0]!.body), sent[0]!.signature, SECRET)).toBe(true);
+    const [event] = parseWhatsAppWebhook(JSON.parse(sent[0]!.body));
+    expect(event).toMatchObject({
+      kind: 'echo',
+      channelExternalAccountId: PHONE,
+      text: 'Le escribo por la cotización',
+      to: { externalUserId: '584141234567' },
+    });
+    expect((await app.inject({ method: 'POST', url: '/api/agent-reply', payload: { to: 'x', text: 'Hola' } })).statusCode).toBe(400);
+  });
+
   it('valida lo que escribe el navegador', async () => {
     const { app, gateway } = setup();
     expect((await app.inject({ method: 'POST', url: '/api/send', payload: { from: 'abc', name: 'Ana', text: 'Hola' } })).statusCode).toBe(400);

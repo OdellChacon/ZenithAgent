@@ -1,7 +1,11 @@
 export const CHANNELS = ['whatsapp', 'instagram', 'messenger', 'tiktok'] as const;
 export type Channel = (typeof CHANNELS)[number];
 
-export type EventKind = 'message' | 'status' | 'unsupported';
+/**
+ * message: lo escribió el cliente. echo: lo escribió alguien del negocio desde la app de
+ * WhatsApp Business o un dispositivo vinculado (no la API), así que el bot no lo envió.
+ */
+export type EventKind = 'message' | 'echo' | 'status' | 'unsupported';
 
 export type MediaType = 'image' | 'audio' | 'video' | 'document' | 'sticker';
 
@@ -28,7 +32,9 @@ export interface ParsedEvent {
   kind: EventKind;
   occurredAt: string;
   from?: { externalUserId: string; displayName?: string; phone?: string };
-  /** Id del mensaje en la plataforma (solo `kind = 'message'`). */
+  /** Cliente que recibió el mensaje (solo `kind = 'echo'`). */
+  to?: { externalUserId: string; displayName?: string; phone?: string };
+  /** Id del mensaje en la plataforma (`kind = 'message'` o `'echo'`). */
   externalMessageId?: string;
   text?: string;
   media?: MediaRef[];

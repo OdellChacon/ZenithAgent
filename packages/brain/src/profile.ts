@@ -83,6 +83,24 @@ export const followupSettingsSchema = z.object({
   maxAgeDays: z.number().int().min(1).max(60).default(14),
 });
 
+/**
+ * Asesores que contestan desde la app de WhatsApp Business. Al llegar un mensaje suyo, el bot
+ * se calla en ese chat; si el asesor no escribe más en este tiempo, el bot vuelve a atender
+ * cuando el cliente escriba. 0 = el bot no retoma solo (solo desde el panel).
+ */
+export const takeoverSettingsSchema = z.object({
+  resumeBotAfterMinutes: z.number().int().min(0).max(7 * 24 * 60).default(12 * 60),
+});
+
+export type TakeoverSettings = z.infer<typeof takeoverSettingsSchema>;
+
+/** Lee solo esta parte de la configuración; si está mal, usa los valores por defecto. */
+export function parseTakeoverSettings(settings: unknown): TakeoverSettings {
+  const raw = (settings as { takeover?: unknown } | null)?.takeover ?? {};
+  const parsed = takeoverSettingsSchema.safeParse(raw);
+  return parsed.success ? parsed.data : takeoverSettingsSchema.parse({});
+}
+
 export type FollowupSettings = z.infer<typeof followupSettingsSchema>;
 export type FollowupTemplate = z.infer<typeof followupTemplateSchema>;
 export type SendWindow = z.infer<typeof sendWindowSchema>;
@@ -97,6 +115,7 @@ export const tenantBotSettingsSchema = z.object({
     .default({ wastePercent: null }),
   // prefault: el objeto vacío pasa por el esquema y toma los valores por defecto.
   followups: followupSettingsSchema.prefault({}),
+  takeover: takeoverSettingsSchema.prefault({}),
 });
 
 export type BusinessProfile = z.infer<typeof businessProfileSchema>;

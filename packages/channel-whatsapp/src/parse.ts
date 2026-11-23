@@ -54,6 +54,32 @@ const valueSchema = z
   })
   .passthrough();
 
+/**
+ * Copia de un mensaje que alguien del negocio mandó desde la app de WhatsApp Business o un
+ * dispositivo vinculado (coexistencia). `to` puede faltar si el cliente solo tiene usuario.
+ */
+const echoSchema = z
+  .object({
+    id: z.string().min(1),
+    to: z.string().min(1).optional(),
+    timestamp: z.union([z.string().regex(/^\d+$/), z.number().int()]),
+    type: z.string(),
+    text: z.object({ body: z.string() }).optional(),
+    image: mediaSchema.optional(),
+    audio: mediaSchema.optional(),
+    video: mediaSchema.optional(),
+    document: mediaSchema.optional(),
+    sticker: mediaSchema.optional(),
+  })
+  .passthrough();
+
+const echoValueSchema = z
+  .object({
+    metadata: z.object({ phone_number_id: z.string().min(1) }).passthrough(),
+    message_echoes: z.array(echoSchema).optional(),
+  })
+  .passthrough();
+
 export const whatsappWebhookSchema = z.object({
   object: z.literal('whatsapp_business_account'),
   entry: z.array(
@@ -71,7 +97,7 @@ export class WhatsAppPayloadError extends Error {
 const MEDIA_TYPES: readonly MediaType[] = ['image', 'audio', 'video', 'document', 'sticker'];
 const DELIVERY_STATES: readonly DeliveryState[] = ['sent', 'delivered', 'read', 'failed'];
 
-const toIso = (unixSeconds: string) => new Date(Number(unixSeconds) * 1000).toISOString();
+const toIso = (unixSeconds: string | number) => new Date(Number(unixSeconds) * 1000).toISOString();
 
 type WaMessage = z.infer<typeof messageSchema>;
 
@@ -108,6 +134,36 @@ function toMessageEvent(msg: WaMessage, phoneNumberId: string, displayName: stri
   return { ...base, kind: 'unsupported', unsupportedType: msg.type };
 }
 
+type WaEcho = z.infer<typeof echoSchema>;
+
+function toEchoEvent(echo: WaEcho, phoneNumberId: string): ParsedEvent {
+  const base: ParsedEvent = {
+    channel: 'whatsapp',
+    channelExternalAccountId: phoneNumberId,
+    externalEventId: `echo:${echo.id}`,
+    externalMessageId: echo.id,
+    kind: 'echo',
+    occurredAt: toIso(echo.timestamp),
+  };
+  // Sin teléfono no se puede ubicar al cliente; editar o borrar no es un mensaje nuevo.
+  if (!echo.to) return { ...base, kind: 'unsupported', unsupportedType: 'echo_sin_destinatario' };
+  if (echo.type === 'edit' || echo.type === 'revoke') return { ...base, kind: 'unsupported', unsupportedType: `echo_${echo.type}` };
+
+  const withTo: ParsedEvent = { ...base, to: { externalUserId: echo.to, phone: echo.to } };
+  if (echo.type === 'text' && echo.text) return { ...withTo, text: echo.text.body };
+  if ((MEDIA_TYPES as readonly string[]).includes(echo.type)) {
+    const media = echo[echo.type as MediaType];
+    if (media) {
+      const ref: MediaRef = { type: echo.type as MediaType, externalMediaId: media.id };
+      if (media.mime_type) ref.mimeType = media.mime_type;
+      if (media.caption) ref.caption = media.caption;
+      return { ...withTo, media: [ref], ...(media.caption ? { text: media.caption } : {}) };
+    }
+  }
+  // Otros tipos (ubicación, contacto…): igual cuentan como que el asesor está atendiendo.
+  return { ...withTo, unsupportedType: echo.type };
+}
+
 /**
  * Traduce un webhook de WhatsApp a eventos normalizados. Un mismo webhook puede traer varios
  * mensajes y estados. Lanza `WhatsAppPayloadError` si el sobre no es de WhatsApp; los cambios
@@ -120,6 +176,12 @@ export function parseWhatsAppWebhook(body: unknown): ParsedEvent[] {
   const events: ParsedEvent[] = [];
   for (const entry of envelope.data.entry) {
     for (const change of entry.changes) {
+      if (change.field === 'smb_message_echoes') {
+        const value = echoValueSchema.safeParse(change.value);
+        if (!value.success) continue;
+        for (const echo of value.data.message_echoes ?? []) events.push(toEchoEvent(echo, value.data.metadata.phone_number_id));
+        continue;
+      }
       if (change.field !== 'messages') continue;
       const value = valueSchema.safeParse(change.value);
       if (!value.success) continue;

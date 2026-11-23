@@ -89,6 +89,14 @@ const inboundWorker = new Worker<InboundJobData>(
     if (outcome.result === 'message' && !outcome.duplicate) {
       await publish(outcome.tenantId, { type: 'message.new', conversationId: outcome.conversationId, direction: 'in', author: 'customer' });
     }
+    if (outcome.result === 'agent_echo' && !outcome.duplicate) {
+      // Un asesor contestó desde la app: el panel lo muestra y el bot ya no responde ahí.
+      await publish(outcome.tenantId, { type: 'message.new', conversationId: outcome.conversationId, direction: 'out', author: 'agent' });
+      await publish(outcome.tenantId, { type: 'conversation.updated', conversationId: outcome.conversationId });
+    }
+    if (outcome.result === 'message' && outcome.resumed) {
+      await publish(outcome.tenantId, { type: 'conversation.updated', conversationId: outcome.conversationId });
+    }
     if (outcome.result === 'message' && !outcome.duplicate && outcome.mode === 'bot') {
       // La espera agrupa ráfagas de mensajes; si llega otro, este turno se descarta solo.
       await brainQueue.add(

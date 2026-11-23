@@ -57,7 +57,8 @@ export function Inbox({ me, tick, selected, onSelect }: { me: Me; tick: number; 
       )}
       <ul className="list">
         {items?.map((c) => {
-          const waiting = c.mode === 'human' && !c.assignedTo;
+          const phone = c.mode === 'human' && !c.assignedTo && !!c.agentPhoneAt;
+          const waiting = c.mode === 'human' && !c.assignedTo && !phone;
           return (
             <li key={c.id}>
               <button type="button" className={`item ${selected === c.id ? 'active' : ''}`} onClick={() => onSelect(c.id)}>
@@ -68,6 +69,7 @@ export function Inbox({ me, tick, selected, onSelect }: { me: Me; tick: number; 
                 <div className="chips">
                   <span className="chip">{CHANNEL_LABELS[c.channel] ?? c.channel}</span>
                   {waiting && <span className="chip hot">Esperando asesor</span>}
+                  {phone && <span className="chip ok">Asesor desde el teléfono</span>}
                   {c.handoff && <span className="chip">{REASON_LABELS[c.handoff.reason] ?? c.handoff.reason}</span>}
                   {c.assignedTo && <span className="chip ok">{c.assignedTo.id === me.id ? 'Contigo' : c.assignedTo.name}</span>}
                   {c.mode === 'bot' && <span className="chip muted-chip">Bot</span>}

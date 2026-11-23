@@ -16,6 +16,8 @@ export interface ConversationSummary {
   mode: 'bot' | 'human';
   status: string;
   assignedTo: { id: string; name: string } | null;
+  /** Un asesor escribió desde la app de WhatsApp Business (el bot está callado ahí). */
+  agentPhoneAt: string | null;
   lastMessage: { body: string | null; author: string; type: string; at: string } | null;
   handoff: { reason: string; summary: string | null; requestedAt: string } | null;
   windowExpiresAt: string | null;
@@ -43,6 +45,7 @@ export interface ConversationDetail {
   channel: string;
   contact: { id: string; name: string; phone: string | null; tags: string[] };
   assignedTo: { id: string; name: string } | null;
+  agentPhoneAt: string | null;
   window: { state: WindowState; expiresAt: string | null };
   handoff: { reason: string; summary: string | null; requestedAt: string; takenAt: string | null; returnedAt: string | null } | null;
   messages: Message[];

@@ -41,6 +41,8 @@ export interface BotMessage {
   image?: string;
   /** Botones de respuesta rápida, si el mensaje es una plantilla que los tiene. */
   buttons?: string[];
+  /** Lo escribió un asesor desde la app del negocio, no el bot. */
+  fromAgent?: boolean;
   at: string;
 }
 
@@ -55,6 +57,11 @@ const sendSchema = z.object({
   name: z.string().trim().min(1).max(60),
   text: z.string().trim().min(1).max(4096),
   button: z.boolean().optional(),
+});
+
+const agentReplySchema = z.object({
+  to: z.string().regex(/^\d{8,15}$/, 'Número inválido'),
+  text: z.string().trim().min(1).max(4096),
 });
 
 const graphBodySchema = z.discriminatedUnion('type', [
@@ -112,14 +119,14 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     return res.status;
   }
 
-  const envelope = (value: Record<string, unknown>) => ({
+  const envelope = (value: Record<string, unknown>, field = 'messages') => ({
     object: 'whatsapp_business_account',
     entry: [
       {
         id: 'SIMULADOR',
         changes: [
           {
-            field: 'messages',
+            field,
             value: {
               messaging_product: 'whatsapp',
               metadata: { display_phone_number: 'simulador', phone_number_id: deps.phoneNumberId },
@@ -158,6 +165,44 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     if (status !== 200) {
       return reply.code(502).send({ error: { code: 'gateway_rejected', message: `El gateway respondió ${status}` } });
     }
+    return { ok: true, id };
+  });
+
+  // ---------------------------------------------------------------- papel de asesor en la app
+
+  /**
+   * Un asesor responde desde la app de WhatsApp Business del negocio (coexistencia): el cliente
+   * recibe el mensaje y Meta le manda al sistema una copia (smb_message_echoes).
+   */
+  app.post('/api/agent-reply', async (req, reply) => {
+    const parsed = agentReplySchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_input', message: parsed.error.issues[0]?.message ?? 'Datos inválidos' } });
+    }
+    const { to, text } = parsed.data;
+    const id = `wamid.SIMAPP${Date.now()}${++seq}`;
+    const at = new Date();
+    let status: number;
+    try {
+      status = await postWebhook(
+        envelope(
+          {
+            contacts: [{ wa_id: to }],
+            message_echoes: [
+              { from: 'simulador', to, id, timestamp: String(Math.floor(at.getTime() / 1000)), type: 'text', text: { body: text } },
+            ],
+          },
+          'smb_message_echoes',
+        ),
+      );
+    } catch {
+      return reply.code(502).send({ error: { code: 'gateway_unreachable', message: `No se pudo conectar con el gateway en ${deps.gatewayUrl}` } });
+    }
+    if (status !== 200) {
+      return reply.code(502).send({ error: { code: 'gateway_rejected', message: `El gateway respondió ${status}` } });
+    }
+    const message: BotMessage = { id, to, text, fromAgent: true, at: at.toISOString() };
+    bus.emit('bot', message);
     return { ok: true, id };
   });
 
