@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { parseWhatsAppWebhook, verifyMetaSignature } from '@zenith/channel-whatsapp';
+import {
+  exchangeSignupCode,
+  getPhoneInfo,
+  parseWhatsAppWebhook,
+  requestSmbAppData,
+  subscribeAppToWaba,
+  verifyMetaSignature,
+} from '@zenith/channel-whatsapp';
 import { buildSimulator } from '../src/server.js';
 
 const SECRET = 'secreto-simulador';
@@ -203,5 +210,39 @@ describe('simulador: papel de Meta', () => {
 
   it('el stream exige un número válido', async () => {
     expect((await setup().app.inject({ method: 'GET', url: '/api/stream?to=abc' })).statusCode).toBe(400);
+  });
+});
+
+describe('simulador: conexión del número (registro insertado)', () => {
+  it('responde como Graph al alta y manda el historial ficticio una sola vez', async () => {
+    const { app, sent } = setup();
+    // El cliente de alta real, apuntado al simulador.
+    const viaSim: typeof fetch = async (input, init) => {
+      const url = new URL(String(input));
+      const res = await app.inject({
+        method: (init?.method ?? 'GET') as 'GET' | 'POST',
+        url: url.pathname + url.search,
+        headers: Object.fromEntries(Object.entries((init?.headers as Record<string, string>) ?? {})),
+        ...(init?.body ? { payload: String(init.body) } : {}),
+      });
+      return new Response(res.body, { status: res.statusCode, headers: { 'content-type': 'application/json' } });
+    };
+    const graph = { graphApiVersion: 'v27.0', graphBaseUrl: 'http://localhost:4010', fetch: viaSim };
+    const token = await exchangeSignupCode(graph, { appId: 'simulador', appSecret: 's', code: 'simulador' });
+    expect(token).toMatch(/^SIM-TOKEN-/);
+    expect(await getPhoneInfo(graph, token, PHONE)).toMatchObject({ isOnBizApp: true, verifiedName: 'Simulador IMM' });
+    await subscribeAppToWaba(graph, token, '100000000000999');
+    expect(await requestSmbAppData(graph, token, PHONE, 'smb_app_state_sync')).toMatch(/^sim-/);
+    expect(await requestSmbAppData(graph, token, PHONE, 'history')).toMatch(/^sim-/);
+    await expect(requestSmbAppData(graph, token, PHONE, 'history')).rejects.toThrow('ya se pidió');
+
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    expect(verifyMetaSignature(Buffer.from(sent[0]!.body), sent[0]!.signature, SECRET)).toBe(true);
+    const events = parseWhatsAppWebhook(JSON.parse(sent[0]!.body));
+    expect(events.map((e) => [e.kind, e.from?.externalUserId, e.history?.messages.length])).toEqual([
+      ['history', '584247770001', 3],
+      ['history', '584247770002', 2],
+    ]);
+    expect(events[0]!.history!.messages.map((m) => m.fromBusiness)).toEqual([false, true, false]);
   });
 });

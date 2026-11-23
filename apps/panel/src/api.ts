@@ -1,3 +1,4 @@
+import type { SignupConfig, SignupResult } from './signup';
 export type View = 'pending' | 'mine' | 'all';
 export type WindowState = 'FREE' | 'TEMPLATE_ONLY' | 'HUMAN_AGENT_ONLY' | 'CLOSED';
 
@@ -93,6 +94,9 @@ export interface ChannelStatus {
   /** Meta desconectó el número de la API: el bot no atiende ahí. */
   disconnected: { at: string; reason: string | null; label: string } | null;
   history: { status: 'importing' | 'done' | 'declined'; progress: number } | null;
+  /** El número sigue en la app WhatsApp Business del teléfono. */
+  coexistence: boolean;
+  connectedAt: string;
 }
 
 export class ApiError extends Error {
@@ -144,6 +148,9 @@ export const api = {
   },
   contact: (id: string) => request<ContactDetail>('GET', `/contacts/${encodeURIComponent(id)}`),
   channels: () => request<{ items: ChannelStatus[] }>('GET', '/channels'),
+  signupConfig: () => request<SignupConfig>('GET', '/channels/whatsapp/signup'),
+  connectWhatsApp: (signup: SignupResult) =>
+    request<{ ok: true; name: string | null; coexistence: boolean; warnings: string[] }>('POST', '/channels/whatsapp/connect', signup),
   contactTags: () => request<{ items: { tag: string; count: number }[] }>('GET', '/contact-tags'),
   updateContact: (id: string, patch: ContactPatch) => request<{ ok: true }>('PATCH', `/contacts/${encodeURIComponent(id)}`, patch),
 };

@@ -61,13 +61,25 @@ describe.skipIf(!hasDb)('aislamiento multi-tenant (RLS)', () => {
     }
   });
 
-  it('la app no puede crear cuentas de canal ni tenants', async () => {
+  it('la app no crea tenants y solo conecta números de su propio negocio', async () => {
     await expect(app.query(`INSERT INTO tenants (name, slug) VALUES ('x', 'x-hack')`)).rejects.toThrow(/permission denied/);
+    // Conectar un número (panel → Embedded Signup) sí, pero solo en el negocio de la sesión.
     await expect(
       withTenant(app, a.tenantId, (c) =>
-        c.query(`INSERT INTO channel_accounts (tenant_id, channel, external_account_id) VALUES ($1, 'whatsapp', '999')`, [a.tenantId]),
+        c.query(`INSERT INTO channel_accounts (tenant_id, channel, external_account_id) VALUES ($1, 'whatsapp', '999')`, [b.tenantId]),
       ),
-    ).rejects.toThrow(/permission denied/);
+    ).rejects.toThrow(/row-level security/);
+    const own = `rls-${Date.now()}`;
+    await withTenant(app, a.tenantId, (c) =>
+      c.query(`INSERT INTO channel_accounts (tenant_id, channel, external_account_id) VALUES ($1, 'whatsapp', $2)`, [a.tenantId, own]),
+    );
+    // No puede cambiar de dueño, de número ni reactivar una cuenta desactivada.
+    for (const col of [`tenant_id = '${b.tenantId}'`, `external_account_id = 'otro'`, `status = 'active'`]) {
+      await expect(
+        withTenant(app, a.tenantId, (c) => c.query(`UPDATE channel_accounts SET ${col} WHERE external_account_id = $1`, [own])),
+      ).rejects.toThrow(/permission denied/);
+    }
+    await owner.query('DELETE FROM channel_accounts WHERE external_account_id = $1', [own]);
   });
 
   it('resolve_channel_account encuentra el tenant sin exponer otros datos', async () => {

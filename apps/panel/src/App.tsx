@@ -7,6 +7,7 @@ import { Conversation } from './Conversation';
 import { Contacts } from './Contacts';
 import { Header, type Section } from './Header';
 import { ChannelAlerts } from './ChannelAlerts';
+import { Channels } from './Channels';
 
 interface Route {
   section: Section;
@@ -19,10 +20,12 @@ function parsePath(path: string): Route {
   if (conv) return { section: 'inbox', id: conv[1]! };
   const contact = /^\/contactos(?:\/([0-9a-f-]{36}))?\/?$/i.exec(path);
   if (contact) return { section: 'contacts', id: contact[1] ?? null };
+  if (/^\/whatsapp\/?$/i.test(path)) return { section: 'channels', id: null };
   return { section: 'inbox', id: null };
 }
 
 function toPath(route: Route): string {
+  if (route.section === 'channels') return '/whatsapp';
   if (route.section === 'contacts') return route.id ? `/contactos/${route.id}` : '/contactos';
   return route.id ? `/conversaciones/${route.id}` : '/';
 }
@@ -97,7 +100,9 @@ export function App() {
     <div className="app">
       <Header me={me} live={live} section={route.section} onNavigate={(section) => go({ section, id: null })} onLogout={logout} />
       <ChannelAlerts tick={tick} />
-      {route.section === 'contacts' ? (
+      {route.section === 'channels' ? (
+        <Channels tick={tick} />
+      ) : route.section === 'contacts' ? (
         <Contacts tick={tick} selected={selected} onSelect={(id) => go({ section: 'contacts', id })} onOpenConversation={open} />
       ) : (
         <div className={`workspace ${selected ? 'has-selection' : ''}`}>

@@ -1,10 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import type { PanelEvent } from '@zenith/core';
 import type { Pool } from '@zenith/db';
 import { buildApi } from '../src/server.js';
-import { hashPassword, verifyPassword } from '@zenith/core';
+import { decryptCredentials, hashPassword, verifyPassword } from '@zenith/core';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 
 describe('contraseñas', () => {
@@ -32,6 +32,25 @@ describe.skipIf(!hasDb)('API del panel', () => {
   const enqueued: { tenantId: string; ids: string[] }[] = [];
   const published: PanelEvent[] = [];
   let app: ReturnType<typeof buildApi>;
+
+  // Meta falso para el registro insertado: anota cada llamada y responde como Graph API.
+  const masterKey = randomBytes(32);
+  const graph = { bizApp: true };
+  const graphCalls: string[] = [];
+  const fakeGraph: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    const body = init?.body ? ` ${String(init.body)}` : '';
+    graphCalls.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}${body}`);
+    const json = (status: number, data: unknown) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+    if (url.pathname.endsWith('/oauth/access_token')) {
+      return url.searchParams.get('code') === 'codigo-bueno'
+        ? json(200, { access_token: 'TOKEN-NEGOCIO', token_type: 'bearer' })
+        : json(400, { error: { code: 100, message: 'Invalid verification code format.' } });
+    }
+    if (url.pathname.endsWith('/subscribed_apps') || url.pathname.endsWith('/register')) return json(200, { success: true });
+    if (url.pathname.endsWith('/smb_app_data')) return json(200, { messaging_product: 'whatsapp', request_id: 'req-1' });
+    return json(200, { display_phone_number: '+58 414-0000001', verified_name: 'Inversiones Prueba', is_on_biz_app: graph.bizApp, platform_type: 'CLOUD_API' });
+  };
 
   const headers = (cookie?: string, csrf = true) => ({ ...(cookie ? { cookie } : {}), ...(csrf ? { 'x-zenith-csrf': '1' } : {}) });
 
@@ -93,6 +112,16 @@ describe.skipIf(!hasDb)('API del panel', () => {
       enqueueOutbound: async (tenantId, ids) => void enqueued.push({ tenantId, ids }),
       publish: async (_tenantId, event) => void published.push(event),
       subscribe: async () => async () => undefined,
+      whatsappSignup: {
+        appId: 'APP-1',
+        appSecret: 'SECRETO',
+        configId: 'CFG-1',
+        graphApiVersion: 'v27.0',
+        graphBaseUrl: 'https://graph.prueba.test',
+        masterKey,
+        masterKeyId: 'k1',
+        fetch: fakeGraph,
+      },
     });
   });
 
@@ -316,5 +345,83 @@ describe.skipIf(!hasDb)('API del panel', () => {
         [t.channelAccountId],
       );
     }
+  });
+
+  describe('conectar WhatsApp (registro insertado de Meta)', () => {
+    const post = (payload: unknown, cookie: string) =>
+      app.inject({ method: 'POST', url: '/api/v1/channels/whatsapp/connect', headers: headers(cookie), payload: payload as object });
+    const phone = (n: number) => `${Date.now()}${n}`;
+
+    it('solo el dueño o un administrador puede conectar', async () => {
+      const agent = await login(users.ana.email);
+      expect((await app.inject({ method: 'GET', url: '/api/v1/channels/whatsapp/signup', headers: headers(agent.cookie) })).json()).toEqual({
+        enabled: false,
+        canConnect: false,
+      });
+      expect((await post({ code: 'c', phoneNumberId: '1', wabaId: '2' }, agent.cookie)).statusCode).toBe(403);
+
+      const admin = await login(users.admin.email);
+      expect((await app.inject({ method: 'GET', url: '/api/v1/channels/whatsapp/signup', headers: headers(admin.cookie) })).json()).toEqual({
+        enabled: true,
+        canConnect: true,
+        appId: 'APP-1',
+        configId: 'CFG-1',
+        graphApiVersion: 'v27.0',
+        simulated: null,
+      });
+      expect((await post({ code: 'c', phoneNumberId: 'abc', wabaId: '2' }, admin.cookie)).statusCode).toBe(400);
+      expect(graphCalls).toEqual([]);
+    });
+
+    it('conecta un número que sigue en la app: sin registrarlo, y pide contactos e historial', async () => {
+      const admin = await login(users.admin.email);
+      const id = phone(1);
+      graph.bizApp = true;
+      graphCalls.length = 0;
+      published.length = 0;
+      const res = await post({ code: 'codigo-bueno', phoneNumberId: id, wabaId: '777' }, admin.cookie);
+      expect(res.statusCode).toBe(200);
+      expect(res.json()).toMatchObject({ ok: true, name: 'Inversiones Prueba · +58 414-0000001', coexistence: true, warnings: [] });
+      expect(graphCalls).toEqual([
+        'GET /v27.0/oauth/access_token?client_id=APP-1&client_secret=SECRETO&code=codigo-bueno',
+        `GET /v27.0/${id}?fields=display_phone_number%2Cverified_name%2Cis_on_biz_app%2Cplatform_type`,
+        'POST /v27.0/777/subscribed_apps',
+        `POST /v27.0/${id}/smb_app_data {"messaging_product":"whatsapp","sync_type":"smb_app_state_sync"}`,
+        `POST /v27.0/${id}/smb_app_data {"messaging_product":"whatsapp","sync_type":"history"}`,
+      ]);
+      const row = (await owner.query('SELECT * FROM channel_accounts WHERE external_account_id = $1', [id])).rows[0];
+      expect(row).toMatchObject({ tenant_id: t.tenantId, waba_id: '777', on_biz_app: true, history_status: 'importing', credentials_key_id: 'k1' });
+      expect(JSON.parse(decryptCredentials(row.credentials_enc, masterKey, row.id))).toEqual({ accessToken: 'TOKEN-NEGOCIO' });
+      expect(published).toContainEqual({ type: 'channel.updated' });
+    });
+
+    it('registra con un PIN un número nuevo en la API', async () => {
+      const admin = await login(users.admin.email);
+      const id = phone(2);
+      graph.bizApp = false;
+      graphCalls.length = 0;
+      expect((await post({ code: 'codigo-bueno', phoneNumberId: id, wabaId: '778' }, admin.cookie)).json()).toMatchObject({ coexistence: false });
+      const register = graphCalls.find((c) => c.includes('/register'));
+      expect(register).toMatch(new RegExp(`^POST /v27.0/${id}/register \\{"messaging_product":"whatsapp","pin":"\\d{6}"\\}$`));
+      expect(graphCalls.some((c) => c.includes('smb_app_data'))).toBe(false);
+      const row = (await owner.query('SELECT * FROM channel_accounts WHERE external_account_id = $1', [id])).rows[0];
+      const creds = JSON.parse(decryptCredentials(row.credentials_enc, masterKey, row.id));
+      expect(register).toContain(`"pin":"${creds.pin}"`);
+      expect(row.history_status).toBeNull();
+    });
+
+    it('no guarda nada si Meta rechaza el código, y no toca números de otro negocio', async () => {
+      const admin = await login(users.admin.email);
+      const id = phone(3);
+      const bad = await post({ code: 'vencido', phoneNumberId: id, wabaId: '779' }, admin.cookie);
+      expect(bad.statusCode).toBe(502);
+      expect(bad.json().error.code).toBe('meta_code');
+      expect((await owner.query('SELECT 1 FROM channel_accounts WHERE external_account_id = $1', [id])).rowCount).toBe(0);
+
+      const taken = await post({ code: 'codigo-bueno', phoneNumberId: other.phoneNumberId, wabaId: '780' }, admin.cookie);
+      expect(taken.statusCode).toBe(409);
+      const row = (await owner.query('SELECT tenant_id, waba_id FROM channel_accounts WHERE external_account_id = $1', [other.phoneNumberId])).rows[0];
+      expect(row).toEqual({ tenant_id: other.tenantId, waba_id: null });
+    });
   });
 });

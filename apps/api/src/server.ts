@@ -1,8 +1,16 @@
-import { randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import { z } from 'zod';
-import { disconnectReasonLabel, dummyHash, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
+import {
+  exchangeSignupCode,
+  getPhoneInfo,
+  registerPhone,
+  requestSmbAppData,
+  subscribeAppToWaba,
+  WhatsAppOnboardingError,
+} from '@zenith/channel-whatsapp';
+import { disconnectReasonLabel, dummyHash, encryptCredentials, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 
 import {
@@ -25,7 +33,24 @@ export interface ApiDeps {
   subscribe(tenantId: string, onEvent: (event: PanelEvent) => void): Promise<() => Promise<void>>;
   /** Cookie Secure: true en producción (https). */
   secureCookies: boolean;
+  /** Alta de números con el registro insertado de Meta. Sin esto, el panel no ofrece conectar. */
+  whatsappSignup?: WhatsAppSignupConfig;
   now?: () => Date;
+}
+
+export interface WhatsAppSignupConfig {
+  appId: string;
+  appSecret: string;
+  /** Configuración de Facebook Login for Business (Embedded Signup). */
+  configId: string;
+  graphApiVersion: string;
+  graphBaseUrl?: string;
+  /** Clave para cifrar el token del número (ENCRYPTION_MASTER_KEY). */
+  masterKey: Buffer;
+  masterKeyId?: string;
+  /** Solo con el simulador local: número que el panel conecta sin abrir el registro de Meta. */
+  simulatedPhoneNumberId?: string;
+  fetch?: typeof fetch;
 }
 
 declare module 'fastify' {
@@ -518,8 +543,10 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           disconnect_reason: string | null;
           history_status: string | null;
           history_progress: number | null;
+          on_biz_app: boolean;
+          connected_at: Date;
         }>(
-          `SELECT id, channel, display_name, disconnected_at, disconnect_reason, history_status, history_progress
+          `SELECT id, channel, display_name, disconnected_at, disconnect_reason, history_status, history_progress, on_biz_app, connected_at
              FROM channel_accounts WHERE status = 'active' ORDER BY connected_at`,
         )
       ).rows,
@@ -533,8 +560,127 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           ? { at: r.disconnected_at.toISOString(), reason: r.disconnect_reason, label: disconnectReasonLabel(r.disconnect_reason) }
           : null,
         history: r.history_status ? { status: r.history_status, progress: r.history_progress ?? 0 } : null,
+        coexistence: r.on_biz_app,
+        connectedAt: r.connected_at.toISOString(),
       })),
     };
+  });
+
+  // Datos públicos para abrir el registro de Meta en el panel. Sin configuración, el botón no aparece.
+  app.get('/api/v1/channels/whatsapp/signup', async (req) => {
+    const s = deps.whatsappSignup;
+    const canConnect = user(req).role !== 'agent';
+    if (!s || !canConnect) return { enabled: false, canConnect };
+    return {
+      enabled: true,
+      canConnect,
+      appId: s.appId,
+      configId: s.configId,
+      graphApiVersion: s.graphApiVersion,
+      // Con el simulador local no hay registro de Meta: el panel conecta el número de prueba.
+      simulated: s.simulatedPhoneNumberId ? { phoneNumberId: s.simulatedPhoneNumberId } : null,
+    };
+  });
+
+  const connectSchema = z.object({
+    code: z.string().trim().min(1).max(2048),
+    phoneNumberId: z.string().regex(/^\d{1,32}$/),
+    wabaId: z.string().regex(/^\d{1,32}$/),
+  });
+
+  const STEP_LABELS: Record<WhatsAppOnboardingError['step'], string> = {
+    code: 'Meta no aceptó el código del registro (vence a los 5 minutos); vuelve a intentarlo',
+    phone: 'No se pudo leer el número en Meta',
+    subscribe: 'No se pudo suscribir el sistema a los mensajes del número',
+    register: 'No se pudo registrar el número en la API',
+    sync: 'No se pudo pedir el historial',
+  };
+
+  /**
+   * Termina el registro de Meta: canjea el código, suscribe los webhooks, registra el número
+   * si es nuevo y, si sigue en la app (coexistencia), pide contactos e historial. Guarda el
+   * token cifrado. Solo dueño o administrador.
+   */
+  app.post('/api/v1/channels/whatsapp/connect', async (req, reply) => {
+    const u = user(req);
+    if (u.role === 'agent') return err(reply, 403, 'forbidden', 'Solo el dueño o un administrador puede conectar números');
+    const s = deps.whatsappSignup;
+    if (!s) return err(reply, 503, 'not_configured', 'La conexión con Meta no está configurada en el servidor');
+    const parsed = connectSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', 'Datos del registro inválidos');
+    const { code, phoneNumberId, wabaId } = parsed.data;
+    const graph = { graphApiVersion: s.graphApiVersion, ...(s.graphBaseUrl ? { graphBaseUrl: s.graphBaseUrl } : {}), ...(s.fetch ? { fetch: s.fetch } : {}) };
+
+    let token: string;
+    let info: Awaited<ReturnType<typeof getPhoneInfo>>;
+    let pin: string | null = null;
+    try {
+      token = await exchangeSignupCode(graph, { appId: s.appId, appSecret: s.appSecret, code });
+      info = await getPhoneInfo(graph, token, phoneNumberId);
+      await subscribeAppToWaba(graph, token, wabaId);
+      if (!info.isOnBizApp) {
+        // Número nuevo en la API: se registra con un PIN propio, guardado cifrado con el token.
+        pin = String(randomInt(0, 1_000_000)).padStart(6, '0');
+        await registerPhone(graph, token, phoneNumberId, pin);
+      }
+    } catch (e) {
+      if (e instanceof WhatsAppOnboardingError) {
+        req.log.warn({ step: e.step, code: e.errorCode, message: e.message }, 'Falló la conexión de WhatsApp');
+        return err(reply, 502, `meta_${e.step}`, STEP_LABELS[e.step]);
+      }
+      throw e;
+    }
+
+    const name = info.verifiedName && info.displayPhoneNumber ? `${info.verifiedName} · ${info.displayPhoneNumber}` : (info.displayPhoneNumber ?? info.verifiedName);
+    let accountId: string;
+    try {
+      accountId = await tenant(req, async (c) => {
+        const row = await c.query<{ id: string }>(
+          `INSERT INTO channel_accounts (tenant_id, channel, external_account_id, display_name, waba_id, on_biz_app)
+           VALUES ($1, 'whatsapp', $2, $3, $4, $5)
+           ON CONFLICT (channel, external_account_id) DO UPDATE
+             SET display_name = COALESCE(EXCLUDED.display_name, channel_accounts.display_name),
+                 waba_id = EXCLUDED.waba_id, on_biz_app = EXCLUDED.on_biz_app, connected_at = now()
+           RETURNING id`,
+          [u.tenantId, phoneNumberId, name, wabaId, info.isOnBizApp],
+        );
+        const id = row.rows[0]!.id;
+        const enc = encryptCredentials(JSON.stringify({ accessToken: token, ...(pin ? { pin } : {}) }), s.masterKey, id);
+        await c.query(
+          `UPDATE channel_accounts SET credentials_enc = $2, credentials_key_id = $3, disconnected_at = NULL, disconnect_reason = NULL
+            WHERE id = $1`,
+          [id, enc, s.masterKeyId ?? null],
+        );
+        return id;
+      });
+    } catch (e) {
+      // El número ya está conectado en otro negocio: RLS no deja tocar su fila.
+      if ((e as { code?: string }).code === '42501') return err(reply, 409, 'taken', 'Ese número ya está conectado en otra cuenta');
+      throw e;
+    }
+
+    // Coexistencia: contactos y luego historial, una sola vez y dentro de 24 h.
+    const warnings: string[] = [];
+    if (info.isOnBizApp) {
+      try {
+        await requestSmbAppData(graph, token, phoneNumberId, 'smb_app_state_sync');
+      } catch (e) {
+        req.log.warn({ message: (e as Error).message }, 'No se pudieron pedir los contactos de la app');
+        warnings.push('No se pudieron pedir los contactos de la app.');
+      }
+      try {
+        await requestSmbAppData(graph, token, phoneNumberId, 'history');
+        await tenant(req, (c) =>
+          c.query(`UPDATE channel_accounts SET history_status = 'importing', history_progress = 0 WHERE id = $1 AND history_status IS NULL`, [accountId]),
+        );
+      } catch (e) {
+        req.log.warn({ message: (e as Error).message }, 'No se pudo pedir el historial de la app');
+        warnings.push('No se pudo pedir el historial de chats. Avisa a soporte: Meta solo permite pedirlo dentro de las 24 h siguientes a la conexión.');
+      }
+    }
+
+    await deps.publish(u.tenantId, { type: 'channel.updated' });
+    return { ok: true, channelId: accountId, name, coexistence: info.isOnBizApp, warnings };
   });
 
   app.get('/api/v1/contact-tags', async (req) => {

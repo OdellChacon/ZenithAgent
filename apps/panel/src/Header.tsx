@@ -2,12 +2,15 @@ import { useState } from 'react';
 import type { Me } from './api';
 import { chime, enableNotifications, notificationsEnabled, notificationsSupported } from './alerts';
 
-export type Section = 'inbox' | 'contacts';
+export type Section = 'inbox' | 'contacts' | 'channels';
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: 'inbox', label: 'Conversaciones' },
   { id: 'contacts', label: 'Contactos' },
+  { id: 'channels', label: 'WhatsApp' },
 ];
+
+const SECTION_PATHS: Record<Section, string> = { inbox: '/', contacts: '/contactos', channels: '/whatsapp' };
 
 export function Header({
   me,
@@ -36,7 +39,7 @@ export function Header({
         {SECTIONS.map((s) => (
           <a
             key={s.id}
-            href={s.id === 'contacts' ? '/contactos' : '/'}
+            href={SECTION_PATHS[s.id]}
             className={`section-link ${section === s.id ? 'on' : ''}`}
             aria-current={section === s.id ? 'page' : undefined}
             onClick={(e) => {

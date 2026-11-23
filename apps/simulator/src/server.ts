@@ -373,11 +373,100 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     return { id };
   });
 
+  // ---------------------------------------------------------------- papel de Meta: conexión del número
+
+  /**
+   * Registro insertado (Embedded Signup) contra el simulador: canje del código, suscripción,
+   * registro y pedido de contactos e historial. Como Meta, cada sincronización se acepta una
+   * sola vez; el historial llega después como webhook, con chats ficticios.
+   */
+  const synced = new Set<string>();
+  const bearer = (auth: string | undefined) => /^Bearer \S+$/.test(auth ?? '');
+  const badVersion = (v: string) => !/^v\d+\.\d+$/.test(v);
+
+  app.get<{ Params: { version: string }; Querystring: Record<string, string | undefined> }>('/:version/oauth/access_token', async (req, reply) => {
+    if (badVersion(req.params.version)) return reply.code(404).send({ error: { code: 'not_found', message: 'No existe' } });
+    const { client_id, client_secret, code } = req.query;
+    if (!client_id || !client_secret || !code) return reply.code(400).send({ error: { code: 100, message: 'Faltan parámetros' } });
+    return { access_token: `SIM-TOKEN-${Date.now()}`, token_type: 'bearer' };
+  });
+
+  app.post<{ Params: { version: string; id: string } }>('/:version/:id/subscribed_apps', async (req, reply) => {
+    if (badVersion(req.params.version) || !bearer(req.headers.authorization)) return reply.code(401).send({ error: { code: 190, message: 'Token inválido' } });
+    return { success: true };
+  });
+
+  app.post<{ Params: { version: string; id: string } }>('/:version/:id/register', async (req, reply) => {
+    if (badVersion(req.params.version) || !bearer(req.headers.authorization)) return reply.code(401).send({ error: { code: 190, message: 'Token inválido' } });
+    return { success: true };
+  });
+
+  app.post<{ Params: { version: string; id: string }; Body: { sync_type?: string } }>('/:version/:id/smb_app_data', async (req, reply) => {
+    if (badVersion(req.params.version) || !bearer(req.headers.authorization)) return reply.code(401).send({ error: { code: 190, message: 'Token inválido' } });
+    const type = req.body?.sync_type;
+    if (type !== 'smb_app_state_sync' && type !== 'history') return reply.code(400).send({ error: { code: 100, message: 'sync_type inválido' } });
+    if (req.params.id !== deps.phoneNumberId) return reply.code(400).send({ error: { code: 100, message: 'phone_number_id desconocido' } });
+    if (synced.has(type)) return reply.code(400).send({ error: { code: 100, message: 'Esta sincronización ya se pidió' } });
+    synced.add(type);
+    if (type === 'history') setTimeout(() => void postWebhook(simulatedHistory()).catch(() => undefined), deps.statusDelayMs ?? 1000);
+    return { messaging_product: 'whatsapp', request_id: `sim-${type}-${Date.now()}` };
+  });
+
+  /** Dos chats ficticios de hace semanas, como los mandaría Meta tras conectar el número. */
+  function simulatedHistory() {
+    const now = Math.floor(Date.now() / 1000);
+    const day = 86_400;
+    const thread = (phone: string, msgs: [boolean, number, string][]) => ({
+      id: phone,
+      context: { wa_id: phone },
+      messages: msgs.map(([business, ago, body], i) => ({
+        from: business ? 'simulador' : phone,
+        ...(business ? {} : { from_user_id: `VE.${phone}` }),
+        id: `wamid.SIMHIST${phone}${i}`,
+        timestamp: String(now - ago),
+        type: 'text',
+        text: { body },
+        history_context: { status: 'READ' },
+      })),
+    });
+    return envelope(
+      {
+        history: [
+          {
+            metadata: { phase: 1, chunk_order: 1, progress: 100 },
+            threads: [
+              thread('584247770001', [
+                [false, 21 * day, 'Buenas, ¿tienen cerámica para baño en tono beige?'],
+                [true, 21 * day - 600, 'Buenas tardes. Sí, tenemos varias opciones en beige. ¿Para piso o pared?'],
+                [false, 21 * day - 900, 'Para pared, unos 12 metros.'],
+              ]),
+              thread('584247770002', [
+                [false, 40 * day, '¿Trabajan grama artificial?'],
+                [true, 40 * day - 300, 'Sí, con gusto. Le paso la información por aquí.'],
+              ]),
+            ],
+          },
+        ],
+      },
+      'history',
+    );
+  }
+
   /** Como GET /{media_id} de Meta: devuelve la url para descargar el archivo (con el token). */
   app.get<{ Params: { version: string; mediaId: string } }>('/:version/:mediaId', async (req, reply) => {
     if (!/^v\d+\.\d+$/.test(req.params.version)) return reply.code(404).send({ error: { code: 'not_found', message: 'No existe' } });
     if (!/^Bearer \S+$/.test(req.headers.authorization ?? '')) {
       return reply.code(401).send({ error: { code: 190, message: 'Falta el token de acceso' } });
+    }
+    // GET /{phone_number_id}: datos del número (conexión). El número simulado "sigue en la app".
+    if (req.params.mediaId === deps.phoneNumberId) {
+      return {
+        id: deps.phoneNumberId,
+        display_phone_number: '+58 414-0000000',
+        verified_name: 'Simulador IMM',
+        is_on_biz_app: true,
+        platform_type: 'CLOUD_API',
+      };
     }
     const item = media.get(req.params.mediaId);
     if (!item) return reply.code(404).send({ error: { code: 100, message: 'Id de archivo desconocido' } });

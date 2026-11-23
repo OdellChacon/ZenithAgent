@@ -9,6 +9,7 @@
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
     "@fastify/static": "^10.1.12",
+    "@zenith/channel-whatsapp": "*",
     "@zenith/core": "*",
     "@zenith/db": "*",
     "bullmq": "^5.81.5",
