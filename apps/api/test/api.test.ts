@@ -291,4 +291,30 @@ describe.skipIf(!hasDb)('API del panel', () => {
     expect((await get('/api/v1/contacts?q=daniela', ajeno.cookie)).json().items).toEqual([]);
     expect((await get('/api/v1/contact-tags', ajeno.cookie)).json().items).toEqual([]);
   });
+
+  it('muestra los números desconectados por Meta solo a su negocio', async () => {
+    const { cookie } = await login(users.ana.email);
+    const get = (c: string) => app.inject({ method: 'GET', url: '/api/v1/channels', headers: headers(c) });
+    const ok = (await get(cookie)).json().items.find((i: { id: string }) => i.id === t.channelAccountId);
+    expect(ok).toMatchObject({ channel: 'whatsapp', disconnected: null, history: null });
+
+    await owner.query(
+      `UPDATE channel_accounts SET disconnected_at = now(), disconnect_reason = 'PRIMARY_INACTIVITY', history_status = 'importing', history_progress = 40 WHERE id = $1`,
+      [t.channelAccountId],
+    );
+    try {
+      const down = (await get(cookie)).json().items.find((i: { id: string }) => i.id === t.channelAccountId);
+      expect(down).toMatchObject({
+        disconnected: { reason: 'PRIMARY_INACTIVITY', label: 'El teléfono principal pasó unos 14 días sin abrir WhatsApp Business.' },
+        history: { status: 'importing', progress: 40 },
+      });
+      const ajeno = await login(users.ajeno.email);
+      expect((await get(ajeno.cookie)).json().items.map((i: { id: string }) => i.id)).not.toContain(t.channelAccountId);
+    } finally {
+      await owner.query(
+        'UPDATE channel_accounts SET disconnected_at = NULL, disconnect_reason = NULL, history_status = NULL, history_progress = NULL WHERE id = $1',
+        [t.channelAccountId],
+      );
+    }
+  });
 });

@@ -4,7 +4,7 @@ import { parseWhatsAppWebhook } from '@zenith/channel-whatsapp';
 import { insertWebhookEvent, reclaimStaleWebhookEvents, withTenant, type Pool } from '@zenith/db';
 import { processInboundEvent } from '../src/inbound.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
-import { echoWebhook, statusWebhook, textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
+import { accountUpdateWebhook, echoWebhook, historyWebhook, statusWebhook, textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
 
 describe.skipIf(!hasDb)('worker de entrada', () => {
   let owner: pg.Pool;
@@ -267,6 +267,133 @@ describe.skipIf(!hasDb)('worker de entrada', () => {
         await owner.query('UPDATE conversations SET assigned_user_id = NULL WHERE assigned_user_id = $1', [user.rows[0]!.id]);
         await owner.query('DELETE FROM users WHERE id = $1', [user.rows[0]!.id]);
       }
+    });
+  });
+
+  describe('historial y conexión del número (coexistencia)', () => {
+    const wabaId = `WABA${Date.now()}`;
+
+    /** Un chat del historial con el phone_number_id del tenant de prueba. */
+    function history(customer: string, messages: Record<string, unknown>[], progress = 50) {
+      const payload = historyWebhook([{ metadata: { phase: 0, chunk_order: 1, progress }, threads: [{ id: customer, messages }] }]);
+      (payload.entry[0]!.changes[0]!.value as { metadata: { phone_number_id: string } }).metadata.phone_number_id = t.phoneNumberId;
+      return payload;
+    }
+    const tsAgo = (minutes: number) => String(Math.floor(Date.now() / 1000) - minutes * 60);
+    const account = async () => (await owner.query('SELECT * FROM channel_accounts WHERE id = $1', [t.channelAccountId])).rows[0];
+
+    beforeAll(async () => {
+      await owner.query('UPDATE channel_accounts SET waba_id = $2 WHERE id = $1', [t.channelAccountId, wabaId]);
+    });
+    afterAll(async () => {
+      await owner.query('DELETE FROM webhook_events WHERE channel_external_account_id = $1', [wabaId]);
+    });
+
+    it('importa el chat sin despertar al bot, sin abrir la ventana y antes de lo recibido en vivo', async () => {
+      const customer = '584140000201';
+      const [live] = await ingest(webhook({ from: customer, timestamp: nowTs() }));
+      const m = await processInboundEvent(app, live!);
+      if (m.result !== 'message') throw new Error('se esperaba un mensaje');
+      const before = await conversation(m.conversationId);
+
+      const [h] = await ingest(
+        history(customer, [
+          { from: customer, id: `wamid.HA${seq}`, timestamp: tsAgo(60 * 24 * 30), type: 'text', text: { body: 'Buenas, ¿tienen granito?' } },
+          { from: '584140000000', id: `wamid.HB${seq}`, timestamp: tsAgo(60 * 24 * 30 - 5), type: 'text', text: { body: 'Buenas tardes, sí tenemos.' } },
+        ]),
+      );
+      expect(await processInboundEvent(app, h!)).toEqual({ result: 'history', tenantId: t.tenantId, conversationId: m.conversationId, imported: 2 });
+
+      const conv = await conversation(m.conversationId);
+      // El asesor escribió hace un mes: el bot sigue atendiendo.
+      expect(conv.mode).toBe('bot');
+      expect(conv.agent_active_at).toBeNull();
+      expect(conv.window_expires_at).toEqual(before.window_expires_at);
+      expect(conv.last_inbound_at).toEqual(before.last_inbound_at);
+
+      const rows = await withTenant(app, t.tenantId, async (c) =>
+        (await c.query('SELECT author, direction, body FROM messages WHERE conversation_id = $1 ORDER BY seq', [m.conversationId])).rows,
+      );
+      expect(rows.map((r) => `${r.author}:${r.body}`)).toEqual([
+        'customer:Buenas, ¿tienen granito?',
+        'agent:Buenas tardes, sí tenemos.',
+        'customer:¿Tienen porcelanato para exterior?',
+      ]);
+      expect((await account()).history_status).toBe('importing');
+    });
+
+    it('si el asesor escribió hace poco, el chat importado queda en sus manos', async () => {
+      const customer = '584140000202';
+      const [h] = await ingest(
+        history(customer, [
+          { from: customer, id: `wamid.HC${seq}`, timestamp: tsAgo(40), type: 'text', text: { body: '¿Me cotiza 20 m²?' } },
+          { from: '584140000000', id: `wamid.HD${seq}`, timestamp: tsAgo(30), type: 'text', text: { body: 'Con gusto, ya le preparo la cotización.' } },
+        ]),
+      );
+      const out = await processInboundEvent(app, h!);
+      if (out.result !== 'history') throw new Error('se esperaba historial');
+      const conv = await conversation(out.conversationId);
+      expect(conv.mode).toBe('human');
+      expect(conv.agent_active_at).not.toBeNull();
+      // Un chat creado por la importación se ordena por su último mensaje.
+      expect(new Date(conv.updated_at).getTime()).toBeLessThan(Date.now() - 25 * 60_000);
+
+      const [next] = await ingest(webhook({ from: customer, timestamp: nowTs() }));
+      expect(await processInboundEvent(app, next!)).toMatchObject({ result: 'message', mode: 'human', resumed: false });
+    });
+
+    it('completa el archivo que llegó después y no duplica lo ya importado', async () => {
+      const customer = '584140000203';
+      const id = `wamid.HE${seq}`;
+      const ts = tsAgo(600);
+      const [p] = await ingest(history(customer, [{ from: customer, id, timestamp: ts, type: 'media_placeholder' }]));
+      expect(await processInboundEvent(app, p!)).toMatchObject({ result: 'history', imported: 1 });
+      const [media] = await ingest(
+        history(customer, [{ from: customer, id, timestamp: ts, type: 'image', image: { id: 'media-77', mime_type: 'image/jpeg', caption: 'Como esta' } }], 100),
+      );
+      expect(await processInboundEvent(app, media!)).toMatchObject({ result: 'history', imported: 0 });
+
+      const msg = await withTenant(app, t.tenantId, async (c) =>
+        (await c.query('SELECT type, body, attachments FROM messages WHERE external_message_id = $1', [id])).rows[0],
+      );
+      expect(msg).toEqual({ type: 'image', body: 'Como esta', attachments: [{ type: 'image', externalMediaId: 'media-77', mimeType: 'image/jpeg', caption: 'Como esta' }] });
+      expect(await account()).toMatchObject({ history_status: 'done', history_progress: 100 });
+    });
+
+    it('registra que el negocio no compartió su historial', async () => {
+      const payload = historyWebhook([{ errors: [{ code: 2593109, title: 'History sync is turned off' }] }]);
+      (payload.entry[0]!.changes[0]!.value as { metadata: { phone_number_id: string } }).metadata.phone_number_id = t.phoneNumberId;
+      await owner.query('DELETE FROM webhook_events WHERE external_event_id = $1', [`history-declined:${t.phoneNumberId}`]);
+      const [id] = await ingest(payload);
+      expect(await processInboundEvent(app, id!)).toEqual({
+        result: 'account',
+        tenantIds: [t.tenantId],
+        notice: { type: 'history_declined', scope: 'phone' },
+      });
+      expect((await account()).history_status).toBe('declined');
+      await owner.query('UPDATE channel_accounts SET history_status = NULL, history_progress = NULL WHERE id = $1', [t.channelAccountId]);
+    });
+
+    it('marca el número como desconectado por su WABA y lo limpia al reconectar', async () => {
+      const time = Math.floor(Date.now() / 1000) - 60;
+      const [off] = await ingest(
+        accountUpdateWebhook(
+          { event: 'PARTNER_REMOVED', waba_info: { waba_id: wabaId }, disconnection_info: { reason: 'PRIMARY_INACTIVITY', initiated_by: 'SYSTEM' } },
+          wabaId,
+          time,
+        ),
+      );
+      expect(await processInboundEvent(app, off!)).toMatchObject({ result: 'account', tenantIds: [t.tenantId], notice: { type: 'disconnected', reason: 'PRIMARY_INACTIVITY' } });
+      expect(await account()).toMatchObject({ disconnect_reason: 'PRIMARY_INACTIVITY' });
+      expect((await account()).disconnected_at).not.toBeNull();
+
+      const [on] = await ingest(accountUpdateWebhook({ event: 'ACCOUNT_RECONNECTED' }, wabaId, time + 30));
+      expect(await processInboundEvent(app, on!)).toMatchObject({ result: 'account', notice: { type: 'reconnected' } });
+      expect(await account()).toMatchObject({ disconnected_at: null, disconnect_reason: null });
+
+      const [unknown] = await ingest(accountUpdateWebhook({ event: 'ACCOUNT_OFFBOARDED' }, `${wabaId}X`, time));
+      expect(await processInboundEvent(app, unknown!)).toEqual({ result: 'ignored', reason: 'unknown_waba' });
+      await owner.query('DELETE FROM webhook_events WHERE channel_external_account_id = $1', [`${wabaId}X`]);
     });
   });
 });

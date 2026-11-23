@@ -6,6 +6,7 @@ import { Inbox } from './Inbox';
 import { Conversation } from './Conversation';
 import { Contacts } from './Contacts';
 import { Header, type Section } from './Header';
+import { ChannelAlerts } from './ChannelAlerts';
 
 interface Route {
   section: Section;
@@ -95,6 +96,7 @@ export function App() {
   return (
     <div className="app">
       <Header me={me} live={live} section={route.section} onNavigate={(section) => go({ section, id: null })} onLogout={logout} />
+      <ChannelAlerts tick={tick} />
       {route.section === 'contacts' ? (
         <Contacts tick={tick} selected={selected} onSelect={(id) => go({ section: 'contacts', id })} onOpenConversation={open} />
       ) : (

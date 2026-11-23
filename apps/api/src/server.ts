@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import { z } from 'zod';
-import { dummyHash, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
+import { disconnectReasonLabel, dummyHash, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 
 import {
@@ -502,6 +502,39 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       ).rows,
     );
     return { items: rows.map(presentContact) };
+  });
+
+  // ---------------------------------------------------------------- canales
+
+  // Estado de los números conectados: desconexiones de Meta e importación del historial.
+  app.get('/api/v1/channels', async (req) => {
+    const rows = await tenant(req, async (c) =>
+      (
+        await c.query<{
+          id: string;
+          channel: string;
+          display_name: string | null;
+          disconnected_at: Date | null;
+          disconnect_reason: string | null;
+          history_status: string | null;
+          history_progress: number | null;
+        }>(
+          `SELECT id, channel, display_name, disconnected_at, disconnect_reason, history_status, history_progress
+             FROM channel_accounts WHERE status = 'active' ORDER BY connected_at`,
+        )
+      ).rows,
+    );
+    return {
+      items: rows.map((r) => ({
+        id: r.id,
+        channel: r.channel,
+        name: r.display_name ?? 'Número sin nombre',
+        disconnected: r.disconnected_at
+          ? { at: r.disconnected_at.toISOString(), reason: r.disconnect_reason, label: disconnectReasonLabel(r.disconnect_reason) }
+          : null,
+        history: r.history_status ? { status: r.history_status, progress: r.history_progress ?? 0 } : null,
+      })),
+    };
   });
 
   app.get('/api/v1/contact-tags', async (req) => {

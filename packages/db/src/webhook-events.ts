@@ -102,3 +102,12 @@ export async function resolveChannelAccount(
   const row = rows[0];
   return row ? { channelAccountId: row.channel_account_id, tenantId: row.tenant_id } : null;
 }
+
+/** Números de WhatsApp activos de una cuenta de WhatsApp Business (WABA). */
+export async function resolveWhatsAppWaba(pool: Pool, wabaId: string): Promise<{ channelAccountId: string; tenantId: string }[]> {
+  const { rows } = await pool.query<{ channel_account_id: string; tenant_id: string }>(
+    'SELECT channel_account_id, tenant_id FROM resolve_whatsapp_waba($1)',
+    [wabaId],
+  );
+  return rows.map((r) => ({ channelAccountId: r.channel_account_id, tenantId: r.tenant_id }));
+}

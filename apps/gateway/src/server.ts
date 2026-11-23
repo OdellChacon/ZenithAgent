@@ -84,7 +84,9 @@ export function buildGateway(deps: GatewayDeps, opts: FastifyServerOptions = {})
     let stored = 0;
     for (const event of events) {
       // Si guardar falla, se responde 500 y Meta reintenta: la idempotencia evita duplicados.
-      const id = await deps.saveEvent(event, payload);
+      // Un aviso de historial trae cientos de chats: cada chat ya lleva sus mensajes en el
+      // evento normalizado, así que no se copia el aviso completo en cada fila.
+      const id = await deps.saveEvent(event, event.kind === 'history' ? { field: 'history', copia: 'ver normalized' } : payload);
       if (!id) continue;
       stored++;
       try {

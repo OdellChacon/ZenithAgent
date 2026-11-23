@@ -111,3 +111,32 @@ export function echoWebhook(echoes: Record<string, unknown>[]) {
     ],
   };
 }
+
+/** Historial que Meta manda al conectar un número que ya usaba la app (coexistencia). */
+export function historyWebhook(history: Record<string, unknown>[]) {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: 'WABA_ID',
+        changes: [
+          {
+            field: 'history',
+            value: {
+              messaging_product: 'whatsapp',
+              metadata: { display_phone_number: '584140000000', phone_number_id: PHONE_NUMBER_ID },
+              history,
+            },
+          },
+        ],
+      },
+    ],
+  };
+}
+
+export function accountUpdateWebhook(value: Record<string, unknown>, entryId = 'WABA_ID', time = 1763632800) {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [{ id: entryId, time, changes: [{ field: 'account_update', value }] }],
+  };
+}

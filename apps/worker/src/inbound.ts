@@ -4,11 +4,17 @@ import {
   finishWebhookEvent,
   releaseWebhookEvent,
   resolveChannelAccount,
+  resolveWhatsAppWaba,
   withTenant,
   type Pool,
   type PoolClient,
 } from '@zenith/db';
 import { parseTakeoverSettings } from '@zenith/brain';
+
+/** Resta a la hora (en ms) del historial para que su seq quede negativo. */
+const HISTORY_SEQ_OFFSET = 10_000_000_000_000;
+/** Si el negocio desactivó la retoma automática, igual se mira solo lo de las últimas 12 h. */
+const DEFAULT_RECENT_MINUTES = 12 * 60;
 
 export type InboundOutcome =
   | {
@@ -29,6 +35,19 @@ export type InboundOutcome =
       conversationId: string;
       messageId: string;
       duplicate: boolean;
+    }
+  | {
+      /** Chat del historial importado al conectar el número (no despierta al bot). */
+      result: 'history';
+      tenantId: string;
+      conversationId: string;
+      imported: number;
+    }
+  | {
+      /** Aviso de conexión (desconexión, reconexión, historial rechazado) aplicado a estos negocios. */
+      result: 'account';
+      tenantIds: string[];
+      notice: NonNullable<ParsedEvent['account']>;
     }
   | { result: 'status'; tenantId: string; updated: number }
   | { result: 'ignored'; reason: string }
@@ -53,6 +72,17 @@ export async function processInboundEvent(pool: Pool, webhookEventId: string): P
       return { result: 'ignored', reason: 'unsupported' };
     }
 
+    if (event.kind === 'account' && event.account?.scope === 'waba') {
+      const accounts = await resolveWhatsAppWaba(pool, event.channelExternalAccountId);
+      if (!accounts.length) {
+        await finishWebhookEvent(pool, row.id, 'ignored', 'cuenta de WhatsApp Business (WABA) sin números registrados');
+        return { result: 'ignored', reason: 'unknown_waba' };
+      }
+      for (const a of accounts) await withTenant(pool, a.tenantId, (client) => applyAccountNotice(client, a.channelAccountId, event));
+      await finishWebhookEvent(pool, row.id, 'processed');
+      return { result: 'account', tenantIds: [...new Set(accounts.map((a) => a.tenantId))], notice: event.account };
+    }
+
     const account = await resolveChannelAccount(pool, event.channel, event.channelExternalAccountId);
     if (!account) {
       // Error permanente: reintentar no lo arregla. Queda visible para soporte.
@@ -61,12 +91,19 @@ export async function processInboundEvent(pool: Pool, webhookEventId: string): P
     }
 
     return await withTenant(pool, account.tenantId, async (client) => {
+      if (event.kind === 'account') {
+        await applyAccountNotice(client, account.channelAccountId, event);
+        await finishWebhookEvent(client, row.id, 'processed');
+        return { result: 'account', tenantIds: [account.tenantId], notice: event.account! } satisfies InboundOutcome;
+      }
       const outcome =
         event.kind === 'status'
           ? await applyStatus(client, account.tenantId, event)
           : event.kind === 'echo'
             ? await storeAgentEcho(client, account.tenantId, account.channelAccountId, event)
-            : await storeMessage(client, account.tenantId, account.channelAccountId, event);
+            : event.kind === 'history'
+              ? await storeHistory(client, account.tenantId, account.channelAccountId, event)
+              : await storeMessage(client, account.tenantId, account.channelAccountId, event);
       if (outcome.result === 'ignored') {
         await finishWebhookEvent(client, row.id, 'ignored', outcome.reason);
         return outcome;
@@ -224,6 +261,100 @@ async function storeAgentEcho(
     conversationId,
   ]);
   return { result: 'agent_echo', tenantId, conversationId, messageId, duplicate };
+}
+
+/**
+ * Guarda un chat del historial que Meta manda al conectar un número que ya usaba la app.
+ * No despierta al bot, no mueve la ventana de 24 h ni dispara seguimientos: solo deja el
+ * contexto a la vista del asesor y del bot. Si el asesor escribió hace poco (dentro del plazo
+ * de takeover), el chat queda en sus manos igual que con una copia de la app.
+ */
+async function storeHistory(client: PoolClient, tenantId: string, channelAccountId: string, event: ParsedEvent): Promise<InboundOutcome> {
+  const from = event.from;
+  const history = event.history;
+  if (!from || !history) throw new Error('Historial sin cliente');
+
+  const contactId = await upsertContact(client, tenantId, event.channel, from);
+  const conversationId = await openConversation(client, tenantId, channelAccountId, contactId);
+
+  let imported = 0;
+  let latest: Date | null = null;
+  let latestBusiness: Date | null = null;
+  for (const [i, m] of history.messages.entries()) {
+    const at = new Date(m.occurredAt);
+    if (!latest || at > latest) latest = at;
+    if (m.fromBusiness && (!latestBusiness || at > latestBusiness)) latestBusiness = at;
+    // seq negativo y creciente con la hora: lo importado queda antes que lo recibido en vivo,
+    // que siempre es posterior a la conexión.
+    const seq = Math.floor(at.getTime() / 1000) * 1000 + (i % 1000) - HISTORY_SEQ_OFFSET;
+    const type = m.media?.[0]?.type ?? m.type;
+    const res = await client.query<{ inserted: boolean }>(
+      `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments, external_message_id, created_at, seq)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+       ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL
+       DO UPDATE SET type = EXCLUDED.type, attachments = EXCLUDED.attachments, body = COALESCE(EXCLUDED.body, messages.body)
+        -- Meta manda primero un aviso sin archivo y después el archivo del mismo mensaje.
+        WHERE messages.type = 'media_placeholder' AND EXCLUDED.type <> 'media_placeholder'
+       RETURNING (xmax = 0) AS inserted`,
+      [
+        tenantId,
+        conversationId,
+        m.fromBusiness ? 'out' : 'in',
+        m.fromBusiness ? 'agent' : 'customer',
+        type,
+        m.text ?? null,
+        JSON.stringify(m.media ?? []),
+        m.externalMessageId,
+        at,
+        seq,
+      ],
+    );
+    if (res.rows[0]?.inserted) imported++;
+  }
+
+  const tenant = await client.query<{ settings: unknown }>('SELECT settings FROM tenants WHERE id = $1', [tenantId]);
+  const { resumeBotAfterMinutes } = parseTakeoverSettings(tenant.rows[0]?.settings);
+  const recentMinutes = resumeBotAfterMinutes > 0 ? resumeBotAfterMinutes : DEFAULT_RECENT_MINUTES;
+  await client.query(
+    `UPDATE conversations
+        SET -- Un chat creado por la importación se ordena por su último mensaje, no por hoy.
+            updated_at = CASE WHEN last_inbound_at IS NULL AND last_outbound_at IS NULL THEN $2 ELSE updated_at END,
+            mode = CASE WHEN $3::timestamptz > now() - make_interval(mins => $4) AND assigned_user_id IS NULL THEN 'human' ELSE mode END,
+            agent_active_at = CASE WHEN $3::timestamptz > now() - make_interval(mins => $4) AND assigned_user_id IS NULL
+                                   THEN GREATEST(agent_active_at, $3) ELSE agent_active_at END
+      WHERE id = $1`,
+    [conversationId, latest, latestBusiness, recentMinutes],
+  );
+
+  await client.query(
+    `UPDATE channel_accounts
+        SET history_progress = GREATEST(COALESCE(history_progress, 0), $2),
+            history_status = CASE WHEN GREATEST(COALESCE(history_progress, 0), $2) >= 100 THEN 'done' ELSE 'importing' END
+      WHERE id = $1 AND history_status IS DISTINCT FROM 'declined'`,
+    [channelAccountId, Math.max(0, Math.min(100, Math.round(history.progress)))],
+  );
+  return { result: 'history', tenantId, conversationId, imported };
+}
+
+/** Desconexión, reconexión o historial rechazado: queda en la cuenta del canal y el panel avisa. */
+async function applyAccountNotice(client: PoolClient, channelAccountId: string, event: ParsedEvent): Promise<void> {
+  const notice = event.account;
+  if (!notice) return;
+  if (notice.type === 'disconnected') {
+    await client.query(
+      `UPDATE channel_accounts SET disconnected_at = COALESCE(disconnected_at, $2), disconnect_reason = $3 WHERE id = $1`,
+      [channelAccountId, event.occurredAt, notice.reason ?? notice.event ?? null],
+    );
+  } else if (notice.type === 'reconnected') {
+    // Un aviso viejo de reconexión no borra una desconexión posterior.
+    await client.query(
+      `UPDATE channel_accounts SET disconnected_at = NULL, disconnect_reason = NULL
+        WHERE id = $1 AND (disconnected_at IS NULL OR disconnected_at <= $2)`,
+      [channelAccountId, event.occurredAt],
+    );
+  } else {
+    await client.query(`UPDATE channel_accounts SET history_status = 'declined' WHERE id = $1`, [channelAccountId]);
+  }
 }
 
 async function upsertContact(

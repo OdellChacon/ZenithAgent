@@ -9,7 +9,7 @@ import {
   WhatsAppPayloadError,
   WhatsAppSendError,
 } from '../src/index.js';
-import { echoWebhook, imageWebhook, PHONE_NUMBER_ID, statusWebhook, textWebhook } from './fixtures.js';
+import { accountUpdateWebhook, echoWebhook, historyWebhook, imageWebhook, PHONE_NUMBER_ID, statusWebhook, textWebhook } from './fixtures.js';
 
 const SECRET = 'app-secret-de-prueba';
 
@@ -126,6 +126,91 @@ describe('parseWhatsAppWebhook', () => {
       ['unsupported', 'echo_edit'],
       ['unsupported', 'echo_sin_destinatario'],
     ]);
+  });
+});
+
+describe('historial y avisos de conexión (coexistencia)', () => {
+  const thread = (messages: Record<string, unknown>[]) => ({ id: '584141112233', context: { wa_id: '584141112233' }, messages });
+
+  it('traduce cada chat del historial con quién escribió cada mensaje', () => {
+    const events = parseWhatsAppWebhook(
+      historyWebhook([
+        {
+          metadata: { phase: 0, chunk_order: 1, progress: 40 },
+          threads: [
+            thread([
+              { from: '584141112233', from_user_id: 'VE.1', id: 'wamid.H1', timestamp: '1763600000', type: 'text', text: { body: 'Buenas, ¿tienen granito?' }, history_context: { status: 'READ' } },
+              { from: '584140000000', id: 'wamid.H2', timestamp: '1763600100', type: 'text', text: { body: 'Buenas tardes, sí tenemos.' } },
+              { from: '584141112233', id: 'wamid.H3', timestamp: '1763600200', type: 'media_placeholder' },
+            ]),
+            { context: { username: 'solo_usuario' }, messages: [{ id: 'wamid.H9', timestamp: '1763600000', type: 'text', text: { body: 'x' } }] },
+          ],
+        },
+      ]),
+    );
+    expect(events).toHaveLength(1);
+    const e = events[0]!;
+    expect(e).toMatchObject({ kind: 'history', channelExternalAccountId: PHONE_NUMBER_ID, from: { externalUserId: '584141112233' } });
+    expect(e.externalEventId).toMatch(/^history:584141112233:[0-9a-f]{24}$/);
+    expect(e.occurredAt).toBe(new Date(1763600200 * 1000).toISOString());
+    expect(e.history).toEqual({
+      progress: 40,
+      messages: [
+        { externalMessageId: 'wamid.H1', fromBusiness: false, occurredAt: new Date(1763600000 * 1000).toISOString(), type: 'text', text: 'Buenas, ¿tienen granito?' },
+        { externalMessageId: 'wamid.H2', fromBusiness: true, occurredAt: new Date(1763600100 * 1000).toISOString(), type: 'text', text: 'Buenas tardes, sí tenemos.' },
+        { externalMessageId: 'wamid.H3', fromBusiness: false, occurredAt: new Date(1763600200 * 1000).toISOString(), type: 'media_placeholder' },
+      ],
+    });
+  });
+
+  it('da otra clave al aviso que trae el archivo de un mensaje ya recibido', () => {
+    const placeholder = parseWhatsAppWebhook(
+      historyWebhook([{ metadata: { progress: 100 }, threads: [thread([{ from: '584141112233', id: 'wamid.H3', timestamp: '1763600200', type: 'media_placeholder' }])] }]),
+    );
+    const media = parseWhatsAppWebhook(
+      historyWebhook([
+        {
+          metadata: { progress: 100 },
+          threads: [thread([{ from: '584141112233', id: 'wamid.H3', timestamp: '1763600200', type: 'image', image: { id: 'media-9', mime_type: 'image/jpeg', caption: 'Así la quiero' } }])],
+        },
+      ]),
+    );
+    expect(media[0]!.externalEventId).not.toBe(placeholder[0]!.externalEventId);
+    expect(media[0]!.history!.messages[0]).toMatchObject({ type: 'image', text: 'Así la quiero', media: [{ type: 'image', externalMediaId: 'media-9' }] });
+  });
+
+  it('avisa cuando el negocio no compartió su historial', () => {
+    const events = parseWhatsAppWebhook(historyWebhook([{ errors: [{ code: 2593109, title: 'History sync is turned off' }] }]));
+    expect(events).toEqual([
+      expect.objectContaining({ kind: 'account', channelExternalAccountId: PHONE_NUMBER_ID, account: { type: 'history_declined', scope: 'phone' } }),
+    ]);
+  });
+
+  it('traduce desconexiones y reconexiones de la cuenta e ignora lo demás', () => {
+    const removed = parseWhatsAppWebhook(
+      accountUpdateWebhook({
+        event: 'PARTNER_REMOVED',
+        waba_info: { waba_id: '980198427658004', owner_business_id: '1' },
+        disconnection_info: { reason: 'PRIMARY_INACTIVITY', initiated_by: 'SYSTEM' },
+      }),
+    );
+    expect(removed).toEqual([
+      {
+        channel: 'whatsapp',
+        channelExternalAccountId: '980198427658004',
+        externalEventId: 'account:980198427658004:PARTNER_REMOVED:1763632800',
+        kind: 'account',
+        occurredAt: new Date(1763632800 * 1000).toISOString(),
+        account: { type: 'disconnected', scope: 'waba', event: 'PARTNER_REMOVED', reason: 'PRIMARY_INACTIVITY' },
+      },
+    ]);
+    // ACCOUNT_OFFBOARDED no trae waba_info: se usa entry.id.
+    expect(parseWhatsAppWebhook(accountUpdateWebhook({ event: 'ACCOUNT_OFFBOARDED' }, '102290129340398'))[0]).toMatchObject({
+      channelExternalAccountId: '102290129340398',
+      account: { type: 'disconnected', event: 'ACCOUNT_OFFBOARDED' },
+    });
+    expect(parseWhatsAppWebhook(accountUpdateWebhook({ event: 'ACCOUNT_RECONNECTED' }))[0]!.account!.type).toBe('reconnected');
+    expect(parseWhatsAppWebhook(accountUpdateWebhook({ event: 'VOLUME_BASED_PRICING_TIER_UPDATE' }))).toEqual([]);
   });
 });
 

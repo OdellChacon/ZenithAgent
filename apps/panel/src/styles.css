@@ -177,3 +177,8 @@ button.chip.tag.on .muted { color: inherit; opacity: .8; }
   .back { display: inline-block; }
   .msg { max-width: 92%; }
 }
+
+/* Avisos de conexión de los números (desconexión de Meta, importación del historial). */
+.channel-alerts { display: grid; gap: 6px; padding: 8px 16px 0; }
+.channel-alert { padding: 8px 12px; border-radius: 9px; background: var(--warn-soft); color: var(--warn); font-size: 13.5px; }
+.channel-alert.down { background: var(--hot-soft); color: var(--hot); }

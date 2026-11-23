@@ -4,3 +4,4 @@ export * from './crypto.js';
 export * from './queues.js';
 export * from './events.js';
 export * from './passwords.js';
+export * from './connection.js';

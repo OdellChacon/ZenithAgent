@@ -18,7 +18,7 @@ import { createPool, reclaimStaleWebhookEvents } from '@zenith/db';
 import { processBrainJob } from './brain-job.js';
 import { processInboundEvent } from './inbound.js';
 import { processOutbound } from './outbound.js';
-import { processNotifyJob } from './notify.js';
+import { notifyDisconnection, processNotifyJob } from './notify.js';
 import { runFollowups } from './followups.js';
 import { createLogMailer, createSmtpMailer } from './mailer.js';
 import { aiEnvShape, buildLlm } from './llm-provider.js';
@@ -93,6 +93,22 @@ const inboundWorker = new Worker<InboundJobData>(
       // Un asesor contestó desde la app: el panel lo muestra y el bot ya no responde ahí.
       await publish(outcome.tenantId, { type: 'message.new', conversationId: outcome.conversationId, direction: 'out', author: 'agent' });
       await publish(outcome.tenantId, { type: 'conversation.updated', conversationId: outcome.conversationId });
+    }
+    if (outcome.result === 'history' && outcome.imported > 0) {
+      await publish(outcome.tenantId, { type: 'conversation.updated', conversationId: outcome.conversationId });
+    }
+    if (outcome.result === 'account') {
+      for (const tenantId of outcome.tenantIds) {
+        await publish(tenantId, { type: 'channel.updated' });
+        if (outcome.notice.type !== 'disconnected') continue;
+        // El evento ya quedó procesado: si el correo falla, el aviso igual se ve en el panel.
+        try {
+          const sent = await notifyDisconnection({ pool, mailer, panelUrl: env.PANEL_URL }, tenantId, outcome.notice.reason ?? outcome.notice.event);
+          log.warn({ tenantId, notice: outcome.notice, mail: sent.result }, 'WhatsApp desconectado por Meta');
+        } catch (err) {
+          log.error({ err, tenantId }, 'No se pudo enviar el correo de desconexión');
+        }
+      }
     }
     if (outcome.result === 'message' && outcome.resumed) {
       await publish(outcome.tenantId, { type: 'conversation.updated', conversationId: outcome.conversationId });

@@ -1,5 +1,5 @@
 import { withTenant, type Pool } from '@zenith/db';
-import type { NotifyJobData } from '@zenith/core';
+import { disconnectReasonLabel, type NotifyJobData } from '@zenith/core';
 
 export interface MailMessage {
   to: string[];
@@ -69,6 +69,61 @@ export async function processNotifyJob(deps: { pool: Pool; mailer: Mailer; panel
       `<p><b>${escapeHtml(contact)}</b> fue derivado a un asesor en ${escapeHtml(info.tenant)}.</p>` +
       `<p><b>Motivo:</b> ${escapeHtml(reason)}<br><b>Resumen del bot:</b> ${escapeHtml(summary)}</p>` +
       `<p><a href="${escapeHtml(link)}">Abrir la conversación en el panel</a></p>`,
+  });
+  return { result: 'sent', recipients: recipients.length };
+}
+
+/**
+ * Avisa por correo que Meta desconectó un número: mientras siga así, el bot no recibe ni
+ * contesta mensajes en ese número y los clientes solo los ve quien tenga el teléfono.
+ */
+export async function notifyDisconnection(
+  deps: { pool: Pool; mailer: Mailer; panelUrl: string },
+  tenantId: string,
+  reason: string | undefined,
+): Promise<NotifyOutcome> {
+  const info = await withTenant(deps.pool, tenantId, async (client) => {
+    const { rows } = await client.query<{ tenant: string; numbers: string[] }>(
+      `SELECT t.name AS tenant,
+              coalesce(array_agg(coalesce(ca.display_name, ca.external_account_id)) FILTER (WHERE ca.id IS NOT NULL), '{}') AS numbers
+         FROM tenants t
+         LEFT JOIN channel_accounts ca ON ca.tenant_id = t.id AND ca.channel = 'whatsapp' AND ca.disconnected_at IS NOT NULL
+        WHERE t.id = $1
+        GROUP BY t.name`,
+      [tenantId],
+    );
+    return rows[0];
+  });
+  if (!info) return { result: 'skipped', reason: 'not_found' };
+
+  const { rows: recipients } = await deps.pool.query<{ email: string }>(
+    `SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id
+      WHERE m.tenant_id = $1 AND m.notify_email AND u.status = 'active'`,
+    [tenantId],
+  );
+  if (!recipients.length) return { result: 'skipped', reason: 'no_recipients' };
+
+  const why = disconnectReasonLabel(reason);
+  const numbers = info.numbers.length ? info.numbers.join(', ') : 'WhatsApp';
+  const link = new URL('/', deps.panelUrl).toString();
+  const steps =
+    'Mientras siga desconectado, el bot no recibe ni contesta mensajes en ese número; los clientes solo se ven en el teléfono. ' +
+    'Hay que volver a conectarlo desde el panel. Si el motivo es inactividad, abran WhatsApp Business en el teléfono al menos cada 13 días.';
+  await deps.mailer.send({
+    to: recipients.map((r) => r.email),
+    subject: `WhatsApp desconectado en ${info.tenant}: el bot dejó de atender`,
+    text: `Meta desconectó ${numbers} de ${info.tenant}.
+
+Motivo: ${why}
+
+${steps}
+
+Panel: ${link}
+`,
+    html:
+      `<p>Meta desconectó <b>${escapeHtml(numbers)}</b> de ${escapeHtml(info.tenant)}.</p>` +
+      `<p><b>Motivo:</b> ${escapeHtml(why)}</p><p>${escapeHtml(steps)}</p>` +
+      `<p><a href="${escapeHtml(link)}">Abrir el panel</a></p>`,
   });
   return { result: 'sent', recipients: recipients.length };
 }

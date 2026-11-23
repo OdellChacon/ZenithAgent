@@ -6,7 +6,9 @@
 export type PanelEvent =
   | { type: 'handoff.requested'; conversationId: string; reason: string }
   | { type: 'message.new'; conversationId: string; direction: 'in' | 'out'; author: 'customer' | 'bot' | 'agent' | 'system' }
-  | { type: 'conversation.updated'; conversationId: string };
+  | { type: 'conversation.updated'; conversationId: string }
+  /** Cambió la conexión de un número (desconexión, reconexión, historial). */
+  | { type: 'channel.updated' };
 
 export function tenantEventsChannel(tenantId: string): string {
   return `zenith:tenant:${tenantId}:events`;

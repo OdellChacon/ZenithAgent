@@ -86,6 +86,15 @@ export interface ContactPatch {
   optOutFollowups?: boolean;
 }
 
+export interface ChannelStatus {
+  id: string;
+  channel: string;
+  name: string;
+  /** Meta desconectó el número de la API: el bot no atiende ahí. */
+  disconnected: { at: string; reason: string | null; label: string } | null;
+  history: { status: 'importing' | 'done' | 'declined'; progress: number } | null;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -134,6 +143,7 @@ export const api = {
     return request<{ items: ContactSummary[] }>('GET', `/contacts${qs ? `?${qs}` : ''}`);
   },
   contact: (id: string) => request<ContactDetail>('GET', `/contacts/${encodeURIComponent(id)}`),
+  channels: () => request<{ items: ChannelStatus[] }>('GET', '/channels'),
   contactTags: () => request<{ items: { tag: string; count: number }[] }>('GET', '/contact-tags'),
   updateContact: (id: string, patch: ContactPatch) => request<{ ok: true }>('PATCH', `/contacts/${encodeURIComponent(id)}`, patch),
 };

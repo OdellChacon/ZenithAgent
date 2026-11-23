@@ -12,6 +12,8 @@ import { encryptCredentials, hashPassword, parseMasterKey } from '@zenith/core';
 const url = process.env.MIGRATION_DATABASE_URL;
 const phoneNumberId = process.env.DEV_WHATSAPP_PHONE_NUMBER_ID;
 const accessToken = process.env.DEV_WHATSAPP_ACCESS_TOKEN;
+// Cuenta de WhatsApp Business del número: con ella se ubican los avisos de desconexión.
+const wabaId = process.env.DEV_WHATSAPP_WABA_ID?.trim() || null;
 if (!url || !phoneNumberId) {
   console.error('Faltan MIGRATION_DATABASE_URL o DEV_WHATSAPP_PHONE_NUMBER_ID.');
   process.exit(1);
@@ -41,11 +43,12 @@ try {
   const tenantId = tenant.rows[0]!.id;
 
   const account = await client.query<{ id: string }>(
-    `INSERT INTO channel_accounts (tenant_id, channel, external_account_id, display_name)
-     VALUES ($1, 'whatsapp', $2, 'WhatsApp IMM (desarrollo)')
-     ON CONFLICT (channel, external_account_id) DO UPDATE SET display_name = EXCLUDED.display_name
+    `INSERT INTO channel_accounts (tenant_id, channel, external_account_id, display_name, waba_id)
+     VALUES ($1, 'whatsapp', $2, 'WhatsApp IMM (desarrollo)', $3)
+     ON CONFLICT (channel, external_account_id) DO UPDATE SET display_name = EXCLUDED.display_name,
+                                                             waba_id = COALESCE(EXCLUDED.waba_id, channel_accounts.waba_id)
      RETURNING id`,
-    [tenantId, phoneNumberId],
+    [tenantId, phoneNumberId, wabaId],
   );
   const accountId = account.rows[0]!.id;
 
