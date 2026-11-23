@@ -59,6 +59,8 @@ export interface ToolEffects {
   handoff: { reason: HandoffReason; summary: string } | null;
   /** Productos cuya foto hay que enviar antes del texto, en orden. */
   photos: { productId: string; name: string }[];
+  /** El cliente pidió que no le escriban más por iniciativa del negocio (seguimientos). */
+  stopFollowups?: boolean;
 }
 
 // --------------------------------------------------------------------- definiciones
@@ -144,6 +146,15 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
       required: ['motivo', 'resumen'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'no_escribir_mas',
+    description:
+      'Úsala solo si el cliente pide que no le escriban más, que no le manden mensajes o que lo saquen de la lista. ' +
+      'El negocio dejará de escribirle por su cuenta; si el cliente vuelve a escribir, se le sigue atendiendo. ' +
+      'Después, confírmale con amabilidad que no le escribirán más.',
+    strict: true,
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
   },
 ];
 
@@ -289,6 +300,11 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
       if (!parsed.success) return error('Indique motivo y resumen');
       effects.handoff = { reason: parsed.data.motivo, summary: parsed.data.resumen };
       return json({ ok: true, indicacion: 'Un asesor continuará la conversación. Despídase con amabilidad.' });
+    }
+
+    case 'no_escribir_mas': {
+      effects.stopFollowups = true;
+      return json({ ok: true, indicacion: 'No se le escribirá más por iniciativa del negocio. Confírmeselo en una frase.' });
     }
 
     default:

@@ -1,6 +1,7 @@
 import { decryptCredentials, windowState, type Channel, type OutboundJobData } from '@zenith/core';
 import {
   sendWhatsAppImage,
+  sendWhatsAppTemplate,
   sendWhatsAppText,
   uploadWhatsAppMedia,
   type SendResult,
@@ -31,7 +32,8 @@ interface Claimed {
   attempts: number;
   payload:
     | { kind: 'text'; text: string; to: string; author: 'bot' | 'agent' }
-    | { kind: 'image'; productImageId: string; caption?: string; to: string; author: 'bot' | 'agent' };
+    | { kind: 'image'; productImageId: string; caption?: string; to: string; author: 'bot' | 'agent' }
+    | { kind: 'template'; name: string; language: string; bodyParams: string[]; to: string; author: 'bot' | 'agent' };
   channel: Channel;
   last_inbound_at: Date | null;
   channel_account_id: string;
@@ -160,7 +162,9 @@ export async function processOutboundMessage(
     author: claimed.payload.author,
     botSafetyMarginMs: BOT_SAFETY_MARGIN_MS,
   });
-  if (window !== 'FREE') {
+  // Las plantillas aprobadas son lo único que WhatsApp deja mandar fuera de las 24 h.
+  const allowed = window === 'FREE' || (window === 'TEMPLATE_ONLY' && claimed.payload.kind === 'template');
+  if (!allowed) {
     // Fuera de ventana el texto libre no se puede mandar; queda visible para el equipo.
     await finish('blocked_window', { error: `ventana: ${window}` });
     return { result: 'blocked_window' };
@@ -216,6 +220,9 @@ export async function processOutboundMessage(
           throw new RetryableSendError(res.message);
         }
       }
+    } else if (claimed.payload.kind === 'template') {
+      const { name, language, bodyParams } = claimed.payload;
+      res = await sendWhatsAppTemplate(config, claimed.payload.to, { name, language, bodyParams });
     } else {
       res = await sendWhatsAppText(config, claimed.payload.to, claimed.payload.text);
     }

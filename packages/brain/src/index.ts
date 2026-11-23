@@ -8,3 +8,4 @@ export * from './profile.js';
 export * from './prompt.js';
 export * from './tools.js';
 export * from './validate.js';
+export * from './followup.js';

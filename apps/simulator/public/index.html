@@ -113,6 +113,13 @@
   .ig .bubble.photo, .ms .bubble.photo { padding: 0; background: none; overflow: hidden; }
   .ig .bubble.photo .caption, .ms .bubble.photo .caption { background: var(--in-bg); padding: 8px 12px; }
   .out .bubble a { color: var(--out-link, var(--link)); }
+  /* Botones de respuesta rápida de una plantilla, como en WhatsApp: uno por línea bajo la burbuja. */
+  .quick { display: flex; flex-direction: column; gap: 2px; max-width: 78%; margin-top: 2px; }
+  .quick button { font: inherit; font-size: var(--msg-size); padding: 8px 10px; border: 0; border-radius: var(--r); cursor: pointer;
+                  background: var(--in-bg); color: var(--link); box-shadow: var(--bubble-shadow); }
+  .quick button:hover { filter: brightness(.97); }
+  .quick button:disabled { cursor: default; opacity: .55; }
+  .line.in.has-quick { flex-direction: column; align-items: flex-start; }
   .stamp { float: right; display: inline-flex; align-items: center; gap: 3px; margin: 8px 0 -5px 10px; font-size: 11px; color: var(--stamp); white-space: nowrap; line-height: 1; }
   .out .stamp { color: var(--out-stamp, var(--stamp)); }
   .stamp svg { width: 16px; height: 11px; }
@@ -466,6 +473,10 @@
           // Foto con pie: en WhatsApp va dentro de la burbuja; en Instagram y Messenger, suelta.
           const caption = g.text ? `<div class="caption">${formatText(g.text, s === 'wa')}${stamp}</div>` : stamp ? `<div class="caption only-stamp">${stamp}</div>` : '';
           html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><img src="${escape(g.image)}" alt="${escape(g.text || (side === 'out' ? 'Foto enviada' : 'Foto del producto'))}" loading="lazy">${caption}</div></div>`;
+        } else if (g.buttons && g.buttons.length && side === 'in') {
+          // Solo se puede tocar un botón una vez; después quedan como recuerdo.
+          const quick = g.buttons.map((b) => `<button type="button" data-quick="${escape(b)}"${g.answered ? ' disabled' : ''} data-for="${escape(g.id)}">${escape(b)}</button>`).join('');
+          html += `<div class="line ${side} has-quick">${slot}<div class="${cls}"${style}>${formatText(g.text, s === 'wa')}${stamp}</div><div class="quick">${quick}</div></div>`;
         } else {
           html += `<div class="line ${side}">${slot}<div class="${cls}"${style}>${formatText(g.text, s === 'wa')}${stamp}</div></div>`;
         }
@@ -520,7 +531,7 @@
         const m = JSON.parse(e.data);
         // Al responder el bot, los mensajes anteriores del cliente ya llegaron.
         state.messages.forEach((x) => { if (x.kind === 'customer' && x.status === 'sent') x.status = 'delivered'; });
-        state.messages.push({ id: m.id, kind: 'bot', text: m.text, at: m.at, ...(m.image ? { image: m.image } : {}) });
+        state.messages.push({ id: m.id, kind: 'bot', text: m.text, at: m.at, ...(m.image ? { image: m.image } : {}), ...(m.buttons ? { buttons: m.buttons } : {}) });
         save(); setBusy(-pending); renderChat();
       } catch { /* evento malformado: se ignora */ }
     };
@@ -562,6 +573,20 @@
     void deliver(msg, () => fetch('/api/send', {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text }),
+    }));
+  });
+
+  // Toque de un botón de plantilla: llega al negocio como respuesta de botón, no como texto.
+  $('chat').addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('[data-quick]');
+    if (!btn || btn.disabled) return;
+    const source = state.messages.find((x) => x.id === btn.dataset.for);
+    if (source) source.answered = true;
+    const text = btn.dataset.quick;
+    const msg = { id: 'c' + Date.now(), kind: 'customer', text, at: new Date().toISOString(), status: 'sending' };
+    void deliver(msg, () => fetch('/api/send', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text, button: true }),
     }));
   });
 

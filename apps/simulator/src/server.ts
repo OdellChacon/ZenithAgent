@@ -19,6 +19,17 @@ export interface SimulatorDeps {
   fetch?: typeof fetch;
   /** Retardo de los estados simulados; 0 en pruebas. */
   statusDelayMs?: number;
+  /**
+   * Plantillas "aprobadas" en esta cuenta simulada. Como Meta, el simulador guarda el texto y
+   * los botones; el worker solo manda el nombre y los parámetros.
+   */
+  templates?: Record<string, SimTemplate>;
+}
+
+export interface SimTemplate {
+  language: string;
+  body: string;
+  buttons?: string[];
 }
 
 export interface BotMessage {
@@ -28,6 +39,8 @@ export interface BotMessage {
   text: string;
   /** Ruta para ver la imagen en el navegador, si el mensaje es una foto. */
   image?: string;
+  /** Botones de respuesta rápida, si el mensaje es una plantilla que los tiene. */
+  buttons?: string[];
   at: string;
 }
 
@@ -41,6 +54,7 @@ const sendSchema = z.object({
   from: z.string().regex(/^\d{8,15}$/, 'Número inválido'),
   name: z.string().trim().min(1).max(60),
   text: z.string().trim().min(1).max(4096),
+  button: z.boolean().optional(),
 });
 
 const graphBodySchema = z.discriminatedUnion('type', [
@@ -51,7 +65,26 @@ const graphBodySchema = z.discriminatedUnion('type', [
     type: z.literal('image'),
     image: z.object({ id: z.string().min(1), caption: z.string().optional() }),
   }),
+  z.object({
+    messaging_product: z.literal('whatsapp'),
+    to: z.string().min(1),
+    type: z.literal('template'),
+    template: z.object({
+      name: z.string().min(1),
+      language: z.object({ code: z.string().min(1) }),
+      components: z
+        .array(z.object({ type: z.string(), parameters: z.array(z.object({ type: z.literal('text'), text: z.string() })).optional() }))
+        .optional(),
+    }),
+  }),
 ]);
+
+/** Arma el texto de una plantilla como lo vería el cliente. null si los parámetros no calzan. */
+export function renderSimTemplate(template: SimTemplate, params: string[]): string | null {
+  const needed = new Set([...template.body.matchAll(/\{\{(\d+)\}\}/g)].map((m) => Number(m[1])));
+  if (needed.size !== params.length || params.some((p) => !p.trim())) return null;
+  return template.body.replace(/\{\{(\d+)\}\}/g, (_w, n: string) => params[Number(n) - 1]!);
+}
 
 /** Como Meta: JPEG o PNG de hasta 5 MB. */
 const MEDIA_TYPES = new Set(['image/jpeg', 'image/png']);
@@ -102,19 +135,21 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
 
   // ---------------------------------------------------------------- papel de cliente
 
+  /** Texto del cliente, o el toque de un botón de plantilla (button: true), como los manda Meta. */
   app.post('/api/send', async (req, reply) => {
     const parsed = sendSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.code(400).send({ error: { code: 'invalid_input', message: parsed.error.issues[0]?.message ?? 'Datos inválidos' } });
     }
-    const { from, name, text } = parsed.data;
+    const { from, name, text, button } = parsed.data;
     const id = `wamid.SIM${Date.now()}${++seq}`;
+    const content = button ? { type: 'button', button: { text, payload: text } } : { type: 'text', text: { body: text } };
     let status: number;
     try {
       status = await postWebhook(
         envelope({
           contacts: [{ profile: { name }, wa_id: from }],
-          messages: [{ from, id, timestamp: String(Math.floor(Date.now() / 1000)), type: 'text', text: { body: text } }],
+          messages: [{ from, id, timestamp: String(Math.floor(Date.now() / 1000)), ...content }],
         }),
       );
     } catch {
@@ -221,11 +256,31 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
       return reply.code(400).send({ error: { code: 131053, message: 'Id de archivo desconocido' } });
     }
 
+    let text: string;
+    let buttons: string[] | undefined;
+    if (body.type === 'template') {
+      // Como Meta: la plantilla tiene que existir aprobada en ese idioma y con sus parámetros.
+      const tpl = deps.templates?.[body.template.name];
+      if (!tpl || tpl.language !== body.template.language.code) {
+        return reply.code(404).send({ error: { code: 132001, message: 'La plantilla no existe en ese idioma' } });
+      }
+      const params = (body.template.components ?? []).find((c) => c.type === 'body')?.parameters?.map((p) => p.text) ?? [];
+      const rendered = renderSimTemplate(tpl, params);
+      if (rendered === null) {
+        return reply.code(400).send({ error: { code: 132000, message: 'El número de parámetros no coincide con la plantilla' } });
+      }
+      text = rendered;
+      buttons = tpl.buttons?.length ? tpl.buttons : undefined;
+    } else {
+      text = body.type === 'text' ? body.text.body : (body.image.caption ?? '');
+    }
+
     const message: BotMessage = {
       id: `wamid.BOT${Date.now()}${++seq}`,
       to: body.to,
-      text: body.type === 'text' ? body.text.body : (body.image.caption ?? ''),
+      text,
       ...(body.type === 'image' ? { image: `/sim-media/${encodeURIComponent(body.image.id)}` } : {}),
+      ...(buttons ? { buttons } : {}),
       at: new Date().toISOString(),
     };
     botMessages.push(message);

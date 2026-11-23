@@ -134,3 +134,35 @@ export async function uploadWhatsAppMedia(
   const id = res.data?.id;
   return id ? { ok: true, mediaId: id } : { ok: false, retryable: false, httpStatus: 200, message: 'Meta no devolvió el id del archivo' };
 }
+
+export interface WhatsAppTemplate {
+  /** Nombre de la plantilla aprobada en el administrador de WhatsApp. */
+  name: string;
+  /** Código de idioma con el que se aprobó (ej. "es", "es_MX"). */
+  language: string;
+  /** Valores de {{1}}, {{2}}… del cuerpo, en orden. */
+  bodyParams: string[];
+}
+
+/**
+ * Envía una plantilla aprobada. Es lo único que WhatsApp permite fuera de las 24 h desde el
+ * último mensaje del cliente. Meta rechaza parámetros vacíos o con saltos de línea.
+ */
+export async function sendWhatsAppTemplate(config: WhatsAppSendConfig, to: string, template: WhatsAppTemplate): Promise<SendResult> {
+  checkRecipient(to);
+  if (!/^[a-z0-9_]{1,512}$/.test(template.name)) throw new WhatsAppSendError('Nombre de plantilla inválido');
+  if (!/^[a-z]{2,3}(_[A-Z]{2})?$/.test(template.language)) throw new WhatsAppSendError('Idioma de plantilla inválido');
+  for (const p of template.bodyParams) {
+    if (!p.trim() || /[\n\t]| {4,}/.test(p)) throw new WhatsAppSendError('Parámetro de plantilla vacío o con saltos de línea');
+  }
+  return sendMessage(config, to, {
+    type: 'template',
+    template: {
+      name: template.name,
+      language: { code: template.language },
+      ...(template.bodyParams.length
+        ? { components: [{ type: 'body', parameters: template.bodyParams.map((text) => ({ type: 'text', text })) }] }
+        : {}),
+    },
+  });
+}

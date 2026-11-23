@@ -19,6 +19,7 @@ import { processBrainJob } from './brain-job.js';
 import { processInboundEvent } from './inbound.js';
 import { processOutbound } from './outbound.js';
 import { processNotifyJob } from './notify.js';
+import { runFollowups } from './followups.js';
 import { createLogMailer, createSmtpMailer } from './mailer.js';
 import { aiEnvShape, buildLlm } from './llm-provider.js';
 
@@ -210,8 +211,39 @@ async function sweep() {
 const sweepTimer = setInterval(sweep, 60_000);
 void sweep();
 
+/** Seguimiento a clientes que dejaron de responder (ver followups.ts). Una pasada a la vez. */
+let followupsRunning = false;
+async function followupTick() {
+  if (followupsRunning || env.AI_PROVIDER === 'none') return;
+  followupsRunning = true;
+  try {
+    const run = await runFollowups({
+      pool,
+      llm,
+      model,
+      effort: env.AI_EFFORT,
+      log: (msg, data) => log.warn(data, msg),
+    });
+    for (const s of run.sent) {
+      await outboundQueue.add(
+        'send',
+        { tenantId: s.tenantId, outboundMessageIds: [s.outboundMessageId] },
+        { jobId: s.outboundMessageId, attempts: 5, backoff: { type: 'exponential', delay: 3000 }, removeOnComplete: 1000 },
+      );
+      await publish(s.tenantId, { type: 'message.new', conversationId: s.conversationId, direction: 'out', author: 'bot' });
+    }
+    if (run.sent.length || run.failed) log.info({ sent: run.sent.length, skipped: run.skipped, failed: run.failed }, 'seguimientos');
+  } catch (err) {
+    log.error({ err: (err as Error).message }, 'falló la pasada de seguimientos');
+  } finally {
+    followupsRunning = false;
+  }
+}
+const followupTimer = setInterval(followupTick, 60_000);
+
 const shutdown = async () => {
   clearInterval(sweepTimer);
+  clearInterval(followupTimer);
   await Promise.all([inboundWorker.close(), brainWorker.close(), outboundWorker.close(), notifyWorker.close()]);
   await Promise.all([inboundQueue.close(), brainQueue.close(), outboundQueue.close(), notifyQueue.close()]);
   connection.disconnect();

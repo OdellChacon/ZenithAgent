@@ -13,7 +13,18 @@ const DELIVERY_LABELS: Record<string, string> = {
 };
 
 function Bubble({ m }: { m: Message }) {
-  const who = m.author === 'customer' ? null : m.author === 'bot' ? 'Bot' : m.author === 'agent' ? (m.sentBy ?? 'Asesor') : 'Sistema';
+  const who =
+    m.author === 'customer'
+      ? null
+      : m.author === 'bot'
+        ? m.followup === 2
+          ? 'Bot · seguimiento con plantilla'
+          : m.followup === 1
+            ? 'Bot · seguimiento'
+            : 'Bot'
+        : m.author === 'agent'
+          ? (m.sentBy ?? 'Asesor')
+          : 'Sistema';
   return (
     <div className={`msg ${m.direction} ${m.author}`}>
       {who && <span className="who">{who}</span>}

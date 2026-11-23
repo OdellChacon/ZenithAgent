@@ -31,6 +31,8 @@ export interface Message {
   sentBy: string | null;
   delivery: string | null;
   imageId: string | null;
+  /** Mensaje de seguimiento automático: 1 = del bot, 2 = plantilla. */
+  followup: 1 | 2 | null;
   at: string;
 }
 

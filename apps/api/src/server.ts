@@ -259,6 +259,8 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         sentBy: m.sent_by,
         delivery: m.delivery,
         imageId: Array.isArray(m.attachments) ? (m.attachments[0]?.productImageId ?? null) : null,
+        // 1 = mensaje de seguimiento del bot; 2 = plantilla de seguimiento.
+        followup: Array.isArray(m.attachments) ? (m.attachments[0]?.followup ?? null) : null,
         at: m.created_at,
       })),
     };

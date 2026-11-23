@@ -37,7 +37,17 @@ type Block = Anthropic.Beta.BetaTextBlockParam | Anthropic.Beta.BetaImageBlockPa
  * `images` trae las fotos del cliente ya descargadas, por id de mensaje. Las que no están
  * (viejas o que no se pudieron bajar) quedan como una nota de texto.
  */
-export function toModelMessages(history: HistoryMessage[], images?: ReadonlyMap<string, ModelImage>): BetaMessageParam[] {
+export function toModelMessages(
+  history: HistoryMessage[],
+  images?: ReadonlyMap<string, ModelImage>,
+  opts: {
+    /**
+     * Nota interna que se agrega al final como turno del usuario. Sirve para pedirle algo al
+     * modelo cuando el último mensaje es del negocio (por ejemplo, un seguimiento).
+     */
+    trailingNote?: string;
+  } = {},
+): BetaMessageParam[] {
   const turns: { role: 'user' | 'assistant'; blocks: Block[] }[] = [];
   for (const m of history) {
     if (m.author === 'system') continue;
@@ -58,6 +68,12 @@ export function toModelMessages(history: HistoryMessage[], images?: ReadonlyMap<
     const last = turns[turns.length - 1];
     if (last && last.role === role) last.blocks.push(...blocks); // mensajes seguidos del mismo lado se unen
     else turns.push({ role, blocks });
+  }
+  if (opts.trailingNote) {
+    const note: Block = { type: 'text', text: opts.trailingNote };
+    const last = turns[turns.length - 1];
+    if (last && last.role === 'user') last.blocks.push(note);
+    else turns.push({ role: 'user', blocks: [note] });
   }
   while (turns.length && turns[0]!.role !== 'user') turns.shift();
   // El bot responde al cliente: el historial siempre termina en un mensaje suyo.

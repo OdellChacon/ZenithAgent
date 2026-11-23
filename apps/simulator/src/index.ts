@@ -1,5 +1,6 @@
+import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
-import { buildSimulator } from './server.js';
+import { buildSimulator, type SimTemplate } from './server.js';
 
 const env = z
   .object({
@@ -16,10 +17,14 @@ if (env.NODE_ENV === 'production') {
   process.exit(1);
 }
 
+// Plantillas "aprobadas" de la cuenta simulada (en Meta se aprueban en el administrador de WhatsApp).
+const templates = JSON.parse(await readFile(new URL('../templates.json', import.meta.url), 'utf8')) as Record<string, SimTemplate>;
+
 const app = buildSimulator({
   gatewayUrl: env.SIMULATOR_GATEWAY_URL,
   metaAppSecret: env.META_APP_SECRET,
   phoneNumberId: env.DEV_WHATSAPP_PHONE_NUMBER_ID,
+  templates,
 });
 
 // Solo en la máquina local: el simulador firma webhooks con el secreto de la app.

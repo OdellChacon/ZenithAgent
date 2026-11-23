@@ -20,7 +20,7 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 | Avisos al derivar: en vivo en el panel (sonido y notificación) y por correo | Hecho |
 | Visión: el bot mira las fotos del cliente y busca lo más parecido del catálogo | Hecho |
 | Cotización en PDF | Pendiente (F1.5) |
-| Plantillas de WhatsApp y seguimiento fuera de 24 h | Pendiente |
+| Seguimiento automático: mensaje del bot en 24 h y plantilla aprobada después | Hecho (la plantilla falta aprobarla en Meta) |
 
 ## Estructura
 
@@ -69,6 +69,8 @@ npm run dev:sim     # abre http://localhost:4010
 
 Los íconos de clip, cámara o galería del teléfono mandan una foto como cliente (lo escrito en la caja va como pie de foto). La foto queda en el simulador y el worker la baja como lo haría de Meta.
 
+El simulador también conoce las plantillas "aprobadas" de `apps/simulator/templates.json` (en Meta se aprueban en el administrador de WhatsApp): las muestra con sus botones, y tocar un botón llega al negocio como respuesta de botón, igual que en WhatsApp.
+
 Por dentro el canal siempre es WhatsApp; Instagram y Messenger solo cambian la apariencia hasta que existan sus conectores.
 
 ### Panel de asesores
@@ -116,12 +118,24 @@ npm run test:all  # también las de integración (usan la BD local de .env)
 ## Cómo responde el bot
 
 1. Llega un mensaje y se espera 4 s por si el cliente sigue escribiendo; si llega otro, solo responde el último turno.
-2. El modelo (según `AI_PROVIDER`) recibe el historial reciente, el perfil del negocio y cuatro herramientas: `buscar_productos`, `calcular_cajas`, `enviar_fotos` y `derivar_a_asesor`.
+2. El modelo (según `AI_PROVIDER`) recibe el historial reciente, el perfil del negocio y cinco herramientas: `buscar_productos`, `calcular_cajas`, `enviar_fotos`, `derivar_a_asesor` y `no_escribir_mas`.
    Las fotos de cada producto se guardan al sincronizar el catálogo (WebP pasa a JPEG, que es lo que acepta WhatsApp). Al enviarlas, cada foto se sube a WhatsApp una vez y su id se reutiliza 25 días; las fotos salen antes del texto.
    Si el cliente mandó fotos desde la última respuesta (máximo 3), el worker las baja de WhatsApp (`GET /{media_id}` y luego la url con el token; el token solo va a hosts de Meta o al simulador local), las achica a 1024 px en JPEG sin metadatos y se las pasa al modelo. El modelo describe aspecto, color y formato, busca lo más parecido y lo muestra con fotos, sin asegurar que es el mismo producto. Si una foto no baja, recibe una nota y le pide al cliente que la describa.
 3. Los productos y las cajas salen de la BD y del código, nunca del modelo. Las herramientas no le muestran precios.
 4. Antes de enviar, un validador bloquea cualquier respuesta con montos. Si el modelo falla, rechaza o se enreda, el cliente recibe un mensaje de respaldo y la conversación pasa a un asesor.
 5. Al derivar, la conversación queda en modo `human`: el bot deja de responder y el pase queda en `handoffs`.
-6. El envío revisa la ventana de 24 h; fuera de ella no manda texto libre (`blocked_window`).
+6. El envío revisa la ventana de 24 h; fuera de ella no manda texto libre (`blocked_window`), solo plantillas aprobadas.
+7. Si el cliente pide que no le escriban más, el bot usa `no_escribir_mas` y el contacto queda con `opt_out_followups`.
+
+## Seguimiento automático
+
+Cuando el cliente deja de responder, el worker (una pasada por minuto) lo retoma como lo haría un vendedor. Se configura por negocio en `settings.followups` (ver `config/tenants/inversiones-mora-mora.json`):
+
+1. **Paso 1, dentro de las 24 h** (`firstAfterMinutes`, 20 h por defecto desde la última respuesta del bot): la IA lee la conversación y escribe un mensaje corto que retoma lo que hablaron, o decide no escribir (`NO_SEGUIR`) si el cliente se despidió, ya compró, no le interesa o solo saludó. Pasa por el mismo validador de precios.
+2. **Paso 2, fuera de las 24 h** (`template.afterMinutes`, 48 h por defecto desde el último mensaje del cliente): la plantilla aprobada por Meta, con el nombre del cliente y botones. No gasta IA. Solo va si el paso 1 salió, o si la IA quería escribir pero la ventana ya había cerrado.
+
+Nunca escribe: entre las `quietHours` del negocio (20:00 a 08:00 en su zona horaria), a conversaciones que atiende un asesor, a quien pidió que no le escriban, a conversaciones de más de `maxAgeDays`, ni dos veces por el mismo silencio (tabla `followups`, una fila por paso). Si el cliente responde, su mensaje abre un silencio nuevo. En el panel, estos mensajes salen como "Bot · seguimiento".
+
+**Antes de producción:** crear y aprobar en el administrador de WhatsApp la plantilla `seguimiento_consulta` (idioma `es`, un parámetro `{{1}}` = nombre, botones de respuesta rápida "Sí, quiero cotizar", "Tengo dudas" y "No, gracias") con el mismo texto que `preview`. Meta probablemente la clasifique como *marketing*, que tiene costo por envío y exige que el cliente haya aceptado recibir mensajes del negocio.
 
 Las peticiones a Claude usan el respaldo automático del servidor (`fallbacks: "default"`) si el modelo rechaza por un filtro de seguridad, y cachean el prompt de sistema y las herramientas.

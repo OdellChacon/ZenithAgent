@@ -254,6 +254,14 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     }
     ordered.push(textId);
 
+    if (brain.stopFollowups) {
+      await client.query(
+        `UPDATE contacts SET opt_out_followups = true, updated_at = now()
+          WHERE id = (SELECT contact_id FROM conversations WHERE id = $1)`,
+        [job.conversationId],
+      );
+    }
+
     let handoffId: string | undefined;
     if (brain.handoff) {
       await client.query(`UPDATE conversations SET mode = 'human', updated_at = now() WHERE id = $1`, [job.conversationId]);

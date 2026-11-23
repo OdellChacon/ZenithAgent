@@ -162,6 +162,30 @@ describe('simulador: papel de Meta', () => {
     expect(gateway).not.toHaveBeenCalled();
   });
 
+  it('manda plantillas aprobadas con sus botones y rechaza las que no existen o no calzan', async () => {
+    const { app, sent } = setup();
+    const templates = { seguimiento: { language: 'es', body: 'Hola {{1}}, ¿pudo ver las opciones?', buttons: ['Sí', 'No, gracias'] } };
+    const sim = buildSimulator({ gatewayUrl: 'http://localhost:3000', metaAppSecret: SECRET, phoneNumberId: PHONE, statusDelayMs: 0, templates,
+      fetch: vi.fn<typeof fetch>(async () => new Response('{}', { status: 200 })) });
+    const tpl = (name: string, code: string, params: string[]) => ({
+      messaging_product: 'whatsapp', to: '584141234567', type: 'template',
+      template: { name, language: { code }, components: [{ type: 'body', parameters: params.map((text) => ({ type: 'text', text })) }] },
+    });
+    const ok = await graph(sim as ReturnType<typeof setup>['app'], tpl('seguimiento', 'es', ['Ana']));
+    expect(ok.statusCode).toBe(200);
+    expect(sim.botMessages.at(-1)).toMatchObject({ text: 'Hola Ana, ¿pudo ver las opciones?', buttons: ['Sí', 'No, gracias'] });
+    expect((await graph(sim as ReturnType<typeof setup>['app'], tpl('otra', 'es', ['Ana']))).json().error.code).toBe(132001);
+    expect((await graph(sim as ReturnType<typeof setup>['app'], tpl('seguimiento', 'en', ['Ana']))).json().error.code).toBe(132001);
+    expect((await graph(sim as ReturnType<typeof setup>['app'], tpl('seguimiento', 'es', []))).json().error.code).toBe(132000);
+
+    // El toque de un botón llega al negocio como respuesta de botón, y se lee como texto.
+    const res = await app.inject({ method: 'POST', url: '/api/send', payload: { from: '584141234567', name: 'Ana', text: 'Sí', button: true } });
+    expect(res.statusCode).toBe(200);
+    const body = JSON.parse(sent[0]!.body);
+    expect(body.entry[0].changes[0].value.messages[0]).toMatchObject({ type: 'button', button: { text: 'Sí' } });
+    expect(parseWhatsAppWebhook(body)[0]).toMatchObject({ kind: 'message', text: 'Sí' });
+  });
+
   it('el stream exige un número válido', async () => {
     expect((await setup().app.inject({ method: 'GET', url: '/api/stream?to=abc' })).statusCode).toBe(400);
   });

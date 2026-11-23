@@ -27,6 +27,8 @@ export interface BrainResult {
   handoff: { reason: HandoffReason | 'seguridad' | 'error'; summary: string } | null;
   /** Fotos a enviar antes del texto, en orden. */
   photos: { productId: string; name: string }[];
+  /** El cliente pidió que no le escriban más: se desactivan sus seguimientos. */
+  stopFollowups?: boolean;
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
   iterations: number;
   stopReason: string | null;
@@ -62,6 +64,7 @@ export async function runBrainTurn(params: {
     reply: FALLBACK_REPLY,
     handoff: effects.handoff ?? { reason: outcome === 'refusal' ? 'seguridad' : 'error', summary },
     photos: [],
+    ...(effects.stopFollowups ? { stopFollowups: true } : {}),
     usage,
     iterations,
     stopReason,
@@ -143,6 +146,7 @@ export async function runBrainTurn(params: {
       reply: check.text,
       handoff: effects.handoff,
       photos: effects.photos,
+      ...(effects.stopFollowups ? { stopFollowups: true } : {}),
       usage,
       iterations,
       stopReason,

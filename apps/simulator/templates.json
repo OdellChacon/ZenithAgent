@@ -1,0 +1,8 @@
+{
+  "seguimiento_consulta": {
+    "language": "es",
+    "category": "MARKETING",
+    "body": "Hola {{1}}, le escribimos de Inversiones Mora Mora por la consulta que nos hizo. ¿Pudo ver las opciones que le enviamos? Si quiere, un asesor le prepara la cotización sin compromiso.",
+    "buttons": ["Sí, quiero cotizar", "Tengo dudas", "No, gracias"]
+  }
+}
