@@ -132,7 +132,7 @@ describe('polishReply', () => {
   });
 
   it('no toca lo que no es muletilla', () => {
-    for (const t of ['Son una excelente opción por su acabado mate.', 'Perfecto para exteriores, es antideslizante.', '¡Perfecto!']) {
+    for (const t of ['Son una excelente opción por su acabado mate.', 'Perfecto para exteriores, es antideslizante.', '¡Perfecto!', 'Con gusto. Quedamos a su orden para lo que necesite.']) {
       expect(polishReply(t)).toBe(t);
     }
   });
