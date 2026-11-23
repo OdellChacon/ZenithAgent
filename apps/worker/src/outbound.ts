@@ -17,6 +17,7 @@ export interface OutboundDeps {
   fetch?: typeof fetch;
   now?: () => Date;
   maxAttempts?: number;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export type OutboundOutcome =
@@ -106,7 +107,11 @@ async function forgetMedia(deps: OutboundDeps, tenantId: string, channelAccountI
  */
 export async function processOutbound(deps: OutboundDeps, job: OutboundJobData): Promise<OutboundOutcome[]> {
   const results: OutboundOutcome[] = [];
-  for (const outboundMessageId of job.outboundMessageIds) {
+  const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  for (const [i, outboundMessageId] of job.outboundMessageIds.entries()) {
+    // Pausa de "escribiendo" entre mensajes; en un reintento, lo que ya salió no espera.
+    const pause = job.pausesMs?.[i] ?? 0;
+    if (pause > 0 && results.at(-1)?.result === 'sent') await sleep(Math.min(pause, 5000));
     results.push(await processOutboundMessage(deps, { tenantId: job.tenantId, outboundMessageId }));
   }
   return results;

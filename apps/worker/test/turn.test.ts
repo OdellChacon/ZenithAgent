@@ -199,6 +199,35 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
     ]);
   });
 
+  it('parte la respuesta en mensajes cortos, con una pausa de "escribiendo" entre ellos', async () => {
+    const msg = await customerSays('Buenas, busco algo tipo cemento para la pared', '584141230021');
+    const turn = await processBrainJob(
+      { pool: app, llm: scriptedLlm([text('Buenas tardes. Tengo la *Itria Gris*: lisa, mate, gris parejo.\n\n¿Cuántos metros tiene la pared?')]).llm },
+      { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId },
+    );
+    if (turn.result !== 'replied') throw new Error('se esperaba respuesta');
+    expect(turn.outboundMessageIds).toHaveLength(2);
+    expect(turn.outboundMessageIds[0]).toBe(turn.outboundMessageId);
+    expect(turn.pausesMs[0]).toBe(0); // el primero sale apenas está listo
+    expect(turn.pausesMs[1]).toBeGreaterThanOrEqual(800);
+
+    const sent: string[] = [];
+    const waits: number[] = [];
+    const meta = vi.fn<typeof fetch>(async (_url, init) => {
+      sent.push(JSON.parse(String(init?.body)).text.body);
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.B${sent.length}${Date.now()}` }] }), { status: 200 });
+    });
+    const deps = { ...outboundDeps(), fetch: meta, sleep: async (ms: number) => void waits.push(ms) };
+    const job = { tenantId: t.tenantId, outboundMessageIds: turn.outboundMessageIds, pausesMs: turn.pausesMs };
+    expect((await processOutboundBatch(deps, job)).map((r) => r.result)).toEqual(['sent', 'sent']);
+    expect(sent).toEqual(['Buenas tardes. Tengo la *Itria Gris*: lisa, mate, gris parejo.', '¿Cuántos metros tiene la pared?']);
+    expect(waits).toEqual([turn.pausesMs[1]]);
+
+    // Un reintento del lote no reenvía ni vuelve a esperar.
+    expect((await processOutboundBatch(deps, job)).map((r) => r.result)).toEqual(['skipped', 'skipped']);
+    expect(waits).toHaveLength(1);
+  });
+
   it('el modelo ve la foto que manda el cliente, achicada y sin metadatos', async () => {
     seq++;
     const payload = structuredClone(imageWebhook);
@@ -229,9 +258,11 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
     expect((meta.mock.calls[0]![1]?.headers as Record<string, string>).Authorization).toBe('Bearer token-prueba');
 
     const content = calls[0]!.messages.at(-1)!.content as { type: string; text?: string; source?: { data: string } }[];
-    expect(content.map((b) => b.type)).toEqual(['text', 'image', 'text']);
-    expect(content[2]?.text).toBe('¿Tienen algo así?');
-    const seen = Buffer.from(content[1]!.source!.data, 'base64');
+    // Primero la nota con la hora de la tienda y el nombre del cliente; después, la foto.
+    expect(content.map((b) => b.type)).toEqual(['text', 'text', 'image', 'text']);
+    expect(content[0]?.text).toMatch(/^\[Datos internos/);
+    expect(content[3]?.text).toBe('¿Tienen algo así?');
+    const seen = Buffer.from(content[2]!.source!.data, 'base64');
     const info = await sharp(seen).metadata();
     expect(Math.max(info.width!, info.height!)).toBe(1024);
     expect(info.exif).toBeUndefined();

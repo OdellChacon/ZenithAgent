@@ -2,12 +2,15 @@ import { outboundIdempotencyKey, type BrainJobData, type Channel } from '@zenith
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 import {
   buildSystemPrompt,
+  conversationNote,
   FALLBACK_REPLY,
   formatForChannel,
   isRetryableLlmError,
   parseTenantBotSettings,
   pendingCustomerImages,
   runBrainTurn,
+  splitBubbles,
+  typingPauseMs,
   toModelMessages,
   type BrainConfig,
   type BrainResult,
@@ -31,6 +34,7 @@ export interface BrainJobDeps {
   finalAttempt?: boolean;
   /** Para que el modelo vea las fotos del cliente. Sin esto, solo recibe una nota de texto. */
   media?: CustomerMediaDeps;
+  now?: () => Date;
 }
 
 export type BrainJobOutcome =
@@ -38,8 +42,10 @@ export type BrainJobOutcome =
       result: 'replied';
       /** El mensaje de texto. */
       outboundMessageId: string;
-      /** Todos los envíos, en el orden en que deben salir (fotos y luego texto). */
+      /** Todos los envíos, en el orden en que deben salir (fotos y luego los mensajes de texto). */
       outboundMessageIds: string[];
+      /** Pausa de "escribiendo" antes de cada envío, en el mismo orden. */
+      pausesMs: number[];
       handoff: boolean;
       /** Pase a asesor creado en este turno, para avisar al equipo. */
       handoffId?: string;
@@ -54,6 +60,8 @@ interface Snapshot {
   credentialsEnc: Buffer | null;
   recipient: string;
   settings: unknown;
+  timezone: string;
+  customerName: string | null;
   history: (HistoryMessage & { external_media_id: string | null })[];
 }
 
@@ -86,8 +94,10 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       channel_account_id: string;
       credentials_enc: Buffer | null;
       recipient: string | null;
+      customer_name: string | null;
     }>(
       `SELECT c.mode, c.status, ca.channel, ca.id AS channel_account_id, ca.credentials_enc,
+              (SELECT ct.name FROM contacts ct WHERE ct.id = c.contact_id) AS customer_name,
               (SELECT ci.external_user_id FROM contact_identities ci
                 WHERE ci.contact_id = c.contact_id AND ci.channel = ca.channel LIMIT 1) AS recipient
          FROM conversations c JOIN channel_accounts ca ON ca.id = c.channel_account_id
@@ -104,7 +114,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     const answered = await client.query('SELECT 1 FROM outbound_messages WHERE idempotency_key = $1', [key]);
     if (answered.rowCount) return { result: 'skipped', reason: 'already_answered' };
 
-    const tenant = await client.query<{ settings: unknown }>('SELECT settings FROM tenants WHERE id = $1', [job.tenantId]);
+    const tenant = await client.query<{ settings: unknown; timezone: string }>('SELECT settings, timezone FROM tenants WHERE id = $1', [
+      job.tenantId,
+    ]);
     const history = await client.query<HistoryMessage & { external_media_id: string | null }>(
       `SELECT id, direction, author, type, body, external_media_id FROM (
          SELECT id, direction, author, type, body, seq, attachments->0->>'externalMediaId' AS external_media_id FROM messages
@@ -118,6 +130,8 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       credentialsEnc: row.credentials_enc,
       recipient: row.recipient,
       settings: tenant.rows[0]?.settings,
+      timezone: tenant.rows[0]?.timezone ?? 'UTC',
+      customerName: row.customer_name,
       history: history.rows,
     };
   });
@@ -151,7 +165,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     brain = await runBrainTurn({
       llm: deps.llm,
       system: buildSystemPrompt(settings),
-      messages: toModelMessages(snapshot.history, images),
+      messages: toModelMessages(snapshot.history, images, {
+        leadingNote: conversationNote({ customerName: snapshot.customerName, now: deps.now?.() ?? new Date(), timezone: snapshot.timezone }),
+      }),
       tools: { catalog: createCatalogReader(pool, job.tenantId), wastePercent: settings.boxes.wastePercent },
       ...(deps.config ? { config: deps.config } : {}),
     });
@@ -228,8 +244,10 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       return outbound.rows[0]?.id ?? null;
     };
 
-    // Primero las fotos (cada una con el nombre del producto como pie) y después el texto.
+    // Primero las fotos (cada una con el nombre del producto como pie) y después el texto,
+    // partido en mensajes cortos como escribe una persona.
     const ordered: string[] = [];
+    const pauses: number[] = [];
     for (const photo of brain.photos) {
       const image = await client.query<{ id: string }>(
         'SELECT id FROM product_images WHERE product_id = $1 ORDER BY position LIMIT 1',
@@ -244,15 +262,31 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
         outboundIdempotencyKey(job.conversationId, job.triggerMessageId, `photo:${photo.productId}`),
         [{ productImageId: imageId }],
       );
-      if (id) ordered.push(id);
+      if (id) {
+        ordered.push(id);
+        pauses.push(0);
+      }
     }
 
-    const textId = await queue('text', brain.reply, { kind: 'text', text: brain.reply, to: snapshot.recipient, author: 'bot' }, key);
-    if (!textId) {
-      // Otro intento ya guardó la respuesta: se deshace esta transacción.
-      throw new AlreadyAnsweredError();
+    const bubbles = splitBubbles(brain.reply);
+    if (!bubbles.length) bubbles.push(brain.reply);
+    let textId: string | null = null;
+    for (const [i, bubble] of bubbles.entries()) {
+      const id = await queue(
+        'text',
+        bubble,
+        { kind: 'text', text: bubble, to: snapshot.recipient, author: 'bot' },
+        i === 0 ? key : outboundIdempotencyKey(job.conversationId, job.triggerMessageId, `${REPLY_STEP}:${i + 1}`),
+      );
+      if (!id) {
+        // Otro intento ya guardó la respuesta: se deshace esta transacción.
+        throw new AlreadyAnsweredError();
+      }
+      textId ??= id;
+      // El primer mensaje sale sin espera si no hubo fotos: el cliente ya esperó al bot.
+      pauses.push(ordered.length ? typingPauseMs(bubble) : 0);
+      ordered.push(id);
     }
-    ordered.push(textId);
 
     if (brain.stopFollowups) {
       await client.query(
@@ -275,8 +309,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
 
     return {
       result: 'replied',
-      outboundMessageId: textId,
+      outboundMessageId: textId!,
       outboundMessageIds: ordered,
+      pausesMs: pauses,
       handoff: Boolean(brain.handoff),
       ...(handoffId ? { handoffId } : {}),
       outcome: brain.outcome,

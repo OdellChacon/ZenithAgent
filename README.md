@@ -129,6 +129,11 @@ npm run test:all  # también las de integración (usan la BD local de .env)
 6. El envío revisa la ventana de 24 h; fuera de ella no manda texto libre (`blocked_window`), solo plantillas aprobadas.
 7. Si el cliente pide que no le escriban más, el bot usa `no_escribir_mas` y el contacto queda con `opt_out_followups`.
 8. Antes de enviar, `polishReply` quita las muletillas que el prompt ya prohíbe pero el modelo a veces usa ("¡Excelente!", "Es un gusto saludarle", "¡Que tenga un excelente día!") y las frases que hablan del sistema ("el sistema calcula unas 17 cajas" pasa a "serían unas 17 cajas"). Aplica también a los seguimientos.
+9. Para que se sienta como una persona del equipo:
+   - **Mensajes cortos:** la respuesta se parte por párrafos en hasta 3 mensajes (`splitBubbles`), con una pausa de "escribiendo" entre uno y otro de 0,8 a 3,5 s según el largo (`pausesMs` en el envío). Un reintento no repite la espera.
+   - **Hora y nombre:** el modelo recibe una nota interna con la hora de la tienda y el primer nombre del cliente (`conversationNote`). Así saluda acorde a la hora y usa el nombre de vez en cuando, sin inventarlo si no lo hay.
+   - **Fotos anteriores:** además de las fotos nuevas, ve la última foto que el cliente mandó en los 12 mensajes anteriores. Así entiende "¿y algo como la pared del fondo?".
+   - **Cómo habla:** el prompt trae ejemplos de "así no / así sí". No adula, no usa frases de catálogo, se adapta al largo y al saludo del cliente y termina con una sola pregunta concreta.
 
 ## Seguimiento automático
 

@@ -23,6 +23,11 @@ export interface OutboundJobData {
   tenantId: string;
   /** Mensajes a enviar en este orden (ej. fotos y luego el texto). */
   outboundMessageIds: string[];
+  /**
+   * Pausa en ms antes de cada envío (misma posición que `outboundMessageIds`), como si alguien
+   * lo estuviera escribiendo. Solo se espera si el envío anterior salió en este intento.
+   */
+  pausesMs?: number[];
 }
 
 /**

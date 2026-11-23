@@ -18,7 +18,7 @@ export interface ModelImage {
 
 const MEDIA_LABEL: Record<string, string> = {
   image:
-    '[El cliente envió una imagen que no tienes a la vista ahora. Si la necesitas para ayudarle, pídale con amabilidad que describa el producto o que la envíe de nuevo.]',
+    '[El cliente envió una foto hace rato, que ya no tienes a la vista. Si la necesitas, pídale con naturalidad que se la vuelva a mandar.]',
   audio: '[El cliente envió una nota de voz. Todavía no puedes escucharla: pídale con amabilidad que la escriba.]',
   video: '[El cliente envió un video que no puedes ver.]',
   document: '[El cliente envió un documento que no puedes abrir.]',
@@ -46,6 +46,8 @@ export function toModelMessages(
      * modelo cuando el último mensaje es del negocio (por ejemplo, un seguimiento).
      */
     trailingNote?: string;
+    /** Nota interna al principio de la conversación (hora de la tienda, nombre del cliente). */
+    leadingNote?: string;
   } = {},
 ): BetaMessageParam[] {
   const turns: { role: 'user' | 'assistant'; blocks: Block[] }[] = [];
@@ -76,6 +78,7 @@ export function toModelMessages(
     else turns.push({ role: 'user', blocks: [note] });
   }
   while (turns.length && turns[0]!.role !== 'user') turns.shift();
+  if (opts.leadingNote && turns.length) turns[0]!.blocks.unshift({ type: 'text', text: opts.leadingNote });
   // El bot responde al cliente: el historial siempre termina en un mensaje suyo.
   while (turns.length && turns[turns.length - 1]!.role !== 'user') turns.pop();
 
@@ -89,15 +92,25 @@ export function toModelMessages(
 
 /**
  * Fotos del cliente que el modelo debe ver en este turno: las que mandó después de la última
- * respuesta del negocio, como máximo `max` (las más recientes). Las anteriores ya las vio
- * en su turno y su respuesta quedó en el historial.
+ * respuesta del negocio y, además, la última foto anterior si es reciente (el cliente suele
+ * volver sobre ella: "¿y algo como la pared del fondo?"). Como máximo `max`.
  */
-export function pendingCustomerImages(history: HistoryMessage[], max = 3): HistoryMessage[] {
+export function pendingCustomerImages(history: HistoryMessage[], max = 3, lookback = 12): HistoryMessage[] {
   const out: HistoryMessage[] = [];
-  for (let i = history.length - 1; i >= 0; i--) {
+  let i = history.length - 1;
+  for (; i >= 0; i--) {
     const m = history[i]!;
     if (m.direction === 'out' && m.author !== 'system') break;
     if (m.direction === 'in' && m.type === 'image' && m.id) out.unshift(m);
+  }
+  if (out.length < max) {
+    for (let j = i; j >= Math.max(0, history.length - lookback); j--) {
+      const m = history[j]!;
+      if (m.direction === 'in' && m.type === 'image' && m.id) {
+        out.unshift(m);
+        break;
+      }
+    }
   }
   return out.slice(-max);
 }

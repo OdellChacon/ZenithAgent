@@ -132,7 +132,7 @@ const brainWorker = new Worker<BrainJobData>(
     if (outcome.result === 'replied') {
       await outboundQueue.add(
         'send',
-        { tenantId: job.data.tenantId, outboundMessageIds: outcome.outboundMessageIds },
+        { tenantId: job.data.tenantId, outboundMessageIds: outcome.outboundMessageIds, pausesMs: outcome.pausesMs },
         { jobId: outcome.outboundMessageId, attempts: 5, backoff: { type: 'exponential', delay: 3000 }, removeOnComplete: 1000 },
       );
       const { tenantId, conversationId } = job.data;

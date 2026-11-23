@@ -1,6 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { BetaMessageParam, LlmClient } from './llm.js';
 import { checkReply } from './validate.js';
+import { customerFirstName } from './human.js';
 
 /** Lo que responde el modelo cuando no corresponde escribirle al cliente. */
 export const FOLLOWUP_SKIP = 'NO_SEGUIR';
@@ -81,8 +82,7 @@ export function renderTemplate(preview: string, params: readonly string[]): stri
  * el nombre del negocio. Meta no acepta parámetros vacíos ni con saltos de línea.
  */
 export function templateParam(raw: string, ctx: { contactName: string | null; businessName: string; nameFallback: string }): string {
-  const first = ctx.contactName?.trim().split(/\s+/)[0]?.replace(/[^\p{L}\p{M}'-]/gu, '') ?? '';
-  const name = first ? first.charAt(0).toLocaleUpperCase('es') + first.slice(1) : ctx.nameFallback;
+  const name = customerFirstName(ctx.contactName) ?? ctx.nameFallback;
   const value = raw.replaceAll('{nombre}', name).replaceAll('{negocio}', ctx.businessName);
   return value.replace(/\s+/g, ' ').trim().slice(0, 60) || ctx.nameFallback;
 }

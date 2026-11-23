@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { conversationNote, customerFirstName, splitBubbles, typingPauseMs } from '../src/human.js';
 import {
   buildSystemPrompt,
   calculateBoxes,
@@ -149,7 +150,7 @@ describe('toModelMessages', () => {
     expect(out).toHaveLength(3);
     expect(out[0]?.role).toBe('user');
     expect(out[0]?.content).toContain('Hola');
-    expect(out[0]?.content).toContain('envió una imagen');
+    expect(out[0]?.content).toContain('envió una foto hace rato');
     expect(out[1]).toEqual({ role: 'assistant', content: 'Buenas tardes' });
     expect(out[2]).toEqual({ role: 'user', content: 'Gracias' });
   });
@@ -178,7 +179,7 @@ describe('toModelMessages', () => {
     expect(out[0]?.content).toContain('no tienes a la vista');
   });
 
-  it('solo marca como pendientes las fotos posteriores a la última respuesta', () => {
+  it('marca las fotos posteriores a la última respuesta y la última foto anterior', () => {
     const pending = pendingCustomerImages([
       { id: 'a', direction: 'in', author: 'customer', type: 'image', body: null },
       { id: 'b', direction: 'out', author: 'bot', type: 'text', body: 'Recibido' },
@@ -186,7 +187,14 @@ describe('toModelMessages', () => {
       { id: 'd', direction: 'in', author: 'customer', type: 'text', body: 'y esta' },
       { id: 'e', direction: 'in', author: 'customer', type: 'image', body: null },
     ]);
-    expect(pending.map((m) => m.id)).toEqual(['c', 'e']);
+    // 'a' es anterior a la respuesta del bot, pero el cliente puede volver sobre ella.
+    expect(pending.map((m) => m.id)).toEqual(['a', 'c', 'e']);
+    const old = [
+      { id: 'x', direction: 'in' as const, author: 'customer' as const, type: 'image', body: null },
+      ...Array.from({ length: 12 }, (_, i) => ({ id: `t${i}`, direction: (i % 2 ? 'out' : 'in') as 'in' | 'out', author: (i % 2 ? 'bot' : 'customer') as 'bot' | 'customer', type: 'text', body: 'hola' })),
+      { id: 'y', direction: 'in' as const, author: 'customer' as const, type: 'text', body: '¿y lo de la foto?' },
+    ];
+    expect(pendingCustomerImages(old)).toEqual([]); // demasiado vieja
     const many = Array.from({ length: 5 }, (_, i) => ({ id: `i${i}`, direction: 'in' as const, author: 'customer' as const, type: 'image', body: null }));
     expect(pendingCustomerImages(many).map((m) => m.id)).toEqual(['i2', 'i3', 'i4']);
   });
@@ -378,5 +386,40 @@ describe('runBrainTurn', () => {
     ]);
     const res = await runBrainTurn({ ...base, llm, messages: customer('hola'), tools: { catalog: catalog(), wastePercent: null } });
     expect(res.usage).toEqual({ inputTokens: 200, outputTokens: 40, cacheReadTokens: 160 });
+  });
+});
+
+
+describe('detalles humanos', () => {
+  it('parte la respuesta en mensajes por párrafo, sin partir listas y con máximo 3', () => {
+    expect(splitBubbles('Hola.\n\nTengo dos opciones.')).toEqual(['Hola.', 'Tengo dos opciones.']);
+    expect(splitBubbles('Una sola línea\ncon salto')).toEqual(['Una sola línea\ncon salto']);
+    expect(splitBubbles('Tengo estas:\n\n- Arrieta\n\n- Berilo\n\n¿Cuál le gusta?')).toEqual(['Tengo estas:\n\n- Arrieta\n\n- Berilo', '¿Cuál le gusta?']);
+    expect(splitBubbles('a\n\nb\n\nc\n\nd')).toEqual(['a', 'b', 'c\n\nd']);
+    expect(splitBubbles('  \n\n  ')).toEqual([]);
+  });
+
+  it('la pausa de "escribiendo" crece con el largo, con tope', () => {
+    expect(typingPauseMs('Sí')).toBe(800);
+    expect(typingPauseMs('a'.repeat(60))).toBe(2100);
+    expect(typingPauseMs('a'.repeat(500))).toBe(3500);
+  });
+
+  it('usa solo un primer nombre que parezca nombre', () => {
+    expect(customerFirstName('carolina PÉREZ')).toBe('Carolina');
+    expect(customerFirstName('🙂')).toBeNull();
+    expect(customerFirstName('J')).toBeNull();
+    expect(customerFirstName(null)).toBeNull();
+  });
+
+  it('la nota trae la hora de la tienda y el nombre, sin inventarlo', () => {
+    // 2026-11-20T01:30Z = jueves 21:30 en Caracas.
+    const note = conversationNote({ customerName: 'Ana María', now: new Date('2026-11-20T01:30:00Z'), timezone: 'America/Caracas' });
+    expect(note).toMatch(/jueves/);
+    expect(note).toContain('de noche');
+    expect(note).toContain('"Ana"');
+    const anon = conversationNote({ customerName: null, now: new Date('2026-11-20T14:00:00Z'), timezone: 'America/Caracas' });
+    expect(anon).toContain('de mañana');
+    expect(anon).toContain('no se lo inventes');
   });
 });
