@@ -21,8 +21,9 @@ import {
  * - Paso 1: pasado un tiempo sin respuesta, el bot (IA) decide si corresponde escribir y
  *   redacta un mensaje corto que retoma lo que hablaron. Solo dentro de las 24 h.
  * - Paso 2: ya fuera de las 24 h, una plantilla aprobada por Meta (con botones).
- * Nunca escribe a quien pidió que no le escriban, en horario de descanso, a conversaciones
- * que atiende un asesor ni dos veces por el mismo silencio.
+ * El bot atiende a toda hora, pero los seguimientos solo salen en el horario del negocio
+ * (`sendHours`). Nunca escribe a quien pidió que no le escriban, a conversaciones que atiende
+ * un asesor ni dos veces por el mismo silencio.
  */
 export interface FollowupDeps {
   pool: Pool;
@@ -57,16 +58,70 @@ const WINDOW_MARGIN_MS = 15 * 60_000;
 /** Entre el mensaje del paso 1 y la plantilla pasa al menos esto. */
 const MIN_GAP_BETWEEN_STEPS_MS = 6 * 60 * 60_000;
 
-/** ¿Es horario de descanso en la zona horaria del negocio? start > end cruza la medianoche. */
-export function inQuietHours(now: Date, timezone: string, quiet: FollowupSettings['quietHours']): boolean {
-  if (quiet.start === quiet.end) return false;
-  let hour: number;
-  try {
-    hour = Number(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hourCycle: 'h23', timeZone: timezone }).format(now));
-  } catch {
-    hour = now.getUTCHours();
+const STEP_MS = 5 * 60_000;
+/** Si el paso 1 se adelanta, sale en las últimas horas del tramo, lo más cerca posible del momento ideal. */
+const PULL_FORWARD_TAIL_MS = 2 * 60 * 60_000;
+const DAYS: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+const clockFormats = new Map<string, Intl.DateTimeFormat>();
+
+/** Día de la semana (0 = domingo) y minuto del día en la zona horaria del negocio. */
+function localClock(at: Date, timezone: string): { day: number; minute: number } {
+  let fmt = clockFormats.get(timezone);
+  if (!fmt) {
+    const opts = { weekday: 'short', hour: 'numeric', minute: 'numeric', hourCycle: 'h23' } as const;
+    try {
+      fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: timezone });
+    } catch {
+      fmt = new Intl.DateTimeFormat('en-US', { ...opts, timeZone: 'UTC' });
+    }
+    clockFormats.set(timezone, fmt);
   }
-  return quiet.start < quiet.end ? hour >= quiet.start && hour < quiet.end : hour >= quiet.start || hour < quiet.end;
+  const parts = Object.fromEntries(fmt.formatToParts(at).map((p) => [p.type, p.value]));
+  return { day: DAYS[parts.weekday!] ?? 0, minute: Number(parts.hour) * 60 + Number(parts.minute) };
+}
+
+const toMinutes = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
+
+/** ¿Se pueden enviar seguimientos en este momento? (horario del negocio, en su zona horaria) */
+export function inSendHours(at: Date, timezone: string, windows: FollowupSettings['sendHours']): boolean {
+  const { day, minute } = localClock(at, timezone);
+  return windows.some((w) => w.days.includes(day) && minute >= toMinutes(w.from) && minute < toMinutes(w.to));
+}
+
+/**
+ * Cuándo toca el paso 1 (mensaje del bot dentro de las 24 h). Lo ideal es `firstAfterMinutes`
+ * después de la última respuesta del bot; si ese momento cae fuera de horario o con la ventana ya
+ * cerrada (por ejemplo, el cliente escribió de noche), se adelanta al último tramo en horario
+ * antes de que cierre, sin bajar de `minFirstAfterMinutes` de silencio. null si no hay momento
+ * posible: entonces solo queda la plantilla.
+ */
+export function firstStepDueAt(p: {
+  lastBotAt: Date;
+  lastInboundAt: Date;
+  timezone: string;
+  cfg: Pick<FollowupSettings, 'firstAfterMinutes' | 'minFirstAfterMinutes' | 'sendHours'>;
+}): Date | null {
+  const lastBot = p.lastBotAt.getTime();
+  const preferred = lastBot + p.cfg.firstAfterMinutes * 60_000;
+  const earliest = lastBot + Math.min(p.cfg.minFirstAfterMinutes, p.cfg.firstAfterMinutes) * 60_000;
+  const deadline = p.lastInboundAt.getTime() + 24 * 60 * 60_000 - WINDOW_MARGIN_MS;
+  const open = (t: number) => inSendHours(new Date(t), p.timezone, p.cfg.sendHours);
+
+  // 1. El primer momento en horario desde el ideal, si la ventana sigue abierta.
+  for (let t = preferred; t < deadline; t += STEP_MS) if (open(t)) return new Date(t);
+
+  // 2. Si no, el último tramo en horario entre el silencio mínimo y el ideal.
+  let end: number | null = null;
+  for (let t = Math.min(preferred, deadline) - STEP_MS; t >= earliest; t -= STEP_MS) {
+    if (open(t)) {
+      end = t;
+      break;
+    }
+  }
+  if (end === null) return null;
+  let start = end;
+  while (start - STEP_MS >= earliest && open(start - STEP_MS)) start -= STEP_MS;
+  return new Date(Math.max(start, end - PULL_FORWARD_TAIL_MS + STEP_MS));
 }
 
 interface Candidate {
@@ -112,7 +167,8 @@ async function runTenant(deps: FollowupDeps, tenantId: string, run: FollowupRun,
     return; // sin configuración del bot no hay seguimiento
   }
   const cfg = settings.followups;
-  if (!cfg.enabled || inQuietHours(now, tenant.timezone, cfg.quietHours)) return;
+  // El bot responde a toda hora; los seguimientos solo salen en horario.
+  if (!cfg.enabled || !inSendHours(now, tenant.timezone, cfg.sendHours)) return;
 
   const candidates = await withTenant(deps.pool, tenantId, async (c) => {
     const { rows } = await c.query<Candidate>(
@@ -149,7 +205,19 @@ async function runTenant(deps: FollowupDeps, tenantId: string, run: FollowupRun,
     if (!cand.recipient) continue;
     const firstPending = cand.f1_status === null || cand.f1_status === 'failed';
     if (firstPending) {
-      if (now.getTime() - new Date(cand.last_bot_at).getTime() < cfg.firstAfterMinutes * 60_000) continue;
+      const dueAt = firstStepDueAt({
+        lastBotAt: new Date(cand.last_bot_at),
+        lastInboundAt: new Date(cand.last_inbound_at),
+        timezone: tenant.timezone,
+        cfg,
+      });
+      const deadline = new Date(cand.last_inbound_at).getTime() + 24 * 60 * 60_000 - WINDOW_MARGIN_MS;
+      if (dueAt === null || now.getTime() >= deadline) {
+        // Ya no hay un momento en horario dentro de las 24 h: sin gastar IA, le toca a la plantilla.
+        tally(run, await skipFirstStep(deps, tenantId, cand), tenantId, cand.conversation_id, 1);
+        continue;
+      }
+      if (now < dueAt) continue;
       if (budget.ai <= 0) continue;
       const outcome = await firstStep(deps, tenantId, settings, cand, now, budget);
       tally(run, outcome, tenantId, cand.conversation_id, 1);
@@ -199,6 +267,14 @@ async function finishStep(deps: FollowupDeps, tenantId: string, followupId: stri
       [followupId, status, reason.slice(0, 300), giveUp],
     ),
   );
+}
+
+/** Marca el paso 1 como imposible por la ventana de 24 h, para que siga la plantilla. */
+async function skipFirstStep(deps: FollowupDeps, tenantId: string, cand: Candidate): Promise<StepOutcome> {
+  const followupId = await claim(deps, tenantId, cand, 1);
+  if (!followupId) return { kind: 'busy' };
+  await finishStep(deps, tenantId, followupId, 'skipped', 'ventana');
+  return { kind: 'skipped' };
 }
 
 /**

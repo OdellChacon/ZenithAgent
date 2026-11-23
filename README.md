@@ -128,15 +128,30 @@ npm run test:all  # también las de integración (usan la BD local de .env)
 5. Al derivar, la conversación queda en modo `human`: el bot deja de responder y el pase queda en `handoffs`.
 6. El envío revisa la ventana de 24 h; fuera de ella no manda texto libre (`blocked_window`), solo plantillas aprobadas.
 7. Si el cliente pide que no le escriban más, el bot usa `no_escribir_mas` y el contacto queda con `opt_out_followups`.
+8. Antes de enviar, `polishReply` quita las muletillas que el prompt ya prohíbe pero el modelo a veces usa ("¡Excelente!", "Es un gusto saludarle", "¡Que tenga un excelente día!") y las frases que hablan del sistema ("el sistema calcula unas 17 cajas" pasa a "serían unas 17 cajas"). Aplica también a los seguimientos.
 
 ## Seguimiento automático
 
-Cuando el cliente deja de responder, el worker (una pasada por minuto) lo retoma como lo haría un vendedor. Se configura por negocio en `settings.followups` (ver `config/tenants/inversiones-mora-mora.json`):
+Cuando el cliente deja de responder, el worker (una pasada por minuto) lo retoma como lo haría un vendedor. Se configura por negocio en `settings.followups` (ver `config/tenants/inversiones-mora-mora.json`).
 
-1. **Paso 1, dentro de las 24 h** (`firstAfterMinutes`, 20 h por defecto desde la última respuesta del bot): la IA lee la conversación y escribe un mensaje corto que retoma lo que hablaron, o decide no escribir (`NO_SEGUIR`) si el cliente se despidió, ya compró, no le interesa o solo saludó. Pasa por el mismo validador de precios.
-2. **Paso 2, fuera de las 24 h** (`template.afterMinutes`, 48 h por defecto desde el último mensaje del cliente): la plantilla aprobada por Meta, con el nombre del cliente y botones. No gasta IA. Solo va si el paso 1 salió, o si la IA quería escribir pero la ventana ya había cerrado.
+El bot responde a cualquier hora, 24/7. Los seguimientos, en cambio, solo salen en el horario del negocio (`sendHours`, hora local del negocio; por defecto lunes a sábado de 08:00 a 18:00):
 
-Nunca escribe: entre las `quietHours` del negocio (20:00 a 08:00 en su zona horaria), a conversaciones que atiende un asesor, a quien pidió que no le escriban, a conversaciones de más de `maxAgeDays`, ni dos veces por el mismo silencio (tabla `followups`, una fila por paso). Si el cliente responde, su mensaje abre un silencio nuevo. En el panel, estos mensajes salen como "Bot · seguimiento".
+1. **Paso 1, dentro de las 24 h:** la IA lee la conversación y escribe un mensaje corto que retoma lo que hablaron, o decide no escribir (`NO_SEGUIR`) si el cliente se despidió, ya compró, no le interesa o solo saludó. Pasa por el mismo validador de precios.
+   - **Cuándo sale:** lo ideal es `firstAfterMinutes` (20 h) después de la última respuesta del bot, en el primer momento en horario.
+   - **Si el cliente escribió de noche:** ese momento cae fuera de horario o después de que cierre la ventana, así que el mensaje se adelanta a las últimas horas del tramo en horario anterior. Ejemplo: escribió el jueves a las 23:00 y el seguimiento sale el viernes a las 16:00. Nunca sale antes de `minFirstAfterMinutes` (3 h) de silencio.
+   - **Si no queda ningún momento en horario dentro de las 24 h** (por ejemplo, escribió el sábado de noche), no se gasta IA y sigue la plantilla.
+2. **Paso 2, fuera de las 24 h** (`template.afterMinutes`, 48 h por defecto desde el último mensaje del cliente): la plantilla aprobada por Meta, con el nombre del cliente y botones. También en horario y sin gastar IA. Solo va si el paso 1 salió, o si no se pudo mandar por la ventana.
+
+Nunca escribe:
+- fuera de `sendHours`;
+- a conversaciones que atiende un asesor;
+- a quien pidió que no le escriban;
+- a conversaciones de más de `maxAgeDays`;
+- dos veces por el mismo silencio (tabla `followups`, una fila por paso).
+
+Si el cliente responde, su mensaje abre un silencio nuevo. En el panel, estos mensajes salen como "Bot · seguimiento".
+
+El horario real de Inversiones Mora Mora es **sin dato** (`business.hours` está vacío). Lunes a sábado de 8:00 a 18:00 es un supuesto que falta confirmar con el cliente. `sendHours` acepta varios tramos, por ejemplo sábado solo hasta las 13:00: `[{"days":[1,2,3,4,5],"from":"08:00","to":"18:00"},{"days":[6],"from":"08:00","to":"13:00"}]`.
 
 **Antes de producción:** crear y aprobar en el administrador de WhatsApp la plantilla `seguimiento_consulta` (idioma `es`, un parámetro `{{1}}` = nombre, botones de respuesta rápida "Sí, quiero cotizar", "Tengo dudas" y "No, gracias") con el mismo texto que `preview`. Meta probablemente la clasifique como *marketing*, que tiene costo por envío y exige que el cliente haya aceptado recibir mensajes del negocio.
 

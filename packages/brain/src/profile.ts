@@ -46,21 +46,46 @@ export const followupTemplateSchema = z.object({
  * Seguimiento a clientes que dejan de responder. Paso 1: el bot escribe un mensaje propio
  * mientras la ventana de 24 h sigue abierta. Paso 2: plantilla aprobada, ya fuera de las 24 h.
  */
+const clock = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$|^24:00$/, 'Hora en formato HH:MM');
+const toMinutes = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
+
+/** Un tramo del horario: días (0 = domingo … 6 = sábado) y horas, en la zona horaria del negocio. */
+export const sendWindowSchema = z
+  .object({
+    days: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+    from: clock,
+    to: clock,
+  })
+  .refine((w) => toMinutes(w.from) < toMinutes(w.to), 'La hora de inicio debe ser anterior a la de cierre');
+
+/**
+ * Seguimiento a clientes que dejan de responder. Paso 1: el bot escribe un mensaje propio
+ * mientras la ventana de 24 h sigue abierta. Paso 2: plantilla aprobada, ya fuera de las 24 h.
+ * El bot responde a cualquier hora; los seguimientos, en cambio, solo salen en `sendHours`.
+ */
 export const followupSettingsSchema = z.object({
   enabled: z.boolean().default(false),
-  /** Minutos de silencio desde la última respuesta del bot. */
+  /** Minutos de silencio desde la última respuesta del bot (momento ideal del paso 1). */
   firstAfterMinutes: z.number().int().min(1).max(23 * 60).default(20 * 60),
+  /**
+   * Si el momento ideal cae fuera de horario o después de que cierre la ventana de 24 h, el
+   * paso 1 se adelanta al último tramo de horario disponible, pero nunca antes de este silencio.
+   */
+  minFirstAfterMinutes: z.number().int().min(1).max(23 * 60).default(3 * 60),
   template: followupTemplateSchema.nullish().transform((v) => v ?? null),
-  /** No se escribe entre estas horas (hora local del negocio). start > end cruza la medianoche. */
-  quietHours: z
-    .object({ start: z.number().int().min(0).max(23), end: z.number().int().min(0).max(23) })
-    .default({ start: 20, end: 8 }),
+  /** Cuándo se pueden enviar seguimientos (hora local del negocio). Por defecto, lunes a sábado de 8:00 a 18:00. */
+  sendHours: z
+    .array(sendWindowSchema)
+    .min(1)
+    .max(14)
+    .default([{ days: [1, 2, 3, 4, 5, 6], from: '08:00', to: '18:00' }]),
   /** Conversaciones más viejas que esto no se retoman solas. */
   maxAgeDays: z.number().int().min(1).max(60).default(14),
 });
 
 export type FollowupSettings = z.infer<typeof followupSettingsSchema>;
 export type FollowupTemplate = z.infer<typeof followupTemplateSchema>;
+export type SendWindow = z.infer<typeof sendWindowSchema>;
 
 export const tenantBotSettingsSchema = z.object({
   business: businessProfileSchema,

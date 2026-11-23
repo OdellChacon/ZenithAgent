@@ -8,7 +8,7 @@ import { followupNote, renderTemplate, templateParam, toModelMessages, writeFoll
 import { processInboundEvent } from '../src/inbound.js';
 import { processBrainJob } from '../src/brain-job.js';
 import { processOutboundMessage } from '../src/outbound.js';
-import { inQuietHours, runFollowups } from '../src/followups.js';
+import { firstStepDueAt, inSendHours, runFollowups } from '../src/followups.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 import { textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
 import { scriptedLlm, text, tool } from '../../../packages/brain/test/fake-llm.js';
@@ -17,13 +17,32 @@ import moraMora from '../../../config/tenants/inversiones-mora-mora.json' with {
 const HOUR = 60 * 60_000;
 
 describe('piezas del seguimiento', () => {
-  it('respeta el horario de descanso en la hora local del negocio', () => {
-    const quiet = { start: 20, end: 8 };
-    // 01:00 UTC = 21:00 en Caracas (UTC-4): descanso. 15:00 UTC = 11:00: se puede escribir.
-    expect(inQuietHours(new Date('2026-11-20T01:00:00Z'), 'America/Caracas', quiet)).toBe(true);
-    expect(inQuietHours(new Date('2026-11-20T15:00:00Z'), 'America/Caracas', quiet)).toBe(false);
-    expect(inQuietHours(new Date('2026-11-20T11:30:00Z'), 'America/Caracas', quiet)).toBe(true); // 07:30
-    expect(inQuietHours(new Date('2026-11-20T03:00:00Z'), 'UTC', { start: 0, end: 0 })).toBe(false);
+  const sendHours = [{ days: [1, 2, 3, 4, 5, 6], from: '08:00', to: '18:00' }];
+  const tz = 'America/Caracas'; // UTC-4 todo el año
+
+  it('solo escribe en el horario del negocio, en su hora local', () => {
+    // 2026-11-20 es viernes. 15:00 UTC = 11:00 en Caracas: se puede escribir.
+    expect(inSendHours(new Date('2026-11-20T15:00:00Z'), tz, sendHours)).toBe(true);
+    expect(inSendHours(new Date('2026-11-20T01:00:00Z'), tz, sendHours)).toBe(false); // jueves 21:00
+    expect(inSendHours(new Date('2026-11-20T11:30:00Z'), tz, sendHours)).toBe(false); // 07:30
+    expect(inSendHours(new Date('2026-11-20T21:59:00Z'), tz, sendHours)).toBe(true); // 17:59
+    expect(inSendHours(new Date('2026-11-20T22:00:00Z'), tz, sendHours)).toBe(false); // 18:00
+    expect(inSendHours(new Date('2026-11-22T15:00:00Z'), tz, sendHours)).toBe(false); // domingo
+    expect(inSendHours(new Date('2026-11-22T15:00:00Z'), tz, [{ days: [0], from: '00:00', to: '24:00' }])).toBe(true);
+  });
+
+  it('agenda el paso 1 dentro del horario y de las 24 h', () => {
+    const cfg = { firstAfterMinutes: 20 * 60, minFirstAfterMinutes: 3 * 60, sendHours };
+    const at = (iso: string) => ({ lastBotAt: new Date(iso), lastInboundAt: new Date(iso), timezone: tz, cfg });
+    // Escribió el jueves a las 10:00: lo ideal (viernes 06:00) es antes de abrir; sale al abrir, 08:00.
+    expect(firstStepDueAt(at('2026-11-19T14:00:00Z'))?.toISOString()).toBe('2026-11-20T12:00:00.000Z');
+    // Escribió el jueves a las 23:00: lo ideal (viernes 19:00) ya es fuera de horario, así que se
+    // adelanta a la tarde del viernes (16:00), antes de que cierre la ventana.
+    expect(firstStepDueAt(at('2026-11-20T03:00:00Z'))?.toISOString()).toBe('2026-11-20T20:00:00.000Z');
+    // Escribió el sábado a las 20:00: el domingo no se trabaja y la ventana cierra antes del lunes.
+    expect(firstStepDueAt(at('2026-11-22T00:00:00Z'))).toBeNull();
+    // Escribió el lunes a las 14:00: lo ideal (martes 10:00) cae en horario y se respeta.
+    expect(firstStepDueAt(at('2026-11-23T18:00:00Z'))?.toISOString()).toBe('2026-11-24T14:00:00.000Z');
   });
 
   it('arma los parámetros y el texto de la plantilla', () => {
@@ -71,8 +90,8 @@ describe.skipIf(!hasDb)('seguimiento automático', () => {
 
   const settings = {
     ...moraMora.settings,
-    // Sin horario de descanso: las pruebas corren a cualquier hora.
-    followups: { ...moraMora.settings.followups, quietHours: { start: 0, end: 0 } },
+    // Horario de todo el día: las pruebas corren a cualquier hora.
+    followups: { ...moraMora.settings.followups, sendHours: [{ days: [0, 1, 2, 3, 4, 5, 6], from: '00:00', to: '24:00' }] },
   };
 
   async function customerSays(from: string, body: string, name = 'Ana María') {
@@ -237,6 +256,7 @@ describe.skipIf(!hasDb)('seguimiento automático', () => {
     // El worker estuvo caído: la primera pasada ocurre a las 30 h.
     const late = await run(30, { 'porcelanato para cocina': '¿Lo prefiere claro u oscuro? Así le muestro las opciones.' });
     expect(late.sent.filter((s) => s.conversationId === conv)).toEqual([]);
+    expect(late.calls).toEqual([]); // no gasta IA en un mensaje que ya no se puede mandar
     expect(await followupRows(conv)).toEqual([{ step: 1, status: 'skipped', reason: 'ventana' }]);
     expect((await run(49)).sent.filter((s) => s.conversationId === conv).map((s) => s.step)).toEqual([2]);
   });

@@ -9,6 +9,7 @@ import {
   runBrainTurn,
   TenantSettingsError,
   pendingCustomerImages,
+  polishReply,
   toModelMessages,
   type CatalogReader,
   type ProductRow,
@@ -99,6 +100,40 @@ describe('checkReply', () => {
   it('bloquea vacías y demasiado largas', () => {
     expect(checkReply('   ')).toEqual({ ok: false, reason: 'empty' });
     expect(checkReply('a'.repeat(2000))).toEqual({ ok: false, reason: 'too_long' });
+  });
+});
+
+describe('polishReply', () => {
+  it.each([
+    [
+      'Excelente. En un momento un asesor le escribe por este mismo chat con la cotización.',
+      'En un momento un asesor le escribe por este mismo chat con la cotización.',
+    ],
+    [
+      'Para los 30 metros del *Arrieta*, el sistema calcula unas 17 cajas (30.6 m²).',
+      'Para los 30 metros del *Arrieta*, serían unas 17 cajas (30.6 m²).',
+    ],
+    ['Según el sistema, necesitaría 7 cajas.', 'Necesitaría 7 cajas.'],
+    ['El sistema indica que necesita 7 cajas.', 'Necesita 7 cajas.'],
+    [
+      '¡Excelente! Ya he notificado a nuestro equipo. En breve un asesor le escribe.\n\n¡Que tenga un excelente día!',
+      'En breve un asesor le escribe.',
+    ],
+    [
+      'Hola. Es un gusto saludarle.\n\nHe revisado el catálogo y, aunque no sé si es el mismo modelo, estos se parecen.',
+      'Hola.\n\nAunque no sé si es el mismo modelo, estos se parecen.',
+    ],
+    ['¡Claro que sí! Tenemos tres lavamanos de sobreponer.', 'Tenemos tres lavamanos de sobreponer.'],
+    ['Muy buenos días. Qué excelente elección, la madera da calidez.', 'Muy buenos días. La madera da calidez.'],
+  ])('quita muletillas: %s', (raw, clean) => {
+    expect(polishReply(raw)).toBe(clean);
+    expect(checkReply(raw)).toEqual({ ok: true, text: clean });
+  });
+
+  it('no toca lo que no es muletilla', () => {
+    for (const t of ['Son una excelente opción por su acabado mate.', 'Perfecto para exteriores, es antideslizante.', '¡Perfecto!']) {
+      expect(polishReply(t)).toBe(t);
+    }
   });
 });
 
