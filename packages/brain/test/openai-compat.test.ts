@@ -123,7 +123,7 @@ describe('createOpenAiCompatibleLlm', () => {
     expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer clave');
     const body = JSON.parse(String(init?.body));
     expect(body).toMatchObject({ model: 'gemini-3.8-flash', max_tokens: 2000, reasoning_effort: 'low', tool_choice: 'auto' });
-    expect(body.tools).toHaveLength(5);
+    expect(body.tools).toHaveLength(6);
     expect(body).not.toHaveProperty('fallbacks');
     expect(body).not.toHaveProperty('betas');
 

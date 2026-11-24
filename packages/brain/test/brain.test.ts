@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { conversationNote, customerFirstName, splitBubbles, typingPauseMs } from '../src/human.js';
+import { conversationNote, customerFirstName, splitBubbles, storeStatus, typingPauseMs } from '../src/human.js';
 import {
   buildSystemPrompt,
   calculateBoxes,
@@ -297,6 +297,23 @@ describe('runBrainTurn', () => {
     expect(result).toContain('máximo 3 fotos');
   });
 
+  it('manda la foto de la fachada solo si el negocio la cargó', async () => {
+    const withPhoto = scriptedLlm([tool('enviar_ubicacion', {}), text('Le mandé la foto de la fachada para que nos ubique fácil.')]);
+    const res = await runBrainTurn({
+      ...base,
+      llm: withPhoto.llm,
+      messages: customer('¿Dónde quedan?'),
+      tools: { catalog: catalog([]), wastePercent: null, hasStorefrontPhoto: true },
+    });
+    expect(res.storefront).toBe(true);
+    expect(JSON.stringify(withPhoto.calls[1]?.messages.at(-1))).toContain('No repitas la dirección completa');
+
+    const noPhoto = scriptedLlm([tool('enviar_ubicacion', {}), text('Estamos en la Av. 19 de Abril.')]);
+    const res2 = await runBrainTurn({ ...base, llm: noPhoto.llm, messages: customer('¿Dónde quedan?'), tools: { catalog: catalog([]), wastePercent: null } });
+    expect(res2.storefront).toBeUndefined();
+    expect(JSON.stringify(noPhoto.calls[1]?.messages.at(-1))).toContain('No hay foto de la fachada');
+  });
+
   it('si el turno falla no se envían las fotos pedidas', async () => {
     const { llm } = scriptedLlm([tool('enviar_fotos', { producto_ids: [PRODUCT.id] }), text('Cuesta $20')]);
     const res = await runBrainTurn({ ...base, llm, messages: customer('fotos y precio'), tools: { catalog: catalog(), wastePercent: null } });
@@ -421,5 +438,33 @@ describe('detalles humanos', () => {
     const anon = conversationNote({ customerName: null, now: new Date('2026-11-20T14:00:00Z'), timezone: 'America/Caracas' });
     expect(anon).toContain('de mañana');
     expect(anon).toContain('no se lo inventes');
+  });
+
+  describe('horario de la tienda', () => {
+    // Lunes a viernes 8 a 17, sábado 8 a 13 (Inversiones Mora Mora). Caracas = UTC-4.
+    const hours = moraMora.settings.business.openingHours;
+    const at = (iso: string) => storeStatus(new Date(iso), 'America/Caracas', hours);
+
+    it('dice si está abierta y a qué hora cierra', () => {
+      expect(at('2026-11-23T14:00:00Z')).toEqual({ open: true, closesAt: '5:00 p. m.' }); // lunes 10:00
+      expect(at('2026-11-28T16:59:00Z')).toEqual({ open: true, closesAt: '1:00 p. m.' }); // sábado 12:59
+    });
+
+    it('si está cerrada, dice cuándo abre', () => {
+      expect(at('2026-11-23T11:00:00Z')).toEqual({ open: false, opensAt: 'hoy a las 8:00 a. m.' }); // lunes 7:00
+      expect(at('2026-11-23T21:00:00Z')).toEqual({ open: false, opensAt: 'mañana a las 8:00 a. m.' }); // lunes 17:00
+      expect(at('2026-11-28T17:00:00Z')).toEqual({ open: false, opensAt: 'el lunes a las 8:00 a. m.' }); // sábado 13:00
+      expect(at('2026-11-29T15:00:00Z')).toEqual({ open: false, opensAt: 'mañana a las 8:00 a. m.' }); // domingo
+    });
+
+    it('sin horario cargado no dice nada', () => {
+      expect(storeStatus(new Date(), 'America/Caracas', [])).toBeNull();
+      expect(conversationNote({ customerName: null, now: new Date(), timezone: 'America/Caracas' })).not.toContain('La tienda está');
+    });
+
+    it('la nota lo incluye', () => {
+      const note = conversationNote({ customerName: null, now: new Date('2026-11-28T23:00:00Z'), timezone: 'America/Caracas', openingHours: hours });
+      expect(note).toContain('La tienda está cerrada: abre el lunes a las 8:00 a. m.');
+    });
   });
 });

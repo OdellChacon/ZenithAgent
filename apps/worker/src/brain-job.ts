@@ -62,6 +62,8 @@ interface Snapshot {
   settings: unknown;
   timezone: string;
   customerName: string | null;
+  /** Foto de la fachada del negocio, si la cargó. */
+  storefrontImageId: string | null;
   history: (HistoryMessage & { external_media_id: string | null })[];
 }
 
@@ -124,7 +126,10 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
         ORDER BY seq`,
       [job.conversationId, deps.historyLimit ?? 30],
     );
+    // Foto de la fachada (se manda con la dirección cuando el cliente pregunta dónde quedan).
+    const storefront = await client.query<{ id: string }>(`SELECT id FROM product_images WHERE purpose = 'storefront' LIMIT 1`);
     return {
+      storefrontImageId: storefront.rows[0]?.id ?? null,
       channel: row.channel,
       channelAccountId: row.channel_account_id,
       credentialsEnc: row.credentials_enc,
@@ -166,9 +171,18 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       llm: deps.llm,
       system: buildSystemPrompt(settings),
       messages: toModelMessages(snapshot.history, images, {
-        leadingNote: conversationNote({ customerName: snapshot.customerName, now: deps.now?.() ?? new Date(), timezone: snapshot.timezone }),
+        leadingNote: conversationNote({
+          customerName: snapshot.customerName,
+          now: deps.now?.() ?? new Date(),
+          timezone: snapshot.timezone,
+          openingHours: settings.business.openingHours,
+        }),
       }),
-      tools: { catalog: createCatalogReader(pool, job.tenantId), wastePercent: settings.boxes.wastePercent },
+      tools: {
+        catalog: createCatalogReader(pool, job.tenantId),
+        wastePercent: settings.boxes.wastePercent,
+        hasStorefrontPhoto: Boolean(snapshot.storefrontImageId),
+      },
       ...(deps.config ? { config: deps.config } : {}),
     });
   } catch (err) {
@@ -248,6 +262,20 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     // partido en mensajes cortos como escribe una persona.
     const ordered: string[] = [];
     const pauses: number[] = [];
+    if (brain.storefront && snapshot.storefrontImageId) {
+      const caption = settings.business.address ?? settings.business.name;
+      const id = await queue(
+        'image',
+        caption,
+        { kind: 'image', productImageId: snapshot.storefrontImageId, caption, to: snapshot.recipient, author: 'bot' },
+        outboundIdempotencyKey(job.conversationId, job.triggerMessageId, 'storefront'),
+        [{ productImageId: snapshot.storefrontImageId, storefront: true }],
+      );
+      if (id) {
+        ordered.push(id);
+        pauses.push(0);
+      }
+    }
     for (const photo of brain.photos) {
       const image = await client.query<{ id: string }>(
         'SELECT id FROM product_images WHERE product_id = $1 ORDER BY position LIMIT 1',

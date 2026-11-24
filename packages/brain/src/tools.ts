@@ -52,6 +52,8 @@ export const MAX_PHOTOS_PER_TURN = 3;
 export interface ToolContext {
   catalog: CatalogReader;
   wastePercent: number | null;
+  /** El negocio cargó la foto de su fachada (se envía con la dirección). */
+  hasStorefrontPhoto?: boolean;
 }
 
 /** Lo que las herramientas piden al sistema además de responder (se aplica al guardar). */
@@ -61,6 +63,8 @@ export interface ToolEffects {
   photos: { productId: string; name: string }[];
   /** El cliente pidió que no le escriban más por iniciativa del negocio (seguimientos). */
   stopFollowups?: boolean;
+  /** Enviar la foto de la fachada, con la dirección como pie, antes del texto. */
+  storefront?: boolean;
 }
 
 // --------------------------------------------------------------------- definiciones
@@ -126,6 +130,14 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
       required: ['producto_ids'],
       additionalProperties: false,
     },
+  },
+  {
+    name: 'enviar_ubicacion',
+    description:
+      'Envía al cliente la foto de la fachada de la tienda con la dirección como pie de foto, justo antes de tu mensaje. ' +
+      'Úsala cuando pregunte dónde quedan, la dirección o cómo llegar.',
+    strict: true,
+    input_schema: { type: 'object', properties: {}, required: [], additionalProperties: false },
   },
   {
     name: 'derivar_a_asesor',
@@ -293,6 +305,22 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         }
       }
       return json({ fotos_que_se_enviaran: sent, no_enviadas: skipped });
+    }
+
+    case 'enviar_ubicacion': {
+      if (!ctx.hasStorefrontPhoto) {
+        return json({
+          foto_enviada: false,
+          indicacion: 'No hay foto de la fachada cargada. Dale la dirección del showroom en tu mensaje.',
+        });
+      }
+      effects.storefront = true;
+      return json({
+        foto_enviada: true,
+        indicacion:
+          'La foto de la fachada llega antes de tu mensaje con la dirección como pie. No repitas la dirección completa: ' +
+          'menciona que le enviaste la foto para que la ubique fácil y, si viene al caso, el horario.',
+      });
     }
 
     case 'derivar_a_asesor': {

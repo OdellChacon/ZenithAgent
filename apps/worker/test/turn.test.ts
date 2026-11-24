@@ -5,7 +5,7 @@ import { encryptCredentials } from '@zenith/core';
 import { parseWhatsAppWebhook } from '@zenith/channel-whatsapp';
 import { insertWebhookEvent, withTenant, type Pool } from '@zenith/db';
 import { FALLBACK_REPLY, LlmHttpError } from '@zenith/brain';
-import { normalizeImage, syncProducts, type ProductInput } from '@zenith/catalog';
+import { normalizeImage, saveStorefrontPhoto, syncProducts, type ProductInput } from '@zenith/catalog';
 import sharp from 'sharp';
 import { processOutbound as processOutboundBatch } from '../src/outbound.js';
 import { processInboundEvent } from '../src/inbound.js';
@@ -197,6 +197,38 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
       'foto:media-1:Aconna Beige',
       'texto:Aquí tiene la foto.',
     ]);
+  });
+
+  it('cuando preguntan la dirección manda la foto de la fachada con la dirección como pie', async () => {
+    const jpeg = await sharp({ create: { width: 8, height: 8, channels: 3, background: '#ffffff' } }).png().toBuffer();
+    await withTenant(app, t.tenantId, (c) => saveStorefrontPhoto(c, t.tenantId, { name: 'fachada.png', data: jpeg }));
+    const sent: string[] = [];
+    const meta = vi.fn<typeof fetch>(async (url, init) => {
+      if (new URL(String(url)).pathname.endsWith('/media')) return new Response(JSON.stringify({ id: 'media-fachada' }), { status: 200 });
+      const body = JSON.parse(String(init?.body));
+      sent.push(body.type === 'image' ? `foto:${body.image.id}:${body.image.caption}` : `texto:${body.text.body}`);
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.F${++seq}` }] }), { status: 200 });
+    });
+    try {
+      const msg = await customerSays('¿Dónde quedan?', '584141230097');
+      const turn = await processBrainJob(
+        { pool: app, llm: scriptedLlm([tool('enviar_ubicacion', {}), text('Le mandé la foto de la fachada para que nos ubique fácil.')]).llm },
+        { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId },
+      );
+      if (turn.result !== 'replied') throw new Error('se esperaba respuesta');
+      await processOutboundBatch({ ...outboundDeps(), fetch: meta }, { tenantId: t.tenantId, outboundMessageIds: turn.outboundMessageIds });
+      expect(sent).toEqual([
+        `foto:media-fachada:${moraMora.settings.business.address}`,
+        'texto:Le mandé la foto de la fachada para que nos ubique fácil.',
+      ]);
+      // La fachada no cuenta como producto que le interesó al cliente.
+      const photo = await withTenant(app, t.tenantId, async (c) =>
+        (await c.query(`SELECT product_id, purpose, mime_type FROM product_images WHERE purpose = 'storefront'`)).rows,
+      );
+      expect(photo).toEqual([{ product_id: null, purpose: 'storefront', mime_type: 'image/png' }]);
+    } finally {
+      await owner.query(`DELETE FROM product_images WHERE tenant_id = $1 AND purpose = 'storefront'`, [t.tenantId]);
+    }
   });
 
   it('parte la respuesta en mensajes cortos, con una pausa de "escribiendo" entre ellos', async () => {

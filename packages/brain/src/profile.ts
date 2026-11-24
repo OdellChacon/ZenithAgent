@@ -6,6 +6,18 @@ import { z } from 'zod';
  */
 const nullableText = z.string().trim().min(1).nullish().transform((v) => v ?? null);
 
+const clock = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$|^24:00$/, 'Hora en formato HH:MM');
+const toMinutes = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
+
+/** Un tramo del horario: días (0 = domingo … 6 = sábado) y horas, en la zona horaria del negocio. */
+export const sendWindowSchema = z
+  .object({
+    days: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+    from: clock,
+    to: clock,
+  })
+  .refine((w) => toMinutes(w.from) < toMinutes(w.to), 'La hora de inicio debe ser anterior a la de cierre');
+
 export const businessProfileSchema = z.object({
   name: z.string().trim().min(1),
   description: nullableText,
@@ -14,7 +26,10 @@ export const businessProfileSchema = z.object({
   email: nullableText,
   instagram: nullableText,
   website: nullableText,
+  /** Horario en texto, como se lo dice el bot al cliente. */
   hours: nullableText,
+  /** El mismo horario por tramos: el bot sabe si la tienda está abierta y cuándo abre. */
+  openingHours: z.array(sendWindowSchema).max(14).default([]),
   paymentMethods: nullableText,
   delivery: nullableText,
   specialOrders: nullableText,
@@ -41,22 +56,6 @@ export const followupTemplateSchema = z.object({
   /** Minutos desde el último mensaje del cliente. */
   afterMinutes: z.number().int().min(1).max(30 * 24 * 60).default(48 * 60),
 });
-
-/**
- * Seguimiento a clientes que dejan de responder. Paso 1: el bot escribe un mensaje propio
- * mientras la ventana de 24 h sigue abierta. Paso 2: plantilla aprobada, ya fuera de las 24 h.
- */
-const clock = z.string().regex(/^(?:[01]\d|2[0-3]):[0-5]\d$|^24:00$/, 'Hora en formato HH:MM');
-const toMinutes = (hhmm: string) => Number(hhmm.slice(0, 2)) * 60 + Number(hhmm.slice(3));
-
-/** Un tramo del horario: días (0 = domingo … 6 = sábado) y horas, en la zona horaria del negocio. */
-export const sendWindowSchema = z
-  .object({
-    days: z.array(z.number().int().min(0).max(6)).min(1).max(7),
-    from: clock,
-    to: clock,
-  })
-  .refine((w) => toMinutes(w.from) < toMinutes(w.to), 'La hora de inicio debe ser anterior a la de cierre');
 
 /**
  * Seguimiento a clientes que dejan de responder. Paso 1: el bot escribe un mensaje propio

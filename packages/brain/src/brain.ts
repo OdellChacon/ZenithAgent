@@ -29,6 +29,8 @@ export interface BrainResult {
   photos: { productId: string; name: string }[];
   /** El cliente pidió que no le escriban más: se desactivan sus seguimientos. */
   stopFollowups?: boolean;
+  /** Enviar la foto de la fachada (con la dirección) antes del texto. */
+  storefront?: boolean;
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
   iterations: number;
   stopReason: string | null;
@@ -147,6 +149,7 @@ export async function runBrainTurn(params: {
       handoff: effects.handoff,
       photos: effects.photos,
       ...(effects.stopFollowups ? { stopFollowups: true } : {}),
+      ...(effects.storefront ? { storefront: true } : {}),
       usage,
       iterations,
       stopReason,

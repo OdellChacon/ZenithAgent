@@ -17,6 +17,7 @@
     "db:migrate": "tsx --env-file=.env packages/db/src/cli/migrate.ts",
     "db:seed-dev": "tsx --env-file=.env packages/db/src/cli/seed-dev.ts",
     "catalog:sync-imm": "tsx --env-file=.env packages/catalog/src/cli/sync-imm.ts",
+    "tenant:storefront": "tsx --env-file=.env packages/catalog/src/cli/set-storefront.ts",
     "catalog:describe": "tsx --env-file=.env apps/worker/src/cli/describe-catalog.ts",
     "dev:gateway": "tsx watch --env-file=.env apps/gateway/src/index.ts",
     "dev:worker": "tsx watch --env-file=.env apps/worker/src/index.ts",
