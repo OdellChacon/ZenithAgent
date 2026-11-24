@@ -231,6 +231,34 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
     }
   });
 
+  it('marca el mensaje como leído y muestra "escribiendo…" antes de responder', async () => {
+    const order: string[] = [];
+    const meta = vi.fn<typeof fetch>(async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      order.push(`meta:${body.status ?? body.type}:${body.typing_indicator?.type ?? ''}:${body.message_id ?? ''}`);
+      return new Response(JSON.stringify({ success: true }), { status: 200 });
+    });
+    const msg = await customerSays('Hola, ¿tienen grama artificial?', '584141230096');
+    const external = (await owner.query('SELECT external_message_id FROM messages WHERE id = $1', [msg.messageId])).rows[0].external_message_id;
+    const { llm } = scriptedLlm([text('Sí, tenemos grama artificial.')]);
+    const spy = { ...llm, create: async (...args: Parameters<typeof llm.create>) => (order.push('modelo'), llm.create(...args)) };
+    const turn = await processBrainJob(
+      { pool: app, llm: spy, media: { masterKey, graphApiVersion: 'v21.0', fetch: meta } },
+      { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId },
+    );
+    expect(turn).toMatchObject({ result: 'replied' });
+    expect(order).toEqual([`meta:read:text:${external}`, 'modelo']);
+
+    // Si Meta falla, igual responde.
+    const down = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ error: { code: 131009, message: 'x' } }), { status: 400 }));
+    const msg2 = await customerSays('¿Y en qué colores?', '584141230096');
+    const turn2 = await processBrainJob(
+      { pool: app, llm: scriptedLlm([text('Tenemos varios tonos de verde.')]).llm, media: { masterKey, graphApiVersion: 'v21.0', fetch: down } },
+      { tenantId: t.tenantId, conversationId: msg2.conversationId, triggerMessageId: msg2.messageId },
+    );
+    expect(turn2).toMatchObject({ result: 'replied' });
+  });
+
   it('parte la respuesta en mensajes cortos, con una pausa de "escribiendo" entre ellos', async () => {
     const msg = await customerSays('Buenas, busco algo tipo cemento para la pared', '584141230021');
     const turn = await processBrainJob(

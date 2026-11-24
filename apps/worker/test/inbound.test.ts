@@ -4,7 +4,7 @@ import { parseWhatsAppWebhook } from '@zenith/channel-whatsapp';
 import { insertWebhookEvent, reclaimStaleWebhookEvents, withTenant, type Pool } from '@zenith/db';
 import { processInboundEvent } from '../src/inbound.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
-import { accountUpdateWebhook, echoWebhook, historyWebhook, statusWebhook, textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
+import { accountUpdateWebhook, echoWebhook, historyWebhook, stateSyncWebhook, statusWebhook, textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
 
 describe.skipIf(!hasDb)('worker de entrada', () => {
   let owner: pg.Pool;
@@ -394,6 +394,56 @@ describe.skipIf(!hasDb)('worker de entrada', () => {
       const [unknown] = await ingest(accountUpdateWebhook({ event: 'ACCOUNT_OFFBOARDED' }, `${wabaId}X`, time));
       expect(await processInboundEvent(app, unknown!)).toEqual({ result: 'ignored', reason: 'unknown_waba' });
       await owner.query('DELETE FROM webhook_events WHERE channel_external_account_id = $1', [`${wabaId}X`]);
+    });
+  });
+
+  describe('agenda de la app WhatsApp Business', () => {
+    const sync = (items: Record<string, unknown>[]) => stateSyncWebhook(items, t.phoneNumberId);
+    const contactOf = async (phone: string) =>
+      withTenant(app, t.tenantId, async (c) =>
+        (
+          await c.query(
+            `SELECT ct.name, ci.profile FROM contact_identities ci JOIN contacts ct ON ct.id = ci.contact_id
+              WHERE ci.channel = 'whatsapp' AND ci.external_user_id = $1`,
+            [phone],
+          )
+        ).rows[0],
+      );
+
+    it('usa el nombre de la agenda, sin pisar uno cambiado en el panel, y lo quita al borrarlo', async () => {
+      // Cliente que ya escribió: tenía el nombre de su perfil de WhatsApp.
+      const [m] = await ingest(webhook({ from: '584140000301', timestamp: nowTs() }));
+      await processInboundEvent(app, m!);
+      expect((await contactOf('584140000301')).name).toBe('Cliente Prueba');
+
+      const ts = Math.floor(Date.now() / 1000);
+      const [a] = await ingest(sync([{ type: 'contact', action: 'add', contact: { full_name: 'Carmen Obra Pirineos', phone_number: '584140000301' }, metadata: { timestamp: String(ts) } }]));
+      expect(await processInboundEvent(app, a!)).toMatchObject({ result: 'contact', tenantId: t.tenantId });
+      expect(await contactOf('584140000301')).toMatchObject({ name: 'Carmen Obra Pirineos', profile: { name: 'Cliente Prueba', agendaName: 'Carmen Obra Pirineos' } });
+
+      // Alguien lo renombró en el panel: la agenda ya no lo cambia.
+      await owner.query(
+        `UPDATE contacts SET name = 'Carmen (arquitecta)' WHERE id = (SELECT contact_id FROM contact_identities WHERE external_user_id = '584140000301' AND tenant_id = $1)`,
+        [t.tenantId],
+      );
+      const [b] = await ingest(sync([{ type: 'contact', action: 'add', contact: { full_name: 'Carmen P.', phone_number: '584140000301' }, metadata: { timestamp: String(ts + 1) } }]));
+      await processInboundEvent(app, b!);
+      expect(await contactOf('584140000301')).toMatchObject({ name: 'Carmen (arquitecta)', profile: { agendaName: 'Carmen P.' } });
+
+      const [r] = await ingest(sync([{ type: 'contact', action: 'remove', contact: { phone_number: '584140000301' }, metadata: { timestamp: String(ts + 2) } }]));
+      await processInboundEvent(app, r!);
+      const after = await contactOf('584140000301');
+      expect(after.profile.agendaName).toBeUndefined();
+      expect(after.name).toBe('Carmen (arquitecta)');
+    });
+
+    it('un contacto de la agenda que nunca escribió queda creado, sin conversación', async () => {
+      const [a] = await ingest(sync([{ type: 'contact', action: 'add', contact: { full_name: 'Ferretería El Tornillo', phone_number: '584140000302' }, metadata: { timestamp: String(Math.floor(Date.now() / 1000)) } }]));
+      const out = await processInboundEvent(app, a!);
+      if (out.result !== 'contact' || !out.contactId) throw new Error('se esperaba un contacto');
+      expect((await contactOf('584140000302')).name).toBe('Ferretería El Tornillo');
+      const convs = await withTenant(app, t.tenantId, async (c) => (await c.query('SELECT 1 FROM conversations WHERE contact_id = $1', [out.contactId])).rowCount);
+      expect(convs).toBe(0);
     });
   });
 });

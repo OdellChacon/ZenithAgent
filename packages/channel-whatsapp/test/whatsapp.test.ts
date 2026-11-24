@@ -9,7 +9,7 @@ import {
   WhatsAppPayloadError,
   WhatsAppSendError,
 } from '../src/index.js';
-import { accountUpdateWebhook, echoWebhook, historyWebhook, imageWebhook, PHONE_NUMBER_ID, statusWebhook, textWebhook } from './fixtures.js';
+import { accountUpdateWebhook, echoWebhook, historyWebhook, stateSyncWebhook, imageWebhook, PHONE_NUMBER_ID, statusWebhook, textWebhook } from './fixtures.js';
 
 const SECRET = 'app-secret-de-prueba';
 
@@ -183,6 +183,29 @@ describe('historial y avisos de conexión (coexistencia)', () => {
     const events = parseWhatsAppWebhook(historyWebhook([{ errors: [{ code: 2593109, title: 'History sync is turned off' }] }]));
     expect(events).toEqual([
       expect.objectContaining({ kind: 'account', channelExternalAccountId: PHONE_NUMBER_ID, account: { type: 'history_declined', scope: 'phone' } }),
+    ]);
+  });
+
+  it('traduce la agenda de la app: altas, ediciones y bajas; sin teléfono se omite', () => {
+    const events = parseWhatsAppWebhook(
+      stateSyncWebhook([
+        { type: 'contact', action: 'add', contact: { full_name: 'Carmen Obra Pirineos', first_name: 'Carmen', phone_number: '+58 414-1112233', user_id: 'VE.1' }, metadata: { timestamp: '1739321024' } },
+        { type: 'contact', action: 'remove', contact: { phone_number: '584141119999' }, metadata: { timestamp: '1739321030' } },
+        { type: 'contact', action: 'add', contact: { full_name: 'Solo Usuario', user_id: 'VE.2' }, metadata: { timestamp: '1739321031' } },
+        { type: 'contact', action: 'add', contact: { full_name: 'Hora Rara', phone_number: '584141110000' }, metadata: { timestamp: '99999999999999999' } },
+      ]),
+    );
+    expect(events).toEqual([
+      {
+        channel: 'whatsapp',
+        channelExternalAccountId: PHONE_NUMBER_ID,
+        externalEventId: 'contact:584141112233:add:1739321024',
+        kind: 'contact',
+        occurredAt: new Date(1739321024 * 1000).toISOString(),
+        contact: { phone: '584141112233', action: 'add', fullName: 'Carmen Obra Pirineos' },
+      },
+      expect.objectContaining({ kind: 'contact', contact: { phone: '584141119999', action: 'remove' } }),
+      expect.objectContaining({ kind: 'contact', contact: { phone: '584141110000', action: 'add', fullName: 'Hora Rara' } }),
     ]);
   });
 

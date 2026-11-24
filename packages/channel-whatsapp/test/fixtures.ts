@@ -140,3 +140,21 @@ export function accountUpdateWebhook(value: Record<string, unknown>, entryId = '
     entry: [{ id: entryId, time, changes: [{ field: 'account_update', value }] }],
   };
 }
+
+/** Agenda de la app WhatsApp Business (coexistencia). */
+export function stateSyncWebhook(items: Record<string, unknown>[], phoneNumberId = PHONE_NUMBER_ID) {
+  return {
+    object: 'whatsapp_business_account',
+    entry: [
+      {
+        id: 'WABA_ID',
+        changes: [
+          {
+            field: 'smb_app_state_sync',
+            value: { messaging_product: 'whatsapp', metadata: { display_phone_number: '584140000000', phone_number_id: phoneNumberId }, state_sync: items },
+          },
+        ],
+      },
+    ],
+  };
+}

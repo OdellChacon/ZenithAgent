@@ -1,4 +1,5 @@
-import { outboundIdempotencyKey, type BrainJobData, type Channel } from '@zenith/core';
+import { decryptCredentials, outboundIdempotencyKey, type BrainJobData, type Channel } from '@zenith/core';
+import { markWhatsAppRead } from '@zenith/channel-whatsapp';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 import {
   buildSystemPrompt,
@@ -64,6 +65,9 @@ interface Snapshot {
   customerName: string | null;
   /** Foto de la fachada del negocio, si la cargó. */
   storefrontImageId: string | null;
+  /** phone_number_id del canal y wamid del mensaje que dispara el turno (para "leído"). */
+  externalAccountId: string;
+  triggerExternalId: string | null;
   history: (HistoryMessage & { external_media_id: string | null })[];
 }
 
@@ -94,11 +98,12 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       status: string;
       channel: string;
       channel_account_id: string;
+      external_account_id: string;
       credentials_enc: Buffer | null;
       recipient: string | null;
       customer_name: string | null;
     }>(
-      `SELECT c.mode, c.status, ca.channel, ca.id AS channel_account_id, ca.credentials_enc,
+      `SELECT c.mode, c.status, ca.channel, ca.id AS channel_account_id, ca.external_account_id, ca.credentials_enc,
               (SELECT ct.name FROM contacts ct WHERE ct.id = c.contact_id) AS customer_name,
               (SELECT ci.external_user_id FROM contact_identities ci
                 WHERE ci.contact_id = c.contact_id AND ci.channel = ca.channel LIMIT 1) AS recipient
@@ -128,8 +133,13 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     );
     // Foto de la fachada (se manda con la dirección cuando el cliente pregunta dónde quedan).
     const storefront = await client.query<{ id: string }>(`SELECT id FROM product_images WHERE purpose = 'storefront' LIMIT 1`);
+    const trigger = await client.query<{ external_message_id: string | null }>('SELECT external_message_id FROM messages WHERE id = $1', [
+      job.triggerMessageId,
+    ]);
     return {
       storefrontImageId: storefront.rows[0]?.id ?? null,
+      externalAccountId: row.external_account_id,
+      triggerExternalId: trigger.rows[0]?.external_message_id ?? null,
       channel: row.channel,
       channelAccountId: row.channel_account_id,
       credentialsEnc: row.credentials_enc,
@@ -151,6 +161,10 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
   }
 
   const started = Date.now();
+  // Como una persona que abre el chat: el cliente ve "leído" y "escribiendo…" mientras el bot piensa.
+  if (deps.media && snapshot.channel === 'whatsapp' && snapshot.triggerExternalId) {
+    await markReadAndTyping(deps.media, snapshot);
+  }
   // Las fotos que el cliente mandó desde la última respuesta se bajan para que el modelo las vea.
   let images: Map<string, ModelImage> | undefined;
   if (deps.media) {
@@ -351,3 +365,27 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
 }
 
 class AlreadyAnsweredError extends Error {}
+
+/** "Leído" + "escribiendo…". Si falla, se sigue: no debe demorar ni impedir la respuesta. */
+async function markReadAndTyping(media: CustomerMediaDeps, snapshot: Snapshot): Promise<void> {
+  if (!snapshot.credentialsEnc || !snapshot.triggerExternalId) return;
+  try {
+    const creds = JSON.parse(decryptCredentials(snapshot.credentialsEnc, media.masterKey, snapshot.channelAccountId)) as { accessToken?: string };
+    if (!creds.accessToken) return;
+    const res = await markWhatsAppRead(
+      {
+        graphApiVersion: media.graphApiVersion,
+        phoneNumberId: snapshot.externalAccountId,
+        accessToken: creds.accessToken,
+        timeoutMs: 5_000,
+        ...(media.graphBaseUrl ? { graphBaseUrl: media.graphBaseUrl } : {}),
+        ...(media.fetch ? { fetch: media.fetch } : {}),
+      },
+      snapshot.triggerExternalId,
+      { typing: true },
+    );
+    if (!res.ok) media.log?.('no se pudo marcar como leído', { error: res.message });
+  } catch (err) {
+    media.log?.('no se pudo marcar como leído', { error: (err as Error).message });
+  }
+}

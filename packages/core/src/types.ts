@@ -7,7 +7,7 @@ export type Channel = (typeof CHANNELS)[number];
  * history: chats anteriores que Meta manda una sola vez al conectar un número que ya usaba
  * la app (coexistencia). account: aviso sobre la conexión del número (desconexión, etc.).
  */
-export type EventKind = 'message' | 'echo' | 'history' | 'account' | 'status' | 'unsupported';
+export type EventKind = 'message' | 'echo' | 'history' | 'account' | 'contact' | 'status' | 'unsupported';
 
 /** Un mensaje del historial importado. `fromBusiness`: lo mandó el negocio, no el cliente. */
 export interface HistoryMessage {
@@ -72,6 +72,11 @@ export interface ParsedEvent {
   history?: { progress: number; messages: HistoryMessage[] };
   /** `kind = 'account'`. */
   account?: AccountNotice;
+  /**
+   * `kind = 'contact'`: un contacto de la agenda de la app WhatsApp Business (coexistencia).
+   * add = se agregó o se editó; remove = se borró (no trae nombre).
+   */
+  contact?: { phone: string; fullName?: string; action: 'add' | 'remove' };
   /** Tipo original cuando `kind = 'unsupported'` (ej. "location", "reaction"). */
   unsupportedType?: string;
 }

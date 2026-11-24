@@ -49,6 +49,12 @@ export type InboundOutcome =
       tenantIds: string[];
       notice: NonNullable<ParsedEvent['account']>;
     }
+  | {
+      /** Contacto de la agenda de la app: nombre guardado por el negocio. */
+      result: 'contact';
+      tenantId: string;
+      contactId: string | null;
+    }
   | { result: 'status'; tenantId: string; updated: number }
   | { result: 'ignored'; reason: string }
   | { result: 'failed'; reason: string }
@@ -103,7 +109,9 @@ export async function processInboundEvent(pool: Pool, webhookEventId: string): P
             ? await storeAgentEcho(client, account.tenantId, account.channelAccountId, event)
             : event.kind === 'history'
               ? await storeHistory(client, account.tenantId, account.channelAccountId, event)
-              : await storeMessage(client, account.tenantId, account.channelAccountId, event);
+              : event.kind === 'contact'
+                ? await storeAgendaContact(client, account.tenantId, event)
+                : await storeMessage(client, account.tenantId, account.channelAccountId, event);
       if (outcome.result === 'ignored') {
         await finishWebhookEvent(client, row.id, 'ignored', outcome.reason);
         return outcome;
@@ -334,6 +342,41 @@ async function storeHistory(client: PoolClient, tenantId: string, channelAccount
     [channelAccountId, Math.max(0, Math.min(100, Math.round(history.progress)))],
   );
   return { result: 'history', tenantId, conversationId, imported };
+}
+
+/**
+ * Nombre con el que el negocio guardó al cliente en la agenda del teléfono. Queda en el perfil
+ * de su identidad (agendaName) y pasa a ser el nombre del contacto si este no tenía nombre o
+ * seguía con el de su perfil de WhatsApp; no pisa un nombre que alguien cambió en el panel.
+ * Al borrarlo de la agenda solo se quita agendaName.
+ */
+async function storeAgendaContact(client: PoolClient, tenantId: string, event: ParsedEvent): Promise<InboundOutcome> {
+  const c = event.contact;
+  if (!c) throw new Error('Contacto sin datos');
+  if (c.action === 'remove') {
+    const { rows } = await client.query<{ contact_id: string }>(
+      `UPDATE contact_identities SET profile = profile - 'agendaName'
+        WHERE tenant_id = $1 AND channel = 'whatsapp' AND external_user_id = $2 RETURNING contact_id`,
+      [tenantId, c.phone],
+    );
+    return { result: 'contact', tenantId, contactId: rows[0]?.contact_id ?? null };
+  }
+  if (!c.fullName) return { result: 'ignored', reason: 'contacto sin nombre' };
+  const contactId = await upsertContact(client, tenantId, 'whatsapp', { externalUserId: c.phone, phone: c.phone });
+  await client.query(
+    `UPDATE contacts ct
+        SET name = $3, updated_at = now()
+       FROM contact_identities ci
+      WHERE ct.id = $2 AND ci.contact_id = ct.id AND ci.tenant_id = $1 AND ci.channel = 'whatsapp' AND ci.external_user_id = $4
+        AND (ct.name IS NULL OR ct.name = ci.profile->>'name' OR ct.name = ci.profile->>'agendaName')`,
+    [tenantId, contactId, c.fullName, c.phone],
+  );
+  await client.query(
+    `UPDATE contact_identities SET profile = profile || jsonb_build_object('agendaName', $3::text)
+      WHERE tenant_id = $1 AND channel = 'whatsapp' AND external_user_id = $2`,
+    [tenantId, c.phone, c.fullName],
+  );
+  return { result: 'contact', tenantId, contactId };
 }
 
 /** Desconexión, reconexión o historial rechazado: queda en la cuenta del canal y el panel avisa. */

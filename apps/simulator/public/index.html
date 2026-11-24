@@ -422,6 +422,7 @@
       if (m.status === 'sending') return `<svg viewBox="0 0 15 12">${I.clock}</svg>`;
       if (m.status === 'failed') return '<b style="color:#e53935">!</b>';
       if (m.status === 'sent') return `<svg viewBox="0 0 16 11">${I.tick}</svg>`;
+      if (m.status === 'read') return `<svg viewBox="0 0 16 11" class="tick-read">${I.ticks}</svg>`;
       return `<svg viewBox="0 0 16 11">${I.ticks}</svg>`;
     }
     return '';
@@ -533,6 +534,11 @@
     source = new EventSource('/api/stream?to=' + encodeURIComponent(state.number));
     source.onopen = () => { connected = true; updateConn(); };
     source.onerror = () => { connected = false; updateConn(); };
+    // El negocio abrió el chat: palomitas azules en lo que mandó el cliente.
+    source.addEventListener('read', () => {
+      state.messages.forEach((x) => { if (x.kind === 'customer' && (x.status === 'sent' || x.status === 'delivered')) x.status = 'read'; });
+      save(); renderChat();
+    });
     source.onmessage = (e) => {
       try {
         const m = JSON.parse(e.data);

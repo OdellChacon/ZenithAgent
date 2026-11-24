@@ -142,6 +142,26 @@ const accountValueSchema = z
   })
   .passthrough();
 
+/**
+ * Agenda de la app WhatsApp Business (campo `smb_app_state_sync`): llega al conectar el número
+ * si se pide, y después cada vez que alguien agrega, edita o borra un contacto en la app.
+ */
+const stateSyncValueSchema = z
+  .object({
+    metadata: z.object({ phone_number_id: z.string().min(1) }).passthrough(),
+    state_sync: z.array(
+      z
+        .object({
+          type: z.string(),
+          action: z.string().optional(),
+          contact: z.object({ full_name: z.string().optional(), first_name: z.string().optional(), phone_number: z.string().optional() }).passthrough().optional(),
+          metadata: z.object({ timestamp: z.union([z.string(), z.number()]).optional() }).passthrough().optional(),
+        })
+        .passthrough(),
+    ),
+  })
+  .passthrough();
+
 const DISCONNECT_EVENTS = ['PARTNER_REMOVED', 'ACCOUNT_OFFBOARDED', 'ACCOUNT_DELETED'];
 const RECONNECT_EVENTS = ['ACCOUNT_RECONNECTED', 'PARTNER_ADDED'];
 
@@ -163,7 +183,11 @@ export class WhatsAppPayloadError extends Error {
 const MEDIA_TYPES: readonly MediaType[] = ['image', 'audio', 'video', 'document', 'sticker'];
 const DELIVERY_STATES: readonly DeliveryState[] = ['sent', 'delivered', 'read', 'failed'];
 
-const toIso = (unixSeconds: string | number) => new Date(Number(unixSeconds) * 1000).toISOString();
+/** Hora de Meta (segundos Unix) a ISO. Si viene inválida, la de llegada: un dato raro no tumba el webhook. */
+const toIso = (unixSeconds: string | number) => {
+  const d = new Date(Number(unixSeconds) * 1000);
+  return Number.isFinite(d.getTime()) ? d.toISOString() : new Date().toISOString();
+};
 
 type WaMessage = z.infer<typeof messageSchema>;
 
@@ -300,6 +324,30 @@ function toHistoryEvents(value: z.infer<typeof historyValueSchema>): ParsedEvent
   return events;
 }
 
+function toContactEvents(value: z.infer<typeof stateSyncValueSchema>): ParsedEvent[] {
+  const events: ParsedEvent[] = [];
+  for (const item of value.state_sync) {
+    const action = item.action === 'remove' ? 'remove' : item.action === 'add' ? 'add' : null;
+    const phone = digits(item.contact?.phone_number);
+    // Sin teléfono (solo usuario) no se puede ubicar al cliente.
+    if (item.type !== 'contact' || !action || !phone) continue;
+    const ts = item.metadata?.timestamp;
+    // Una hora inválida no debe tumbar el aviso completo: se usa la de llegada.
+    const seconds = ts !== undefined && /^\d{1,11}$/.test(String(ts)) ? Number(ts) : NaN;
+    const occurredAt = Number.isFinite(seconds) ? new Date(seconds * 1000).toISOString() : new Date().toISOString();
+    const fullName = item.contact?.full_name?.trim() || item.contact?.first_name?.trim();
+    events.push({
+      channel: 'whatsapp',
+      channelExternalAccountId: value.metadata.phone_number_id,
+      externalEventId: `contact:${phone}:${action}:${ts ?? occurredAt}`,
+      kind: 'contact',
+      occurredAt,
+      contact: { phone, action, ...(action === 'add' && fullName ? { fullName: fullName.slice(0, 120) } : {}) },
+    });
+  }
+  return events;
+}
+
 function toAccountEvent(entryId: string, time: number | undefined, value: z.infer<typeof accountValueSchema>): ParsedEvent | null {
   const type: AccountNotice['type'] | null = DISCONNECT_EVENTS.includes(value.event)
     ? 'disconnected'
@@ -341,6 +389,11 @@ export function parseWhatsAppWebhook(body: unknown): ParsedEvent[] {
       if (change.field === 'history') {
         const value = historyValueSchema.safeParse(change.value);
         if (value.success) events.push(...toHistoryEvents(value.data));
+        continue;
+      }
+      if (change.field === 'smb_app_state_sync') {
+        const value = stateSyncValueSchema.safeParse(change.value);
+        if (value.success) events.push(...toContactEvents(value.data));
         continue;
       }
       if (change.field === 'account_update') {

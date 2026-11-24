@@ -246,3 +246,25 @@ describe('simulador: conexión del número (registro insertado)', () => {
     expect(events[0]!.history!.messages.map((m) => m.fromBusiness)).toEqual([false, true, false]);
   });
 });
+
+describe('simulador: leído y escribiendo', () => {
+  it('acepta el "leído" de un mensaje real del cliente y lo avisa al navegador', async () => {
+    const { app } = setup();
+    const sent = await app.inject({ method: 'POST', url: '/api/send', payload: { from: '584141234567', name: 'Ana', text: 'Hola' } });
+    const id = sent.json().id as string;
+    const auth = { authorization: 'Bearer token' };
+    const read = (message_id: string) =>
+      app.inject({
+        method: 'POST',
+        url: `/v27.0/${PHONE}/messages`,
+        headers: auth,
+        payload: { messaging_product: 'whatsapp', status: 'read', message_id, typing_indicator: { type: 'text' } },
+      });
+    const ok = await read(id);
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ success: true });
+    const bad = await read('wamid.NO-EXISTE');
+    expect(bad.statusCode).toBe(400);
+    expect(bad.json().error.code).toBe(131009);
+  });
+});

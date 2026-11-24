@@ -107,6 +107,29 @@ export async function sendWhatsAppText(config: WhatsAppSendConfig, to: string, b
   return sendMessage(config, to, { type: 'text', text: { body: text } });
 }
 
+/**
+ * Marca como leído un mensaje del cliente (y los anteriores de ese chat). Con `typing`, el
+ * cliente ve "escribiendo…" hasta que llega la respuesta o pasan 25 segundos (Meta). Solo
+ * se usa cuando de verdad se va a responder.
+ */
+export async function markWhatsAppRead(
+  config: WhatsAppSendConfig,
+  externalMessageId: string,
+  opts: { typing?: boolean } = {},
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!externalMessageId) throw new WhatsAppSendError('Falta el id del mensaje');
+  const res = await graphCall(config, endpoint(config, 'messages'), {
+    json: true,
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      status: 'read',
+      message_id: externalMessageId,
+      ...(opts.typing ? { typing_indicator: { type: 'text' } } : {}),
+    }),
+  });
+  return res.ok ? { ok: true } : { ok: false, message: res.message };
+}
+
 /** Envía una imagen ya subida (mediaId) con un pie de foto opcional. */
 export async function sendWhatsAppImage(config: WhatsAppSendConfig, to: string, mediaId: string, caption?: string): Promise<SendResult> {
   checkRecipient(to);

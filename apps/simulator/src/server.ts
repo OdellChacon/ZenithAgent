@@ -64,6 +64,13 @@ const agentReplySchema = z.object({
   text: z.string().trim().min(1).max(4096),
 });
 
+const readSchema = z.object({
+  messaging_product: z.literal('whatsapp'),
+  status: z.literal('read'),
+  message_id: z.string().min(1),
+  typing_indicator: z.object({ type: z.literal('text') }).optional(),
+});
+
 const graphBodySchema = z.discriminatedUnion('type', [
   z.object({ messaging_product: z.literal('whatsapp'), to: z.string().min(1), type: z.literal('text'), text: z.object({ body: z.string() }) }),
   z.object({
@@ -107,6 +114,8 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
   const bus = new EventEmitter();
   bus.setMaxListeners(100);
   const botMessages: BotMessage[] = [];
+  /** Mensajes que mandó cada cliente (wamid → número), para aceptar el "leído" como Meta. */
+  const inbound = new Map<string, string>();
   let seq = 0;
 
   async function postWebhook(payload: unknown): Promise<number> {
@@ -150,6 +159,7 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     }
     const { from, name, text, button } = parsed.data;
     const id = `wamid.SIM${Date.now()}${++seq}`;
+    inbound.set(id, from);
     const content = button ? { type: 'button', button: { text, payload: text } } : { type: 'text', text: { body: text } };
     let status: number;
     try {
@@ -239,6 +249,7 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     const mediaId = `${Date.now()}${++seq}`;
     media.set(mediaId, { mime: file.mimetype, data });
     const id = `wamid.SIM${Date.now()}${++seq}`;
+    inbound.set(id, from);
     let status: number;
     try {
       status = await postWebhook(
@@ -277,11 +288,17 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     const push = (m: BotMessage) => {
       if (m.to === to) reply.raw.write(`data: ${JSON.stringify(m)}\n\n`);
     };
+    // "Leído" + "escribiendo…": evento con nombre propio, para no mezclarlo con los mensajes.
+    const read = (r: { to: string; typing: boolean }) => {
+      if (r.to === to) reply.raw.write(`event: read\ndata: ${JSON.stringify(r)}\n\n`);
+    };
     bus.on('bot', push);
+    bus.on('read', read);
     const ping = setInterval(() => reply.raw.write(': ping\n\n'), 15_000);
     req.raw.on('close', () => {
       clearInterval(ping);
       bus.off('bot', push);
+      bus.off('read', read);
     });
   });
 
@@ -293,6 +310,14 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     }
     if (req.params.phoneNumberId !== deps.phoneNumberId) {
       return reply.code(400).send({ error: { code: 100, message: 'phone_number_id desconocido' } });
+    }
+    // Marcar como leído (con "escribiendo…" opcional), como POST /messages con status "read".
+    const readBody = readSchema.safeParse(req.body);
+    if (readBody.success) {
+      const to = inbound.get(readBody.data.message_id);
+      if (!to) return reply.code(400).send({ error: { code: 131009, message: 'Parameter value is not valid' } });
+      bus.emit('read', { to, typing: readBody.data.typing_indicator?.type === 'text' });
+      return { success: true };
     }
     const parsed = graphBodySchema.safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: { code: 100, message: 'Cuerpo inválido' } });
