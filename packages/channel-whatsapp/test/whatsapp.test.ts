@@ -129,6 +129,44 @@ describe('parseWhatsAppWebhook', () => {
   });
 });
 
+describe('ubicaciones, contactos y notas de voz del cliente', () => {
+  const msg = (m: Record<string, unknown>) => {
+    const payload = textWebhook();
+    (payload.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] }).messages = [
+      { from: '584141112233', id: 'wamid.X1', timestamp: '1763632800', ...m },
+    ];
+    return parseWhatsAppWebhook(payload)[0]!;
+  };
+
+  it('traduce una ubicación con nombre y dirección', () => {
+    expect(msg({ type: 'location', location: { latitude: 7.7669, longitude: -72.225, name: 'Mi casa', address: 'Barrio Obrero, San Cristóbal' } })).toMatchObject({
+      kind: 'message',
+      location: { latitude: 7.7669, longitude: -72.225, name: 'Mi casa', address: 'Barrio Obrero, San Cristóbal' },
+    });
+    // Coordenadas imposibles o faltantes: no es una ubicación válida.
+    expect(msg({ type: 'location', location: { latitude: 200, longitude: 0 } }).kind).toBe('unsupported');
+    expect(msg({ type: 'location', location: {} }).kind).toBe('unsupported');
+  });
+
+  it('traduce tarjetas de contacto con nombre y teléfonos', () => {
+    const e = msg({
+      type: 'contacts',
+      contacts: [
+        { name: { formatted_name: 'Arq. Luis Pérez', first_name: 'Luis' }, phones: [{ phone: '+58 414-1234567', wa_id: '584141234567', type: 'CELL' }] },
+        { name: {}, phones: [] },
+      ],
+    });
+    expect(e).toMatchObject({ kind: 'message', sharedContacts: [{ name: 'Arq. Luis Pérez', phones: ['584141234567'] }, { name: 'Sin nombre', phones: [] }] });
+  });
+
+  it('traduce una nota de voz como audio para transcribir', () => {
+    expect(msg({ type: 'audio', audio: { id: 'media-voz-1', mime_type: 'audio/ogg; codecs=opus', voice: true } })).toMatchObject({
+      kind: 'message',
+      media: [{ type: 'audio', externalMediaId: 'media-voz-1', mimeType: 'audio/ogg; codecs=opus' }],
+    });
+  });
+});
+
 describe('historial y avisos de conexión (coexistencia)', () => {
   const thread = (messages: Record<string, unknown>[]) => ({ id: '584141112233', context: { wa_id: '584141112233' }, messages });
 

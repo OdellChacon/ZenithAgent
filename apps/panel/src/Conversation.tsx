@@ -13,6 +13,48 @@ const DELIVERY_LABELS: Record<string, string> = {
   blocked_window: 'Bloqueado: ventana de 24 h cerrada',
 };
 
+/** Coordenadas al final del texto de una ubicación: "… (7.76690, -72.22500)". */
+const COORDS = /\((-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\)$|^(-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)$/;
+
+/** Lo que manda el cliente que no es texto: nota de voz transcrita, ubicación, contactos, archivos. */
+function CustomerMedia({ m }: { m: Message }) {
+  const body = m.body?.trim() ?? '';
+  if (m.type === 'audio') {
+    return body ? (
+      <p>
+        <span className="muted">[Nota de voz, transcrita]</span> {body}
+      </p>
+    ) : (
+      <p className="muted">[Nota de voz del cliente: no se pudo transcribir]</p>
+    );
+  }
+  if (m.type === 'location') {
+    const c = COORDS.exec(body);
+    const lat = c?.[1] ?? c?.[3];
+    const lng = c?.[2] ?? c?.[4];
+    const label = body.replace(COORDS, '').trim();
+    return (
+      <p>
+        <span className="muted">[Ubicación]</span> {label || 'Sin nombre'}{' '}
+        {lat && lng && (
+          <a href={`https://www.google.com/maps?q=${lat},${lng}`} target="_blank" rel="noopener noreferrer">
+            Ver en el mapa
+          </a>
+        )}
+      </p>
+    );
+  }
+  if (m.type === 'contacts') {
+    return (
+      <p>
+        <span className="muted">[Contacto compartido]</span> {body}
+      </p>
+    );
+  }
+  const kind = m.type === 'image' ? 'Foto' : m.type === 'sticker' ? 'Sticker' : m.type === 'video' ? 'Video' : 'Archivo';
+  return <p className="muted">[{kind} del cliente]{body ? ` ${body}` : ''}</p>;
+}
+
 function Bubble({ m }: { m: Message }) {
   const who =
     m.author === 'customer'
@@ -36,8 +78,8 @@ function Bubble({ m }: { m: Message }) {
         </figure>
       ) : m.type !== 'text' && m.author === 'agent' && !m.sentBy ? (
         <p className="muted">[{m.type === 'image' ? 'Foto' : m.type === 'audio' ? 'Nota de voz' : m.type === 'video' ? 'Video' : 'Archivo'} enviado desde el teléfono]{m.body ? ` ${m.body}` : ''}</p>
-      ) : m.type !== 'text' && m.direction === 'in' ? (
-        <p className="muted">[{m.type === 'image' ? 'Foto' : m.type === 'audio' ? 'Nota de voz' : 'Archivo'} del cliente]{m.body ? ` ${m.body}` : ''}</p>
+      ) : m.direction === 'in' && m.type !== 'text' ? (
+        <CustomerMedia m={m} />
       ) : (
         <p>{m.body}</p>
       )}

@@ -19,13 +19,35 @@ export interface ModelImage {
 const MEDIA_LABEL: Record<string, string> = {
   image:
     '[El cliente envió una foto hace rato, que ya no tienes a la vista. Si la necesitas, pídale con naturalidad que se la vuelva a mandar.]',
-  audio: '[El cliente envió una nota de voz. Todavía no puedes escucharla: pídale con amabilidad que la escriba.]',
+  audio: '[El cliente envió una nota de voz que no se pudo transcribir. Pídale con amabilidad que la repita o que la escriba.]',
   video: '[El cliente envió un video que no puedes ver.]',
   document: '[El cliente envió un documento que no puedes abrir.]',
   sticker: '[El cliente envió un sticker.]',
 };
 
 const IMAGE_INTRO = '[El cliente envió esta foto:]';
+
+/**
+ * Texto para el modelo de lo que no es texto ni foto. La nota de voz va transcrita; de la
+ * ubicación y las tarjetas de contacto solo pasan nombres y dirección: ni coordenadas ni
+ * teléfonos de terceros, que el bot no necesita.
+ */
+function describeForModel(type: string, body: string | null): string | null {
+  const text = body?.trim();
+  if (type === 'audio' && text) return `[Nota de voz del cliente, transcrita automáticamente:] ${text}`;
+  if (type === 'location') {
+    const label = text?.replace(/\s*\(-?\d+(?:\.\d+)?, -?\d+(?:\.\d+)?\)\s*$/, '').replace(/^-?\d+(?:\.\d+)?, -?\d+(?:\.\d+)?$/, '');
+    return `[El cliente compartió una ubicación${label ? `: ${label}` : ' (sin nombre ni dirección)'}.]`;
+  }
+  if (type === 'contacts') {
+    const names = (text ?? '')
+      .split('\n')
+      .map((line) => line.replace(/:\s*[\d+][\d+,\s-]*$/, '').trim())
+      .filter(Boolean);
+    return `[El cliente compartió la tarjeta de contacto de: ${names.length ? names.join('; ') : 'una persona'}.]`;
+  }
+  return null;
+}
 
 type Block = Anthropic.Beta.BetaTextBlockParam | Anthropic.Beta.BetaImageBlockParam;
 
@@ -55,7 +77,10 @@ export function toModelMessages(
     if (m.author === 'system') continue;
     const role = m.direction === 'in' ? 'user' : 'assistant';
     const blocks: Block[] = [];
-    if (m.direction === 'in' && m.type !== 'text') {
+    const described = m.direction === 'in' ? describeForModel(m.type, m.body) : null;
+    if (described) {
+      blocks.push({ type: 'text', text: described });
+    } else if (m.direction === 'in' && m.type !== 'text') {
       const image = m.type === 'image' && m.id ? images?.get(m.id) : undefined;
       if (image) {
         blocks.push({ type: 'text', text: IMAGE_INTRO });
@@ -64,7 +89,7 @@ export function toModelMessages(
         blocks.push({ type: 'text', text: MEDIA_LABEL[m.type] ?? '[Mensaje no compatible]' });
       }
     }
-    if (m.body?.trim()) blocks.push({ type: 'text', text: m.body.trim() });
+    if (!described && m.body?.trim()) blocks.push({ type: 'text', text: m.body.trim() });
     if (!blocks.length) continue;
 
     const last = turns[turns.length - 1];

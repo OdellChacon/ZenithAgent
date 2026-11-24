@@ -31,6 +31,8 @@ const env = z
     META_GRAPH_API_VERSION: z.string().regex(/^v\d+\.\d+$/, 'Usa la forma vNN.N'),
     // Solo para pruebas locales contra un simulador de Graph API.
     META_GRAPH_BASE_URL: z.string().url().optional(),
+    // Ruta de ffmpeg para convertir las notas de voz (por defecto, el del PATH).
+    FFMPEG_PATH: z.string().min(1).optional(),
     ...aiEnvShape,
     // Avisos a los asesores.
     PANEL_URL: z.string().url().default('http://localhost:5180'),
@@ -47,7 +49,7 @@ const env = z
 
 const log = pino({ level: env.LOG_LEVEL });
 
-const { llm, model } = buildLlm(env, (msg) => log.warn(msg));
+const { llm, model, audio } = buildLlm(env, (msg) => log.warn(msg));
 const pool = createPool(env.DATABASE_URL);
 const masterKey = parseMasterKey(env.ENCRYPTION_MASTER_KEY);
 // BullMQ exige maxRetriesPerRequest: null en las conexiones de los workers.
@@ -149,6 +151,7 @@ const brainWorker = new Worker<BrainJobData>(
           ...(env.META_GRAPH_BASE_URL ? { graphBaseUrl: env.META_GRAPH_BASE_URL } : {}),
           log: (msg, data) => log.warn(data, msg),
         },
+        ...(audio ? { voice: { llm, model, ...(env.FFMPEG_PATH ? { ffmpegPath: env.FFMPEG_PATH } : {}) } } : {}),
       },
       job.data,
     );

@@ -12,6 +12,24 @@ export const MAX_REPLY_CHARS = 1500;
 
 export type ReplyCheck = { ok: true; text: string } | { ok: false; reason: 'empty' | 'mentions_price' | 'too_long' };
 
+/**
+ * ¿La respuesta le promete al cliente que un asesor lo atenderá? Si el modelo lo dice sin usar
+ * derivar_a_asesor, nadie se entera: el sistema crea el pase igual. Solo compromisos ("le paso
+ * su caso", "un asesor le escribirá"), no ofertas ("un asesor le puede confirmar").
+ */
+const HANDOFF_PROMISES = [
+  /\ble\s+(?:paso|pasaré|pasar[ée]mos|voy\s+a\s+pasar|vamos\s+a\s+pasar|estoy\s+pasando|hago\s+llegar|voy\s+a\s+hacer\s+llegar)(?!\p{L})[^.?!\n]{0,80}\basesor/iu,
+  /\b(?:paso|pasé|pasaré|voy\s+a\s+pasar)\s+(?:su|sus|el|la|los|las)\s+(?:caso|solicitud|datos|consulta|pedido|requerimiento)[^.?!\n]{0,40}\basesor/iu,
+  // \b no sirve después de una letra con tilde: se usa (?!\p{L}).
+  /\basesor(?:es)?\s+(?:de\s+\S+\s+)?le\s+(?:escribirá|escribe|va\s+a\s+escribir|estará\s+escribiendo|contactará|va\s+a\s+contactar|atenderá|va\s+a\s+atender|responderá|enviará|va\s+a\s+enviar|pasará|mandará|va\s+a\s+mandar)(?!\p{L})/iu,
+];
+
+export function promisesHandoff(text: string): boolean {
+  // Las preguntas ("¿Le paso con un asesor?") son ofertas, no promesas.
+  const sentences = text.split(/(?<=[.!?…])\s+|\n+/).filter((s) => !/^¿|\?\s*$/.test(s.trim()));
+  return sentences.some((s) => HANDOFF_PROMISES.some((re) => re.test(s)));
+}
+
 export function checkReply(raw: string): ReplyCheck {
   const text = polishReply(raw.trim());
   if (!text) return { ok: false, reason: 'empty' };

@@ -1,7 +1,7 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { BetaMessageParam, LlmClient } from './llm.js';
 import { TOOL_DEFINITIONS, runTool, type HandoffReason, type ToolContext, type ToolEffects } from './tools.js';
-import { checkReply } from './validate.js';
+import { checkReply, promisesHandoff } from './validate.js';
 
 export interface BrainConfig {
   model: string;
@@ -140,6 +140,13 @@ export async function runBrainTurn(params: {
       return {
         ...fail('blocked_by_validator', `Respuesta bloqueada por el validador (${check.reason})`),
         error: check.reason,
+      };
+    }
+    // Prometió un asesor sin derivar: se cumple la promesa para que el cliente no quede esperando.
+    if (!effects.handoff && promisesHandoff(check.text)) {
+      effects.handoff = {
+        reason: 'otro',
+        summary: 'El bot le dijo al cliente que un asesor lo atendería, pero no dejó resumen. Revise la conversación.',
       };
     }
 

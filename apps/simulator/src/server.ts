@@ -102,6 +102,24 @@ export function renderSimTemplate(template: SimTemplate, params: string[]): stri
 
 /** Como Meta: JPEG o PNG de hasta 5 MB. */
 const MEDIA_TYPES = new Set(['image/jpeg', 'image/png']);
+/** Notas de voz que acepta el simulador (WhatsApp las manda en ogg/opus). */
+const AUDIO_TYPES = new Set(['audio/ogg', 'audio/mpeg']);
+
+const sharedSchema = z
+  .object({
+    from: z.string().regex(/^\d{8,15}$/, 'Número inválido'),
+    name: z.string().trim().min(1).max(60),
+    location: z
+      .object({
+        latitude: z.number().min(-90).max(90),
+        longitude: z.number().min(-180).max(180),
+        name: z.string().trim().max(200).optional(),
+        address: z.string().trim().max(300).optional(),
+      })
+      .optional(),
+    contact: z.object({ name: z.string().trim().min(1).max(120), phone: z.string().trim().min(6).max(30) }).optional(),
+  })
+  .refine((v) => Boolean(v.location) !== Boolean(v.contact), 'Manda una ubicación o un contacto');
 const MAX_MEDIA_BYTES = 5 * 1024 * 1024;
 
 const UI_PATH = new URL('../public/index.html', import.meta.url);
@@ -215,6 +233,82 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     bus.emit('bot', message);
     return { ok: true, id };
   });
+
+  /**
+   * Nota de voz del cliente (multipart: from y name antes del archivo ogg/opus o mp3). Como Meta,
+   * el webhook solo lleva el id y el worker la baja por la Graph API.
+   */
+  app.post('/api/send-audio', async (req, reply) => {
+    const bad = (message: string) => reply.code(400).send({ error: { code: 'invalid_input', message } });
+    let file;
+    try {
+      file = await req.file();
+    } catch {
+      return bad('Se espera multipart/form-data');
+    }
+    if (!file) return bad('Falta el audio');
+    let data: Buffer;
+    try {
+      data = await file.toBuffer();
+    } catch {
+      return bad('El audio supera los 5 MB');
+    }
+    const mime = file.mimetype.split(';')[0]!.trim();
+    if (!AUDIO_TYPES.has(mime)) return bad('Solo audio ogg o mp3');
+    const field = (name: string) => {
+      const f = file.fields[name];
+      const one = Array.isArray(f) ? f[0] : f;
+      return one && 'value' in one && typeof one.value === 'string' ? one.value : undefined;
+    };
+    const parsed = customerSchema.safeParse({ from: field('from'), name: field('name') });
+    if (!parsed.success) return bad(parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const { from, name } = parsed.data;
+    const mediaId = `${Date.now()}${++seq}`;
+    media.set(mediaId, { mime, data });
+    const id = `wamid.SIM${Date.now()}${++seq}`;
+    inbound.set(id, from);
+    return sendCustomerWebhook(reply, from, name, id, {
+      type: 'audio',
+      audio: { id: mediaId, mime_type: mime === 'audio/ogg' ? 'audio/ogg; codecs=opus' : mime, voice: true },
+    });
+  });
+
+  /** Ubicación o tarjeta de contacto del cliente, con la forma de Meta. */
+  app.post('/api/send-shared', async (req, reply) => {
+    const parsed = sharedSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: { code: 'invalid_input', message: parsed.error.issues[0]?.message ?? 'Datos inválidos' } });
+    }
+    const { from, name, location, contact } = parsed.data;
+    const id = `wamid.SIM${Date.now()}${++seq}`;
+    inbound.set(id, from);
+    const content = location
+      ? { type: 'location', location }
+      : { type: 'contacts', contacts: [{ name: { formatted_name: contact!.name, first_name: contact!.name.split(' ')[0] }, phones: [{ phone: contact!.phone, wa_id: contact!.phone.replace(/\D/g, ''), type: 'CELL' }] }] };
+    return sendCustomerWebhook(reply, from, name, id, content);
+  });
+
+  async function sendCustomerWebhook(
+    reply: import('fastify').FastifyReply,
+    from: string,
+    name: string,
+    id: string,
+    content: Record<string, unknown>,
+  ) {
+    let status: number;
+    try {
+      status = await postWebhook(
+        envelope({
+          contacts: [{ profile: { name }, wa_id: from }],
+          messages: [{ from, id, timestamp: String(Math.floor(Date.now() / 1000)), ...content }],
+        }),
+      );
+    } catch {
+      return reply.code(502).send({ error: { code: 'gateway_unreachable', message: `No se pudo conectar con el gateway en ${deps.gatewayUrl}` } });
+    }
+    if (status !== 200) return reply.code(502).send({ error: { code: 'gateway_rejected', message: `El gateway respondió ${status}` } });
+    return { ok: true, id };
+  }
 
   /**
    * Foto del cliente (multipart: from, name y caption antes del archivo). Queda guardada como

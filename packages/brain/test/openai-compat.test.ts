@@ -42,6 +42,15 @@ describe('portableSchema', () => {
 });
 
 describe('toOpenAiMessages', () => {
+  it('manda las notas de voz como input_audio', () => {
+    const out = toOpenAiMessages({
+      model: 'm',
+      max_tokens: 10,
+      messages: [{ role: 'user', content: [{ type: 'audio', source: { type: 'base64', format: 'mp3', data: 'QUJD' } }] }],
+    } as never);
+    expect(out).toEqual([{ role: 'user', content: [{ type: 'input_audio', input_audio: { data: 'QUJD', format: 'mp3' } }] }]);
+  });
+
   it('manda las fotos del cliente como image_url con data URL', () => {
     const out = toOpenAiMessages({
       model: 'm',

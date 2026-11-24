@@ -72,6 +72,10 @@ export interface ParsedEvent {
   history?: { progress: number; messages: HistoryMessage[] };
   /** `kind = 'account'`. */
   account?: AccountNotice;
+  /** Ubicación que compartió el cliente (`kind = 'message'`). */
+  location?: { latitude: number; longitude: number; name?: string; address?: string };
+  /** Tarjetas de contacto que compartió el cliente (`kind = 'message'`). */
+  sharedContacts?: { name: string; phones: string[] }[];
   /**
    * `kind = 'contact'`: un contacto de la agenda de la app WhatsApp Business (coexistencia).
    * add = se agregó o se editó; remove = se borró (no trae nombre).

@@ -156,13 +156,15 @@ async function storeMessage(
   const contactId = await upsertContact(client, tenantId, event.channel, from);
   const conversationId = await openConversation(client, tenantId, channelAccountId, contactId);
 
-  const type = event.media?.[0]?.type ?? 'text';
+  const type = event.media?.[0]?.type ?? (event.location ? 'location' : event.sharedContacts ? 'contacts' : 'text');
+  const body = event.location ? locationText(event.location) : event.sharedContacts ? contactsText(event.sharedContacts) : (event.text ?? null);
+  const attachments = event.location ? [{ location: event.location }] : event.sharedContacts ? [{ contacts: event.sharedContacts }] : (event.media ?? []);
   const inserted = await client.query<{ id: string }>(
     `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments, external_message_id, created_at)
      VALUES ($1, $2, 'in', 'customer', $3, $4, $5, $6, $7)
      ON CONFLICT (tenant_id, external_message_id) WHERE external_message_id IS NOT NULL DO NOTHING
      RETURNING id`,
-    [tenantId, conversationId, type, event.text ?? null, JSON.stringify(event.media ?? []), event.externalMessageId ?? null, event.occurredAt],
+    [tenantId, conversationId, type, body, JSON.stringify(attachments), event.externalMessageId ?? null, event.occurredAt],
   );
 
   let messageId = inserted.rows[0]?.id;
@@ -191,6 +193,18 @@ async function storeMessage(
   );
 
   return { result: 'message', tenantId, conversationId, messageId, duplicate, mode: updated.rows[0]!.mode, resumed };
+}
+
+/** "Casa de Pedro, Av. Libertador (7.7669, -72.2250)" — lo que ve el asesor y el bot. */
+function locationText(l: NonNullable<ParsedEvent['location']>): string {
+  const label = [l.name, l.address].filter(Boolean).join(', ');
+  const coords = `${l.latitude.toFixed(5)}, ${l.longitude.toFixed(5)}`;
+  return label ? `${label} (${coords})` : coords;
+}
+
+/** "Arq. Luis Pérez: 584141112233" — una línea por contacto. */
+function contactsText(list: NonNullable<ParsedEvent['sharedContacts']>): string {
+  return list.map((c) => (c.phones.length ? `${c.name}: ${c.phones.join(', ')}` : c.name)).join('\n');
 }
 
 /**

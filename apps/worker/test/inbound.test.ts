@@ -117,6 +117,38 @@ describe.skipIf(!hasDb)('worker de entrada', () => {
     expect(await processInboundEvent(app, id!)).toEqual({ result: 'skipped' });
   });
 
+  it('guarda ubicaciones y tarjetas de contacto como mensajes del cliente', async () => {
+    const payload = webhook({ from: '584140000006' });
+    const msg = (payload.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] }).messages[0]!;
+    msg.type = 'location';
+    delete msg.text;
+    msg.location = { latitude: 7.7669, longitude: -72.225, name: 'Mi casa', address: 'Barrio Obrero' };
+    const [id] = await ingest(payload);
+    const loc = await processInboundEvent(app, id!);
+    if (loc.result !== 'message') throw new Error('se esperaba un mensaje');
+    expect(loc.mode).toBe('bot');
+
+    const payload2 = webhook({ from: '584140000006' });
+    const msg2 = (payload2.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] }).messages[0]!;
+    msg2.type = 'contacts';
+    delete msg2.text;
+    msg2.contacts = [{ name: { formatted_name: 'Arq. Luis Pérez' }, phones: [{ phone: '+58 414-1234567', wa_id: '584141234567' }] }];
+    const [id2] = await ingest(payload2);
+    expect(await processInboundEvent(app, id2!)).toMatchObject({ result: 'message' });
+
+    const rows = await withTenant(app, t.tenantId, async (c) =>
+      (await c.query('SELECT type, body, attachments FROM messages WHERE conversation_id = $1 ORDER BY seq', [loc.conversationId])).rows,
+    );
+    expect(rows).toEqual([
+      {
+        type: 'location',
+        body: 'Mi casa, Barrio Obrero (7.76690, -72.22500)',
+        attachments: [{ location: { latitude: 7.7669, longitude: -72.225, name: 'Mi casa', address: 'Barrio Obrero' } }],
+      },
+      { type: 'contacts', body: 'Arq. Luis Pérez: 584141234567', attachments: [{ contacts: [{ name: 'Arq. Luis Pérez', phones: ['584141234567'] }] }] },
+    ]);
+  });
+
   it('ignora tipos de mensaje no soportados', async () => {
     const payload = webhook({ from: '584140000005' });
     const msg = (payload.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] }).messages[0]!;

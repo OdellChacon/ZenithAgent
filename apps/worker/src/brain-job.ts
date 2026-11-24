@@ -9,6 +9,7 @@ import {
   isRetryableLlmError,
   parseTenantBotSettings,
   pendingCustomerImages,
+  pendingVoiceNotes,
   runBrainTurn,
   splitBubbles,
   typingPauseMs,
@@ -21,6 +22,7 @@ import {
 } from '@zenith/brain';
 import { createCatalogReader } from './catalog-reader.js';
 import { loadCustomerImages, type CustomerMediaDeps, type PendingImage } from './customer-images.js';
+import { transcribeVoiceNotes, type VoiceDeps } from './voice.js';
 
 export interface BrainJobDeps {
   pool: Pool;
@@ -35,6 +37,8 @@ export interface BrainJobDeps {
   finalAttempt?: boolean;
   /** Para que el modelo vea las fotos del cliente. Sin esto, solo recibe una nota de texto. */
   media?: CustomerMediaDeps;
+  /** Para transcribir las notas de voz (necesita `media`). Sin esto, el bot pide que escriban. */
+  voice?: VoiceDeps;
   now?: () => Date;
 }
 
@@ -164,6 +168,27 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
   // Como una persona que abre el chat: el cliente ve "leído" y "escribiendo…" mientras el bot piensa.
   if (deps.media && snapshot.channel === 'whatsapp' && snapshot.triggerExternalId) {
     await markReadAndTyping(deps.media, snapshot);
+  }
+  // Notas de voz pendientes: se transcriben y el texto queda guardado en el mensaje, así lo
+  // ven el modelo, el panel y los turnos siguientes sin volver a escucharlas.
+  if (deps.media && deps.voice) {
+    const pending = pendingVoiceNotes(snapshot.history).map((m) => ({
+      ...m,
+      id: m.id!,
+      externalMediaId: (m as Snapshot['history'][number]).external_media_id,
+    }));
+    const texts = await transcribeVoiceNotes(
+      deps.media,
+      deps.voice,
+      { channel: snapshot.channel, channelAccountId: snapshot.channelAccountId, credentialsEnc: snapshot.credentialsEnc },
+      pending,
+    );
+    if (texts.size) {
+      await withTenant(pool, job.tenantId, async (c) => {
+        for (const [id, text] of texts) await c.query(`UPDATE messages SET body = $2 WHERE id = $1 AND body IS NULL`, [id, text]);
+      });
+      for (const m of snapshot.history) if (m.id && texts.has(m.id)) m.body = texts.get(m.id)!;
+    }
   }
   // Las fotos que el cliente mandó desde la última respuesta se bajan para que el modelo las vea.
   let images: Map<string, ModelImage> | undefined;

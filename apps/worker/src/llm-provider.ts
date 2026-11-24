@@ -21,17 +21,20 @@ export const aiEnvShape = {
   AI_BASE_URL: z.string().url().optional(),
   AI_API_KEY: z.string().optional(),
   AI_EFFORT: z.enum(['low', 'medium', 'high']).default('medium'),
+  // openai-compatible: true si el modelo entiende audio (input_audio en mp3). Gemini ya lo hace.
+  AI_AUDIO: z.enum(['true', 'false']).default('false'),
 };
 
 const aiEnvSchema = z.object(aiEnvShape);
 export type AiEnv = z.infer<typeof aiEnvSchema>;
 
-export function buildLlm(env: AiEnv, warn: (msg: string) => void): { llm: LlmClient; model: string } {
+/** `audio`: el proveedor puede transcribir notas de voz. */
+export function buildLlm(env: AiEnv, warn: (msg: string) => void): { llm: LlmClient; model: string; audio: boolean } {
   const fallbackModels = env.AI_FALLBACK_MODELS?.split(',').map((m) => m.trim()).filter(Boolean);
   switch (env.AI_PROVIDER) {
     case 'none':
       warn('AI_PROVIDER=none: el bot no usa IA; cada mensaje recibe el respaldo y pasa a un asesor');
-      return { llm: createDisabledLlm(), model: 'ninguno' };
+      return { llm: createDisabledLlm(), model: 'ninguno', audio: false };
     case 'gemini':
       if (!env.GEMINI_API_KEY) throw new Error('AI_PROVIDER=gemini necesita GEMINI_API_KEY');
       warn('Gemini en capa gratuita: Google puede usar y revisar lo enviado. Úsalo solo con datos ficticios (simulador), nunca con clientes reales');
@@ -43,18 +46,21 @@ export function buildLlm(env: AiEnv, warn: (msg: string) => void): { llm: LlmCli
           fallbackModels: fallbackModels ?? GEMINI_DEFAULT_FALLBACK_MODELS,
         }),
         model: env.AI_MODEL ?? GEMINI_DEFAULT_MODEL,
+        audio: true,
       };
     case 'openai-compatible':
       if (!env.AI_BASE_URL || !env.AI_MODEL) throw new Error('AI_PROVIDER=openai-compatible necesita AI_BASE_URL y AI_MODEL');
       return {
         llm: createOpenAiCompatibleLlm({ baseUrl: env.AI_BASE_URL, apiKey: env.AI_API_KEY?.trim() || 'sin-clave', fallbackModels: fallbackModels ?? [] }),
         model: env.AI_MODEL,
+        audio: env.AI_AUDIO === 'true',
       };
     case 'anthropic':
       if (!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_AUTH_TOKEN) {
         warn('No hay ANTHROPIC_API_KEY: si el SDK no encuentra otra credencial, cada turno responderá con el respaldo');
       }
-      return { llm: createAnthropicLlm(), model: env.AI_MODEL ?? 'claude-opus-5-5' };
+      // Claude no recibe audio: las notas de voz quedan sin transcribir.
+      return { llm: createAnthropicLlm(), model: env.AI_MODEL ?? 'claude-opus-5-5', audio: false };
   }
 }
 

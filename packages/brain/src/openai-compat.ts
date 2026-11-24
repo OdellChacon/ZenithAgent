@@ -87,7 +87,10 @@ function blockText(content: unknown): string {
   return '';
 }
 
-type OaiContentPart = { type: 'text'; text: string } | { type: 'image_url'; image_url: { url: string } };
+type OaiContentPart =
+  | { type: 'text'; text: string }
+  | { type: 'image_url'; image_url: { url: string } }
+  | { type: 'input_audio'; input_audio: { data: string; format: string } };
 
 type OaiMessage =
   | { role: 'system'; content: string }
@@ -135,15 +138,19 @@ export function toOpenAiMessages(params: CreateParams): OaiMessage[] {
         out.push({ role: 'tool', tool_call_id: b.tool_use_id as string, content: blockText(b.content) });
       }
     }
-    const hasImage = blocks.some((b) => b.type === 'image');
-    if (hasImage && role !== 'system') {
-      // Fotos del cliente: texto e imágenes en orden, las imágenes como data URL.
+    const hasMedia = blocks.some((b) => b.type === 'image' || b.type === 'audio');
+    if (hasMedia && role !== 'system') {
+      // Fotos y audios del cliente: en orden con el texto; las imágenes como data URL.
       const parts: OaiContentPart[] = [];
       for (const b of blocks) {
         if (b.type === 'text' && b.text) parts.push({ type: 'text', text: b.text as string });
         const source = b.source as { type?: string; media_type?: string; data?: string } | undefined;
         if (b.type === 'image' && source?.type === 'base64' && source.media_type && source.data) {
           parts.push({ type: 'image_url', image_url: { url: `data:${source.media_type};base64,${source.data}` } });
+        }
+        const audio = b.source as { type?: string; format?: string; data?: string } | undefined;
+        if (b.type === 'audio' && audio?.type === 'base64' && audio.format && audio.data) {
+          parts.push({ type: 'input_audio', input_audio: { data: audio.data, format: audio.format } });
         }
       }
       if (parts.length) out.push({ role: 'user', content: parts });

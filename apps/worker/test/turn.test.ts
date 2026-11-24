@@ -15,6 +15,8 @@ import { createCatalogReader, normalizeTerms } from '../src/catalog-reader.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 import { imageWebhook, textWebhook } from '../../../packages/channel-whatsapp/test/fixtures.js';
 import { scriptedLlm, text, tool } from '../../../packages/brain/test/fake-llm.js';
+import { oggTone } from './audio-fixture.js';
+import { spawnSync } from 'node:child_process';
 import moraMora from '../../../config/tenants/inversiones-mora-mora.json' with { type: 'json' };
 
 const masterKey = randomBytes(32);
@@ -230,6 +232,45 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
       await owner.query(`DELETE FROM product_images WHERE tenant_id = $1 AND purpose = 'storefront'`, [t.tenantId]);
     }
   });
+
+  it.skipIf(spawnSync('ffmpeg', ['-version'], { windowsHide: true }).status !== 0)(
+    'transcribe la nota de voz, guarda el texto y el bot responde a lo que dijo',
+    async () => {
+      seq++;
+      const payload = textWebhook({ id: `wamid.VOZ${Date.now()}${seq}`, from: '584141230095' });
+      const value = payload.entry[0]!.changes[0]!.value as { metadata: { phone_number_id: string }; messages: Record<string, unknown>[] };
+      value.metadata.phone_number_id = t.phoneNumberId;
+      const m = value.messages[0]!;
+      m.type = 'audio';
+      delete m.text;
+      m.audio = { id: 'media-voz-1', mime_type: 'audio/ogg; codecs=opus', voice: true };
+      const [event] = parseWhatsAppWebhook(payload);
+      const msg = await processInboundEvent(app, (await insertWebhookEvent(app, event!, payload))!);
+      if (msg.result !== 'message') throw new Error('se esperaba un mensaje');
+
+      const ogg = oggTone();
+      const meta = vi.fn<typeof fetch>(async (url) => {
+        const u = String(url);
+        if (u.endsWith('/v21.0/media-voz-1')) {
+          return new Response(JSON.stringify({ url: 'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=voz', mime_type: 'audio/ogg; codecs=opus' }), { status: 200 });
+        }
+        if (u.includes('lookaside')) return new Response(new Uint8Array(ogg), { status: 200, headers: { 'content-type': 'audio/ogg' } });
+        return new Response(JSON.stringify({ success: true }), { status: 200 }); // leído
+      });
+      const { llm, calls } = scriptedLlm([text('Quiero porcelanato gris para la terraza, son veinte metros.'), text('Para la terraza le va bien un porcelanato antideslizante.')]);
+      const turn = await processBrainJob(
+        { pool: app, llm, media: { masterKey, graphApiVersion: 'v21.0', fetch: meta }, voice: { llm, model: 'modelo-voz' } },
+        { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId },
+      );
+      expect(turn).toMatchObject({ result: 'replied' });
+      // 1.ª llamada: transcripción con el audio en mp3. 2.ª: el turno, ya con el texto.
+      expect(calls[0]!.model).toBe('modelo-voz');
+      expect(JSON.stringify(calls[0]!.messages)).toContain('"format":"mp3"');
+      expect(JSON.stringify(calls[1]!.messages)).toContain('transcrita automáticamente:] Quiero porcelanato gris para la terraza');
+      const saved = (await owner.query('SELECT body FROM messages WHERE id = $1', [msg.messageId])).rows[0];
+      expect(saved.body).toBe('Quiero porcelanato gris para la terraza, son veinte metros.');
+    },
+  );
 
   it('marca el mensaje como leído y muestra "escribiendo…" antes de responder', async () => {
     const order: string[] = [];

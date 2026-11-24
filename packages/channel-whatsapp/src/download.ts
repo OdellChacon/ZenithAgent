@@ -10,6 +10,10 @@ import { WhatsAppSendError, type WhatsAppSendConfig } from './send.js';
  */
 export const WHATSAPP_MAX_DOWNLOAD_BYTES = 5 * 1024 * 1024;
 const DOWNLOAD_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
+/** Notas de voz y audios: WhatsApp los manda como ogg/opus; también pueden llegar mp3, m4a o amr. */
+export const WHATSAPP_AUDIO_MIME_TYPES = new Set(['audio/ogg', 'audio/opus', 'audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/amr']);
+/** Audios: hasta 16 MB según Meta. */
+export const WHATSAPP_MAX_AUDIO_BYTES = 16 * 1024 * 1024;
 const META_MEDIA_HOST_SUFFIXES = ['.fbsbx.com', '.facebook.com', '.whatsapp.net', '.fbcdn.net'];
 const GRAPH_VERSION_RE = /^v\d+\.\d+$/;
 const MEDIA_ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -19,7 +23,7 @@ export type DownloadResult =
   | { ok: true; data: Buffer; mimeType: string }
   | { ok: false; retryable: boolean; httpStatus: number | null; message: string };
 
-type DownloadConfig = Omit<WhatsAppSendConfig, 'phoneNumberId'> & { maxBytes?: number };
+type DownloadConfig = Omit<WhatsAppSendConfig, 'phoneNumberId'> & { maxBytes?: number; allowedMimeTypes?: ReadonlySet<string> };
 
 /** ¿Se le puede mandar el token a esta url? */
 export function isTrustedMediaUrl(url: string, graphBaseUrl?: string): boolean {
@@ -56,7 +60,7 @@ async function get(config: DownloadConfig, url: string): Promise<Response | { er
 
 const retryableStatus = (status: number) => status === 429 || status >= 500;
 
-/** Descarga una imagen enviada por el cliente. No lanza por errores de red o de Meta. */
+/** Descarga un archivo del cliente (imagen por defecto). No lanza por errores de red o de Meta. */
 export async function downloadWhatsAppMedia(config: DownloadConfig, mediaId: string): Promise<DownloadResult> {
   if (!GRAPH_VERSION_RE.test(config.graphApiVersion)) {
     throw new WhatsAppSendError('META_GRAPH_API_VERSION debe tener la forma vNN.N');
@@ -94,7 +98,7 @@ export async function downloadWhatsAppMedia(config: DownloadConfig, mediaId: str
     return { ok: false, retryable: retryableStatus(fileRes.status), httpStatus: fileRes.status, message: `Descarga fallida (HTTP ${fileRes.status})` };
   }
   const mimeType = (fileRes.headers.get('content-type') ?? info.mime_type ?? '').split(';')[0]!.trim().toLowerCase();
-  if (!DOWNLOAD_MIME_TYPES.has(mimeType)) {
+  if (!(config.allowedMimeTypes ?? DOWNLOAD_MIME_TYPES).has(mimeType)) {
     return { ok: false, retryable: false, httpStatus: null, message: `Tipo de archivo no admitido: ${mimeType || 'desconocido'}` };
   }
   const declared = Number(fileRes.headers.get('content-length') ?? '0');

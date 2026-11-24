@@ -25,6 +25,21 @@ const messageSchema = z
     document: mediaSchema.optional(),
     sticker: mediaSchema.optional(),
     button: z.object({ text: z.string() }).optional(),
+    location: z
+      // Todo opcional: una ubicación rara no debe invalidar el resto del webhook.
+      .object({ latitude: z.number().optional(), longitude: z.number().optional(), name: z.string().optional(), address: z.string().optional() })
+      .passthrough()
+      .optional(),
+    contacts: z
+      .array(
+        z
+          .object({
+            name: z.object({ formatted_name: z.string().optional(), first_name: z.string().optional() }).passthrough().optional(),
+            phones: z.array(z.object({ phone: z.string().optional(), wa_id: z.string().optional() }).passthrough()).optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
     interactive: z
       .object({
         button_reply: z.object({ id: z.string(), title: z.string() }).optional(),
@@ -221,8 +236,31 @@ function toMessageEvent(msg: WaMessage, phoneNumberId: string, displayName: stri
     if (reply) return { ...base, text: reply.title };
   }
 
+  // Ubicación: el cliente suele mandarla para un envío o para ver qué tan lejos está la tienda.
+  const loc = msg.location;
+  if (msg.type === 'location' && loc && isCoordinate(loc.latitude, 90) && isCoordinate(loc.longitude, 180)) {
+    const l = { ...loc, latitude: loc.latitude!, longitude: loc.longitude! };
+    const name = l.name?.trim().slice(0, 200);
+    const address = l.address?.trim().slice(0, 300);
+    return { ...base, location: { latitude: l.latitude, longitude: l.longitude, ...(name ? { name } : {}), ...(address ? { address } : {}) } };
+  }
+
+  // Tarjetas de contacto (por ejemplo, la del arquitecto o el maestro de obra).
+  if (msg.type === 'contacts' && msg.contacts?.length) {
+    const shared = msg.contacts.slice(0, 5).map((c) => ({
+      name: (c.name?.formatted_name ?? c.name?.first_name ?? '').trim().slice(0, 120) || 'Sin nombre',
+      phones: (c.phones ?? [])
+        .map((p) => (p.wa_id ?? p.phone ?? '').trim().slice(0, 30))
+        .filter(Boolean)
+        .slice(0, 3),
+    }));
+    return { ...base, sharedContacts: shared };
+  }
+
   return { ...base, kind: 'unsupported', unsupportedType: msg.type };
 }
+
+const isCoordinate = (v: number | undefined, max: number) => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= max;
 
 type WaEcho = z.infer<typeof echoSchema>;
 
