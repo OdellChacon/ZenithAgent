@@ -25,7 +25,7 @@ import {
 import { createCatalogReader } from './catalog-reader.js';
 
 /** Máximo de fotos del catálogo que ve el modelo en un turno. */
-const CATALOG_PHOTOS_PER_TURN = 8;
+const CATALOG_PHOTOS_PER_TURN = 10;
 import { loadCustomerImages, type CustomerMediaDeps, type PendingImage } from './customer-images.js';
 import { transcribeVoiceNotes, type VoiceDeps } from './voice.js';
 
@@ -229,9 +229,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
         catalog: createCatalogReader(pool, job.tenantId),
         wastePercent: settings.boxes.wastePercent,
         hasStorefrontPhoto: Boolean(snapshot.storefrontImageId),
-        // El modelo ve las fotos de los productos que encuentra: más si el cliente mandó una foto
-        // para comparar. Tope por turno para que varias búsquedas no disparen el costo.
-        catalogPhotos: { perSearch: images?.size ? 4 : 3, remaining: CATALOG_PHOTOS_PER_TURN },
+        // El modelo ve las fotos de los primeros productos que encuentra. Tope por turno para que
+        // varias búsquedas no disparen el costo.
+        catalogPhotos: { perSearch: 5, remaining: CATALOG_PHOTOS_PER_TURN },
         ...(latestCustomerImage && (deps.config?.model ?? deps.voice?.model)
           ? {
               identifyPhoto: {

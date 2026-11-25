@@ -115,7 +115,7 @@ export function createCatalogReader(pool: Pool, tenantId: string): CatalogReader
             LIMIT $5`,
           [category, filters.surface, filters.usage, terms.map(termPattern), filters.limit],
         );
-        return rows.map(({ score: _score, ...row }) => row);
+        return rows.map((row) => ({ ...row, score: Number(row.score) }));
       });
     },
 

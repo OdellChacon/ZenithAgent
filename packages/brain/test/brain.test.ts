@@ -383,22 +383,19 @@ describe('runBrainTurn', () => {
     expect(result).toContain('Aconna Beige');
   });
 
-  it('envía fotos solo de productos reales con foto, máximo 3 por mensaje', async () => {
-    const ids = ['a', 'b', 'c', 'd', 'e'].map((x) => `${x.repeat(8)}-1111-4111-8111-111111111111`);
+  it('envía fotos solo de productos reales con foto, máximo 6 por mensaje', async () => {
+    const ids = ['a', 'b', 'c', 'd', 'e', 'f', '7', '8'].map((x) => `${x.repeat(8)}-1111-4111-8111-111111111111`);
     const rows: ProductRow[] = ids.map((id, i) => ({ ...PRODUCT, id, name: `Producto ${i + 1}`, has_photo: i !== 1 }));
     const { llm, calls } = scriptedLlm([
       tool('enviar_fotos', { producto_ids: [...ids, '99999999-1111-4111-8111-111111111111'] }),
       text('Le envié las fotos.'),
     ]);
     const res = await runBrainTurn({ ...base, llm, messages: customer('¿Tienen fotos?'), tools: { catalog: catalog(rows), wastePercent: null } });
-    expect(res.photos).toEqual([
-      { productId: ids[0], name: 'Producto 1' },
-      { productId: ids[2], name: 'Producto 3' },
-      { productId: ids[3], name: 'Producto 4' },
-    ]);
+    // El 2 no tiene foto: salen 1, 3, 4, 5, 6 y 7; el 8 ya pasa del tope.
+    expect(res.photos.map((p) => p.name)).toEqual(['Producto 1', 'Producto 3', 'Producto 4', 'Producto 5', 'Producto 6', 'Producto 7']);
     const result = JSON.stringify(calls[1]?.messages.at(-1));
     expect(result).toContain('Producto 2: no tiene foto');
-    expect(result).toContain('máximo 3 fotos');
+    expect(result).toContain('máximo 6 fotos');
   });
 
   it('manda la foto de la fachada solo si el negocio la cargó', async () => {
@@ -432,7 +429,7 @@ describe('runBrainTurn', () => {
     ]);
     const cat = catalog();
     await runBrainTurn({ ...base, llm, messages: customer('¿Qué tienen?'), tools: { catalog: cat, wastePercent: null } });
-    expect(cat.search.mock.calls[0]?.[0].limit).toBe(8);
+    expect(cat.search.mock.calls[0]?.[0].limit).toBe(12);
   });
 
   it('deriva a un asesor cuando preguntan el precio', async () => {

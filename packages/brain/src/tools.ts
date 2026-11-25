@@ -51,10 +51,12 @@ export interface ProductRow {
   in_visualizer: boolean;
   /** Si hay al menos una foto guardada del producto. */
   has_photo: boolean;
+  /** Puntaje de la búsqueda (más alto = coincide mejor). Solo viene en los resultados de search. */
+  score?: number;
 }
 
 /** Fotos por mensaje: más que esto satura el chat del cliente. */
-export const MAX_PHOTOS_PER_TURN = 3;
+export const MAX_PHOTOS_PER_TURN = 6;
 
 export interface ToolContext {
   catalog: CatalogReader;
@@ -110,7 +112,7 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
         },
         superficie: { type: ['string', 'null'], enum: ['piso', 'pared', null] },
         uso: { type: ['string', 'null'], enum: ['interior', 'exterior', null] },
-        limite: { type: 'integer', description: 'Cantidad máxima de resultados (1 a 8).' },
+        limite: { type: 'integer', description: 'Cantidad máxima de resultados (1 a 12). Usa 12 cuando el cliente pregunta qué hay de un color, estilo o tipo.' },
       },
       required: ['texto', 'categoria', 'superficie', 'uso', 'limite'],
       additionalProperties: false,
@@ -142,7 +144,7 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
     input_schema: {
       type: 'object',
       properties: {
-        producto_ids: { type: 'array', items: { type: 'string' }, description: 'Ids de buscar_productos, máximo 3.' },
+        producto_ids: { type: 'array', items: { type: 'string' }, description: 'Ids de buscar_productos, máximo 6.' },
       },
       required: ['producto_ids'],
       additionalProperties: false,
@@ -301,10 +303,34 @@ async function withVariants(rows: ProductRow[], ctx: ToolContext): Promise<Map<s
   return out;
 }
 
-const presentWith = (variants: Map<string, string[]>) => (p: ProductRow) => {
+const presentWith = (variants: Map<string, string[]>, best = 0) => (p: ProductRow) => {
   const v = variants.get(p.id);
-  return v ? { ...presentProduct(p), mismo_diseno_en_otros_colores: v } : presentProduct(p);
+  const out: Record<string, unknown> = { ...presentProduct(p) };
+  if (best > 0 && p.score !== undefined) out.coincidencia = p.score >= best * 0.6 ? 'alta' : 'parcial';
+  if (v) out.mismo_diseno_en_otros_colores = v;
+  return out;
 };
+
+/**
+ * Cuántos productos coinciden bien con lo pedido. Con más de 3, el resultado le recuerda al bot
+ * que, si el cliente preguntó qué hay, se los nombre todos (el modelo tiende a quedarse con 2).
+ */
+function matchSummary(rows: ProductRow[]): { best: number; extra: Record<string, unknown> } {
+  const best = Math.max(0, ...rows.map((r) => r.score ?? 0));
+  if (!best) return { best: 0, extra: {} };
+  const high = rows.filter((r) => (r.score ?? 0) >= best * 0.6).length;
+  return {
+    best,
+    extra: {
+      coincidencias_altas: high,
+      ...(high > 3
+        ? {
+            nota_opciones: `Hay ${high} productos que coinciden bien (marcados "coincidencia": "alta", del más fiel al menos). Si el cliente preguntó qué hay o qué opciones tiene, nómbraselos todos en una línea corta cada uno; descarta solo los que en su foto o descripción claramente no son lo que pide.`,
+          }
+        : {}),
+    },
+  };
+}
 
 function presentProduct(p: ProductRow) {
   const a = p.attributes;
@@ -351,12 +377,17 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         category: categoria || null,
         surface: superficie,
         usage: uso,
-        limit: Math.min(Math.max(limite, 1), 8),
+        limit: Math.min(Math.max(limite, 1), 12),
       };
       const rows = await ctx.catalog.search(filters);
       if (rows.length) {
         const variants = await withVariants(rows, ctx);
-        return withPhotos(json({ resultados: rows.length, productos: rows.map(presentWith(variants)) }), rows, ctx);
+        const summary = matchSummary(rows);
+        return withPhotos(
+          json({ resultados: rows.length, ...summary.extra, productos: rows.map(presentWith(variants, summary.best)) }),
+          rows,
+          ctx,
+        );
       }
 
       // La categoría que dice el cliente no siempre es la del catálogo ("porcelanato" puede estar
