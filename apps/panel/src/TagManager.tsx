@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { api, ApiError, type TagColor, type TagDef, type TagGroup } from './api';
 import { ColorSwatches, normalizeTag, refreshTags, TAG_RE, tagLabel, useTagCatalog } from './tags';
 import { playSound } from './sounds';
+import { Trash2, X } from 'lucide-react';
 
 /** Ejecuta un cambio del catálogo, recarga y devuelve el mensaje de error si falló. */
 async function run(fn: () => Promise<unknown>): Promise<string | null> {
@@ -84,9 +85,7 @@ function TagRow({ t, groups, canManage, onError }: { t: TagDef; groups: TagGroup
               ))}
             </select>
             <button type="button" className="icon-btn tm-del" aria-label={`Borrar ${t.tag}`} onClick={() => setConfirm(confirm === 'delete' ? null : 'delete')}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3" />
-              </svg>
+              <Trash2 strokeWidth={1.9} aria-hidden="true" />
             </button>
           </>
         )}
@@ -270,9 +269,7 @@ export function TagManager({ open, onClose }: { open: boolean; onClose: () => vo
                 </p>
               </div>
               <button type="button" className="icon-btn" aria-label="Cerrar" onClick={onClose}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <path d="M6 6l12 12M18 6L6 18" />
-                </svg>
+                <X strokeWidth={1.9} aria-hidden="true" />
               </button>
             </header>
 

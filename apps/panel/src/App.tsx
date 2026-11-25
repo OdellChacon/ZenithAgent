@@ -11,7 +11,8 @@ import { ChannelAlerts } from './ChannelAlerts';
 import { Channels } from './Channels';
 import { ComingSoon } from './ComingSoon';
 import { unlockAudioOnGesture } from './sounds';
-import { Icon } from './ui';
+import { MessagesSquare } from 'lucide-react';
+import { EmptyState } from './EmptyState';
 
 interface Route {
   section: Section;
@@ -141,9 +142,13 @@ export function App() {
             />
           ) : (
             <div className="empty-pane">
-              <span className="empty-art" aria-hidden="true">{Icon.chats}</span>
-              <p>Elige una conversación de la bandeja.</p>
-              <p className="muted">Las derivadas por el bot aparecen en “Pendientes” y te avisamos con un sonido.</p>
+              <EmptyState
+                size="lg"
+                tone="accent"
+                icon={MessagesSquare}
+                title="Elige una conversación"
+                text="Las que el bot te pasa aparecen en “Pendientes” y te avisamos con un sonido."
+              />
             </div>
           )}
         </div>

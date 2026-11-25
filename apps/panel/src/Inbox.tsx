@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { api, REASON_LABELS, type ConversationSummary, type Me, type View } from './api';
 import { ago } from './time';
+import { Camera, FileText, Inbox as InboxIcon, MapPin, Mic, PartyPopper, SearchX, UserRound, type LucideIcon } from 'lucide-react';
 import { Avatar, Icon } from './ui';
+import { EmptyState } from './EmptyState';
 import { playSound } from './sounds';
 
 const TABS: { view: View; label: string }[] = [
@@ -11,22 +13,26 @@ const TABS: { view: View; label: string }[] = [
   { view: 'all', label: 'Todas' },
 ];
 
-const EMPTY: Record<View, { icon: string; text: string }> = {
-  pending: { icon: '🎉', text: 'No hay clientes esperando.' },
-  mine: { icon: '🗂️', text: 'No tienes conversaciones asignadas.' },
-  all: { icon: '💬', text: 'Todavía no hay conversaciones.' },
+const EMPTY: Record<View, { icon: LucideIcon; title: string; text: string; tone: 'ok' | 'muted' }> = {
+  pending: { icon: PartyPopper, title: 'Todo al día', text: 'No hay clientes esperando un asesor.', tone: 'ok' },
+  mine: { icon: UserRound, title: 'Nada asignado', text: 'Cuando tomes una conversación, aparece aquí.', tone: 'muted' },
+  all: { icon: InboxIcon, title: 'Bandeja vacía', text: 'Las conversaciones de WhatsApp aparecerán aquí.', tone: 'muted' },
 };
+
+const KIND_ICON: Record<string, LucideIcon> = { image: Camera, audio: Mic, location: MapPin, contacts: UserRound, document: FileText };
 
 function Preview({ c }: { c: ConversationSummary }) {
   if (c.handoff?.summary) return <p className="preview">{c.handoff.summary}</p>;
   const m = c.lastMessage;
   if (!m) return <p className="preview">Sin mensajes</p>;
   const who = m.author === 'customer' ? null : m.author === 'bot' ? 'Bot' : m.author === 'agent' ? 'Asesor' : null;
-  const body = m.type === 'image' ? `📷 ${m.body ?? 'Foto'}` : m.type === 'audio' ? `🎤 ${m.body ?? 'Nota de voz'}` : m.type === 'location' ? `📍 ${m.body ?? 'Ubicación'}` : (m.body ?? '');
+  const Kind = KIND_ICON[m.type];
+  const fallback = m.type === 'image' ? 'Foto' : m.type === 'audio' ? 'Nota de voz' : m.type === 'location' ? 'Ubicación' : m.type === 'contacts' ? 'Contacto' : '';
   return (
     <p className="preview">
       {who && <span className="who-tag">{who}: </span>}
-      {body}
+      {Kind && <Kind className="preview-icon" strokeWidth={2} aria-hidden="true" />}
+      {m.body ?? fallback}
     </p>
   );
 }
@@ -128,10 +134,11 @@ export function Inbox({ me, tick, selected, onSelect }: { me: Me; tick: number; 
         </div>
       )}
       {shown?.length === 0 && (
-        <motion.div className="list-empty" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
-          <span aria-hidden="true">{query ? '🔍' : EMPTY[view].icon}</span>
-          {query ? 'Ninguna conversación coincide.' : EMPTY[view].text}
-        </motion.div>
+        query ? (
+          <EmptyState icon={SearchX} title="Sin resultados" text="Ninguna conversación coincide con la búsqueda." />
+        ) : (
+          <EmptyState icon={EMPTY[view].icon} title={EMPTY[view].title} text={EMPTY[view].text} tone={EMPTY[view].tone} />
+        )
       )}
       <ul className="list">
         <AnimatePresence initial={true} mode="popLayout">

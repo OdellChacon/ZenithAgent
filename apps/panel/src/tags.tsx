@@ -6,6 +6,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import { AnimatePresence, motion } from 'motion/react';
 import { api, ApiError, TAG_COLORS, type TagCatalog, type TagColor, type TagDef } from './api';
 import { playSound } from './sounds';
+import { Check, Plus, X } from 'lucide-react';
 
 /** Igual que la API: minúsculas, sin # ni espacios de más. */
 export function normalizeTag(raw: string): string {
@@ -87,9 +88,7 @@ export function TagChip({
       {count !== undefined && <span className="tchip-count">{count}</span>}
       {onRemove && (
         <button type="button" aria-label={`Quitar etiqueta ${tag}`} onClick={onRemove}>
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-          </svg>
+          <X strokeWidth={2.4} aria-hidden="true" />
         </button>
       )}
     </span>
@@ -236,9 +235,7 @@ function TagPicker({ selected, onToggle, onClose }: { selected: string[]; onTogg
                   </span>
                   <span className="muted small">{t.count}</span>
                   <span className={`check ${on ? 'on' : ''}`} aria-hidden="true">
-                    <svg viewBox="0 0 16 16">
-                      <path d="M3.5 8.5l3 3 6-7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
+                    <Check strokeWidth={3} />
                   </span>
                 </button>
               );
@@ -345,9 +342,7 @@ export function TagEditor({
           })}
         </AnimatePresence>
         <button type="button" className="tag-add" aria-haspopup="listbox" aria-expanded={open} onClick={() => setOpen(!open)}>
-          <svg viewBox="0 0 16 16" aria-hidden="true">
-            <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-          </svg>
+          <Plus strokeWidth={2.4} aria-hidden="true" />
           {current.length ? 'Etiqueta' : 'Agregar etiqueta'}
         </button>
       </div>

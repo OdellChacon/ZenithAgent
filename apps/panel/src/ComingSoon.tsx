@@ -1,4 +1,6 @@
+import type React from 'react';
 import { motion } from 'motion/react';
+import { Check, Lock } from 'lucide-react';
 import { ChannelBadge } from './ui';
 
 type Step = { text: string; state: 'done' | 'todo' | 'blocked' };
@@ -60,7 +62,11 @@ const PLANS: Record<'facebook' | 'instagram' | 'tiktok', ChannelPlan> = {
   },
 };
 
-const MARK: Record<Step['state'], string> = { done: '✓', todo: '', blocked: '!' };
+const MARK: Record<Step['state'], React.ReactNode> = {
+  done: <Check strokeWidth={3} />,
+  todo: null,
+  blocked: <Lock strokeWidth={2.4} />,
+};
 
 export function ComingSoon({ which }: { which: keyof typeof PLANS }) {
   const p = PLANS[which];

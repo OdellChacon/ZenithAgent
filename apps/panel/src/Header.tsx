@@ -18,9 +18,9 @@ export const SECTION_PATHS: Record<Section, string> = {
   tiktok: '/tiktok',
 };
 
-const MAIN: { id: Section; label: string }[] = [
-  { id: 'inbox', label: 'Conversaciones' },
-  { id: 'contacts', label: 'Contactos' },
+const MAIN: { id: Section; label: string; icon: ReactNode }[] = [
+  { id: 'inbox', label: 'Conversaciones', icon: Icon.chats },
+  { id: 'contacts', label: 'Contactos', icon: Icon.contacts },
 ];
 
 const CHANNELS: { id: Section; label: string; channel: string; soon?: boolean }[] = [
@@ -189,6 +189,7 @@ export function Header({
       <nav className="sections" aria-label="Secciones">
         {MAIN.map((s) => (
           <NavLink key={s.id} id={s.id} active={section === s.id} onNavigate={onNavigate}>
+            <span className="nav-icon">{s.icon}</span>
             {s.label}
           </NavLink>
         ))}

@@ -4,7 +4,9 @@ import { TagChip, TagEditor, tagDef, tagLabel, useTagCatalog } from './tags';
 import { TagManager } from './TagManager';
 import { ago } from './time';
 import { motion, AnimatePresence } from 'motion/react';
+import { ContactRound, SearchX, UsersRound } from 'lucide-react';
 import { Avatar, Icon } from './ui';
+import { EmptyState } from './EmptyState';
 
 /** Señales que salen de los datos (no las escribe nadie): ayudan a priorizar. */
 function Signals({ c }: { c: ContactSummary }) {
@@ -111,10 +113,7 @@ export function Contacts({
                   ))}
               </div>
               <button type="button" className="btn ghost small tag-manage" onClick={() => setManaging(true)}>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M3 12V4h8l9 9-8 8-9-9Z" />
-                  <circle cx="7.5" cy="8.5" r="1.3" />
-                </svg>
+                {Icon.tags}
                 Gestionar etiquetas
               </button>
             </div>
@@ -129,10 +128,11 @@ export function Contacts({
           </div>
         )}
         {items?.length === 0 && (
-          <div className="list-empty">
-            <span aria-hidden="true">{debounced || tag ? '🔍' : '👥'}</span>
-            {debounced || tag ? 'Ningún contacto coincide.' : 'Todavía no hay contactos.'}
-          </div>
+          debounced || tag ? (
+            <EmptyState icon={SearchX} title="Sin resultados" text="Ningún contacto coincide con la búsqueda o la etiqueta." />
+          ) : (
+            <EmptyState icon={UsersRound} title="Sin contactos todavía" text="Cada cliente que escriba por WhatsApp aparecerá aquí." />
+          )
         )}
         <ul className="list">
           <AnimatePresence initial={true} mode="popLayout">
@@ -187,9 +187,13 @@ export function Contacts({
         />
       ) : (
         <div className="empty-pane">
-          <span className="empty-art" aria-hidden="true">{Icon.contacts}</span>
-          <p>Elige un contacto para ver su ficha.</p>
-          <p className="muted">Ponles etiquetas (por ejemplo “arquitecto” u “obra”) para encontrarlos y priorizarlos.</p>
+          <EmptyState
+            size="lg"
+            tone="accent"
+            icon={ContactRound}
+            title="Elige un contacto"
+            text="Ponles etiquetas (mayorista, arquitecto, obra…) para encontrarlos y priorizarlos."
+          />
         </div>
       )}
     </div>
