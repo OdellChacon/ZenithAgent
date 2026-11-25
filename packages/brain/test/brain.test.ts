@@ -275,11 +275,27 @@ describe('runBrainTurn', () => {
     const res = await runBrainTurn({ ...base, llm, messages: customer('¿Tienen roble?'), tools: { catalog: cat, wastePercent: null } });
     expect(res.outcome).toBe('replied');
     expect(cat.search).toHaveBeenCalledTimes(2);
-    expect(cat.search.mock.calls[1]?.[0]).toMatchObject({ text: null, surface: 'piso' });
+    expect(cat.search.mock.calls[1]?.[0]).toMatchObject({ text: null, category: null, surface: 'piso' });
     const result = JSON.stringify(calls[1]?.messages.at(-1));
     expect(result).toContain('sugerencias');
     expect(result).toContain('Aconna Beige');
     expect(result).toContain('No digas que no hay stock');
+  });
+
+  it('si la categoría no trae nada, busca lo mismo en todo el catálogo', async () => {
+    const { llm, calls } = scriptedLlm([
+      tool('buscar_productos', { texto: 'gris', categoria: 'porcelanato', superficie: 'piso', uso: 'exterior', limite: 3 }),
+      text('Para la terraza le sirve el Aconna Beige.'),
+    ]);
+    const cat = catalog();
+    cat.search.mockImplementationOnce(async () => []);
+    const res = await runBrainTurn({ ...base, llm, messages: customer('Porcelanato gris para terraza'), tools: { catalog: cat, wastePercent: null } });
+    expect(res.outcome).toBe('replied');
+    expect(cat.search).toHaveBeenCalledTimes(2);
+    expect(cat.search.mock.calls[1]?.[0]).toMatchObject({ text: 'gris', category: null, surface: 'piso', usage: 'exterior' });
+    const result = JSON.stringify(calls[1]?.messages.at(-1));
+    expect(result).toContain('otras categorías');
+    expect(result).toContain('Aconna Beige');
   });
 
   it('envía fotos solo de productos reales con foto, máximo 3 por mensaje', async () => {

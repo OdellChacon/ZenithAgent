@@ -251,10 +251,23 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
       const rows = await ctx.catalog.search(filters);
       if (rows.length) return json({ resultados: rows.length, productos: rows.map(presentProduct) });
 
+      // La categoría que dice el cliente no siempre es la del catálogo ("porcelanato" puede estar
+      // en otra categoría, o la categoría tener productos mal puestos): se busca lo mismo sin ella.
+      if (filters.category) {
+        const anyCategory = await ctx.catalog.search({ ...filters, category: null });
+        if (anyCategory.length) {
+          return json({
+            resultados: anyCategory.length,
+            nota: `En la categoría "${filters.category}" no hubo coincidencias; estos productos de otras categorías sí coinciden con lo que busca el cliente.`,
+            productos: anyCategory.map(presentProduct),
+          });
+        }
+      }
+
       // Sin coincidencias exactas: se aflojan los filtros una vez, para que el modelo tenga
       // alternativas reales y no repita búsquedas (cada vuelta cuesta tiempo).
       const relaxed = filters.text
-        ? { ...filters, text: null }
+        ? { ...filters, text: null, category: null }
         : { ...filters, category: null, usage: null };
       const similar = await ctx.catalog.search(relaxed);
       return json({
