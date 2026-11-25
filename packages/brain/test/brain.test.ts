@@ -282,6 +282,32 @@ describe('runBrainTurn', () => {
     expect(result).toContain('No digas que no hay stock');
   });
 
+  it('después de buscar, el modelo ve las fotos del catálogo, con tope por turno', async () => {
+    const rows = ['a', 'b', 'c'].map((x, i) => ({ ...PRODUCT, id: `${x.repeat(8)}-1111-4111-8111-111111111111`, name: `Madera ${i + 1}`, has_photo: i !== 1 }));
+    const cat = {
+      ...catalog(rows),
+      photos: vi.fn(async (ids: string[]) => new Map(ids.map((id) => [id, { mediaType: 'image/jpeg' as const, base64: `FOTO-${id.slice(0, 1)}` }]))),
+    };
+    const { llm, calls } = scriptedLlm([
+      tool('buscar_productos', { texto: 'madera', categoria: null, superficie: null, uso: null, limite: 3 }),
+      tool('buscar_productos', { texto: 'madera clara', categoria: null, superficie: null, uso: null, limite: 3 }),
+      text('Le muestro la Madera 1.'),
+    ]);
+    const budget = { perSearch: 3, remaining: 3 };
+    const res = await runBrainTurn({ ...base, llm, messages: customer('Algo tipo madera'), tools: { catalog: cat, wastePercent: null, catalogPhotos: budget } });
+    expect(res.outcome).toBe('replied');
+    // Solo los que tienen foto: Madera 1 y Madera 3.
+    expect(cat.photos).toHaveBeenNthCalledWith(1, [rows[0]!.id, rows[2]!.id]);
+    const first = JSON.stringify(calls[1]!.messages.at(-1));
+    expect(first).toContain('[Foto del catálogo: Madera 1]');
+    expect(first).toContain('[Foto del catálogo: Madera 3]');
+    expect(first).toContain('"data":"FOTO-a"');
+    expect(first).not.toContain('Madera 2]');
+    // Quedaba 1 foto en el turno: la segunda búsqueda trae solo una.
+    expect(cat.photos).toHaveBeenNthCalledWith(2, [rows[0]!.id]);
+    expect(budget.remaining).toBe(0);
+  });
+
   it('si la categoría no trae nada, busca lo mismo en todo el catálogo', async () => {
     const { llm, calls } = scriptedLlm([
       tool('buscar_productos', { texto: 'gris', categoria: 'porcelanato', superficie: 'piso', uso: 'exterior', limite: 3 }),

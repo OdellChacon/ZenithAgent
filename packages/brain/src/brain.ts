@@ -3,6 +3,9 @@ import type { BetaMessageParam, LlmClient } from './llm.js';
 import { TOOL_DEFINITIONS, runTool, type HandoffReason, type ToolContext, type ToolEffects } from './tools.js';
 import { checkReply, promisesHandoff } from './validate.js';
 
+/** Etiqueta de cada foto del catálogo que se le muestra al modelo tras una búsqueda. */
+export const CATALOG_PHOTO_PREFIX = '[Foto del catálogo: ';
+
 export interface BrainConfig {
   model: string;
   effort: 'low' | 'medium' | 'high';
@@ -112,6 +115,8 @@ export async function runBrainTurn(params: {
 
     if (response.stop_reason === 'tool_use' && toolUses.length) {
       const results: Anthropic.Beta.BetaToolResultBlockParam[] = [];
+      // Fotos del catálogo que trajeron las búsquedas: van después de los resultados, en el mismo turno.
+      const photoBlocks: (Anthropic.Beta.BetaTextBlockParam | Anthropic.Beta.BetaImageBlockParam)[] = [];
       for (const call of toolUses) {
         let outcome;
         try {
@@ -121,9 +126,13 @@ export async function runBrainTurn(params: {
           outcome = { content: JSON.stringify({ error: 'Error interno de la herramienta' }), isError: true };
         }
         results.push({ type: 'tool_result', tool_use_id: call.id, content: outcome.content, is_error: outcome.isError });
+        for (const img of 'images' in outcome ? (outcome.images ?? []) : []) {
+          photoBlocks.push({ type: 'text', text: `${CATALOG_PHOTO_PREFIX}${img.label}]` });
+          photoBlocks.push({ type: 'image', source: { type: 'base64', media_type: img.photo.mediaType, data: img.photo.base64 } });
+        }
       }
       // Todos los resultados van juntos en un único mensaje.
-      messages.push({ role: 'user', content: results });
+      messages.push({ role: 'user', content: [...results, ...photoBlocks] });
       continue;
     }
 

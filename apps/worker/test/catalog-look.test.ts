@@ -4,7 +4,7 @@ import sharp from 'sharp';
 import { withTenant, type Pool } from '@zenith/db';
 import { normalizeImage, syncProducts, type ProductInput } from '@zenith/catalog';
 import { describeCatalog, parseLook } from '../src/catalog-look.js';
-import { createCatalogReader, termPattern } from '../src/catalog-reader.js';
+import { categoryPattern, createCatalogReader, termPattern } from '../src/catalog-reader.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 import { scriptedLlm, text } from '../../../packages/brain/test/fake-llm.js';
 
@@ -85,6 +85,19 @@ describe.skipIf(!hasDb)('descripción visual del catálogo', () => {
     const again = await describeCatalog({ pool: app, tenantId: t.tenantId, llm: scriptedLlm([]).llm, model: 'modelo-prueba' });
     expect(again.described).toBe(0);
   });
+
+  it('entrega la primera foto de cada producto achicada a JPEG para el modelo', async () => {
+    const reader = createCatalogReader(app, t.tenantId);
+    const [archi] = await reader.search({ text: 'archi', category: null, surface: null, usage: null, limit: 1 });
+    // Un id sin foto (o de otro negocio) simplemente no aparece.
+    const photos = await reader.photos!([archi!.id, '00000000-0000-4000-8000-000000000000']);
+    expect([...photos.keys()]).toEqual([archi!.id]);
+    const jpeg = Buffer.from(photos.get(archi!.id)!.base64, 'base64');
+    expect(photos.get(archi!.id)!.mediaType).toBe('image/jpeg');
+    expect(jpeg[0]).toBe(0xff);
+    expect(jpeg[1]).toBe(0xd8);
+    expect(await reader.photos!([])).toEqual(new Map());
+  });
 });
 
 describe('termPattern', () => {
@@ -94,6 +107,15 @@ describe('termPattern', () => {
     expect(termPattern('blanca')).toBe('blanc|bianc|white');
     expect(termPattern('gris')).toBe('gris|grigi|grey|gray');
     expect(termPattern('piso')).toBe('piso');
+  });
+});
+
+describe('categoryPattern', () => {
+  it('"cerámica" o "porcelanato" buscan en todos los revestimientos', () => {
+    for (const t of ['ceramica', 'porcelanato', 'ceranatto', 'revestimiento', 'piso']) expect(categoryPattern(t)).toBe('ceramic|ceranatt|porcelanat');
+    expect(categoryPattern('sanitarios')).toBe('sanitarios');
+    expect(categoryPattern('lavamano')).toBe('lavaman');
+    expect(categoryPattern(null)).toBeNull();
   });
 });
 
@@ -116,6 +138,17 @@ describe.skipIf(!hasDb)('orden de la búsqueda por relevancia', () => {
     await add('2', 'Brooklyn', ['gris oscuro', 'óxido', 'negro'], {});
     await add('3', 'Notte Nero', ['negro', 'gris'], { color: 'Negro' });
     await add('4', 'Blanco Sal', ['blanco'], {});
+    // Madera clara en otra categoría (como los Ceranattos del catálogo real) y un gris claro que no es madera.
+    await owner.query(
+      `INSERT INTO products (tenant_id, source, external_id, name, category, category_name, attributes, look)
+       VALUES ($1, 'prueba', '5', 'Cedrus Dual', 'ceranattos', 'Ceranattos', '{}', $2),
+              ($1, 'prueba', '6', 'Itria Clara', 'ceramicas', 'Cerámicas', '{}', $3)`,
+      [
+        t.tenantId,
+        { aspecto: ['madera', 'natural'], colores: ['beige', 'marrón claro'], patron: 'listones', descripcion: 'Imita la madera natural.' },
+        { aspecto: ['cemento'], colores: ['gris claro'], patron: null, descripcion: 'Acabado tipo cemento.' },
+      ],
+    );
   });
 
   afterAll(async () => {
@@ -128,8 +161,13 @@ describe.skipIf(!hasDb)('orden de la búsqueda por relevancia', () => {
     const reader = createCatalogReader(app, t.tenantId);
     const search = (q: string, limit = 5) => reader.search({ text: q, category: null, surface: null, usage: null, limit });
     // "cerámica" coincide con todas: las que además son negras van primero.
-    expect((await search('cerámica negra')).map((p) => p.name)).toEqual(['Notte Nero', 'Brooklyn', 'Adrisa Dual', 'Blanco Sal']);
+    expect((await search('cerámica negra')).map((p) => p.name).slice(0, 3)).toEqual(['Notte Nero', 'Brooklyn', 'Adrisa Dual']);
     expect((await search('negro', 2)).map((p) => p.name)).toEqual(['Notte Nero', 'Brooklyn']);
     expect((await search('blancas')).map((p) => p.name)).toEqual(['Blanco Sal']);
+    // Cumplir las dos palabras ("madera" y "clara") pesa más que coincidir fuerte en una sola.
+    expect((await search('madera clara'))[0]?.name).toBe('Cedrus Dual');
+    // "cerámica" como categoría incluye los Ceranattos.
+    const tiles = await reader.search({ text: 'madera', category: 'cerámica', surface: null, usage: null, limit: 5 });
+    expect(tiles.map((p) => p.name)).toContain('Cedrus Dual');
   });
 });

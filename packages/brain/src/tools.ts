@@ -9,6 +9,13 @@ export type HandoffReason = (typeof HANDOFF_REASONS)[number];
 export interface CatalogReader {
   search(filters: ProductSearch): Promise<ProductRow[]>;
   get(productId: string): Promise<ProductRow | null>;
+  /** Primera foto de cada producto, achicada para que el modelo la vea (si el lector lo permite). */
+  photos?(productIds: string[]): Promise<Map<string, CatalogPhoto>>;
+}
+
+export interface CatalogPhoto {
+  mediaType: 'image/jpeg' | 'image/png';
+  base64: string;
 }
 
 /** Descripción visual de un producto hecha por el modelo de visión a partir de su foto. */
@@ -54,6 +61,11 @@ export interface ToolContext {
   wastePercent: number | null;
   /** El negocio cargó la foto de su fachada (se envía con la dirección). */
   hasStorefrontPhoto?: boolean;
+  /**
+   * Fotos del catálogo que el modelo ve junto a los resultados de la búsqueda, para comparar
+   * imagen con imagen: `perSearch` por búsqueda y `remaining` en todo el turno (se va descontando).
+   */
+  catalogPhotos?: { perSearch: number; remaining: number };
 }
 
 /** Lo que las herramientas piden al sistema además de responder (se aplica al guardar). */
@@ -197,6 +209,28 @@ const handoffInput = z.object({
 export interface ToolOutcome {
   content: string;
   isError: boolean;
+  /** Fotos de productos para que el modelo las vea después del resultado. */
+  images?: { label: string; photo: CatalogPhoto }[];
+}
+
+/** Adjunta al resultado las fotos de los primeros productos con foto, dentro del límite del turno. */
+async function withPhotos(outcome: ToolOutcome, rows: ProductRow[], ctx: ToolContext): Promise<ToolOutcome> {
+  const budget = ctx.catalogPhotos;
+  if (!budget || !ctx.catalog.photos || budget.remaining <= 0) return outcome;
+  const pick = rows.filter((r) => r.has_photo).slice(0, Math.min(budget.perSearch, budget.remaining));
+  if (!pick.length) return outcome;
+  let photos: Map<string, CatalogPhoto>;
+  try {
+    photos = await ctx.catalog.photos(pick.map((r) => r.id));
+  } catch {
+    return outcome; // sin fotos el resultado sigue sirviendo
+  }
+  const images = pick.flatMap((r) => {
+    const photo = photos.get(r.id);
+    return photo ? [{ label: r.name, photo }] : [];
+  });
+  budget.remaining -= images.length;
+  return images.length ? { ...outcome, images } : outcome;
 }
 
 const json = (value: unknown): ToolOutcome => ({ content: JSON.stringify(value), isError: false });
@@ -250,18 +284,18 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         limit: Math.min(Math.max(limite, 1), 8),
       };
       const rows = await ctx.catalog.search(filters);
-      if (rows.length) return json({ resultados: rows.length, productos: rows.map(presentProduct) });
+      if (rows.length) return withPhotos(json({ resultados: rows.length, productos: rows.map(presentProduct) }), rows, ctx);
 
       // La categoría que dice el cliente no siempre es la del catálogo ("porcelanato" puede estar
       // en otra categoría, o la categoría tener productos mal puestos): se busca lo mismo sin ella.
       if (filters.category) {
         const anyCategory = await ctx.catalog.search({ ...filters, category: null });
         if (anyCategory.length) {
-          return json({
+          return withPhotos(json({
             resultados: anyCategory.length,
             nota: `En la categoría "${filters.category}" no hubo coincidencias; estos productos de otras categorías sí coinciden con lo que busca el cliente.`,
             productos: anyCategory.map(presentProduct),
-          });
+          }), anyCategory, ctx);
         }
       }
 
@@ -271,13 +305,13 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         ? { ...filters, text: null, category: null }
         : { ...filters, category: null, usage: null };
       const similar = await ctx.catalog.search(relaxed);
-      return json({
+      return withPhotos(json({
         resultados: 0,
         nota:
           'No hubo coincidencias exactas. Abajo van los productos más parecidos del catálogo: ofréceselos al cliente. ' +
           'No digas que no hay stock (no conoces el inventario) y no repitas la búsqueda; si nada encaja, ofrece conseguirlo bajo pedido con un asesor.',
         sugerencias: similar.map(presentProduct),
-      });
+      }), similar, ctx);
     }
 
     case 'calcular_cajas': {
