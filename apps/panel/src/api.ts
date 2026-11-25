@@ -1,4 +1,22 @@
 import type { SignupConfig, SignupResult } from './signup';
+export const TAG_COLORS = ['gray', 'red', 'orange', 'amber', 'lime', 'green', 'teal', 'sky', 'blue', 'violet', 'pink'] as const;
+export type TagColor = (typeof TAG_COLORS)[number];
+export interface TagDef {
+  tag: string;
+  count: number;
+  color: TagColor;
+  group: string | null;
+  description: string | null;
+}
+export interface TagGroup {
+  name: string;
+  exclusive: boolean;
+}
+export interface TagCatalog {
+  items: TagDef[];
+  groups: TagGroup[];
+  canManage: boolean;
+}
 export type View = 'pending' | 'mine' | 'all';
 export type WindowState = 'FREE' | 'TEMPLATE_ONLY' | 'HUMAN_AGENT_ONLY' | 'CLOSED';
 
@@ -109,7 +127,7 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(method: 'GET' | 'POST' | 'PATCH', path: string, body?: unknown): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`/api/v1${path}`, {
@@ -151,8 +169,17 @@ export const api = {
   signupConfig: () => request<SignupConfig>('GET', '/channels/whatsapp/signup'),
   connectWhatsApp: (signup: SignupResult) =>
     request<{ ok: true; name: string | null; coexistence: boolean; warnings: string[] }>('POST', '/channels/whatsapp/connect', signup),
-  contactTags: () => request<{ items: { tag: string; count: number }[] }>('GET', '/contact-tags'),
-  updateContact: (id: string, patch: ContactPatch) => request<{ ok: true }>('PATCH', `/contacts/${encodeURIComponent(id)}`, patch),
+  contactTags: () => request<TagCatalog>('GET', '/contact-tags'),
+  updateContact: (id: string, patch: ContactPatch) => request<{ ok: true; tags?: string[] }>('PATCH', `/contacts/${encodeURIComponent(id)}`, patch),
+  createTag: (tag: { name: string; color?: TagColor; group?: string | null; description?: string | null }) =>
+    request<{ ok: true; name: string }>('POST', '/contact-tags', tag),
+  updateTag: (name: string, patch: { name?: string; color?: TagColor; group?: string | null; description?: string | null }) =>
+    request<{ ok: true; merged: boolean }>('PATCH', `/contact-tags/${encodeURIComponent(name)}`, patch),
+  deleteTag: (name: string) => request<{ ok: true; contacts: number }>('DELETE', `/contact-tags/${encodeURIComponent(name)}`),
+  createTagGroup: (group: { name: string; exclusive?: boolean }) => request<{ ok: true }>('POST', '/contact-tag-groups', group),
+  updateTagGroup: (name: string, patch: { name?: string; exclusive?: boolean }) =>
+    request<{ ok: true }>('PATCH', `/contact-tag-groups/${encodeURIComponent(name)}`, patch),
+  deleteTagGroup: (name: string) => request<{ ok: true }>('DELETE', `/contact-tag-groups/${encodeURIComponent(name)}`),
 };
 
 export const REASON_LABELS: Record<string, string> = {

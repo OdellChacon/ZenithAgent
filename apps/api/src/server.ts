@@ -683,16 +683,263 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return { ok: true, channelId: accountId, name, coexistence: info.isOnBizApp, warnings };
   });
 
+  // ---------------------------------------------------------------- etiquetas de contactos
+
+  const TAG_COLORS = ['gray', 'red', 'orange', 'amber', 'lime', 'green', 'teal', 'sky', 'blue', 'violet', 'pink'] as const;
+  const groupNameSchema = z
+    .string()
+    .transform((g) => g.trim().replace(/\s+/g, ' '))
+    .pipe(z.string().min(1, 'El grupo necesita un nombre').max(30, 'El nombre del grupo tiene como máximo 30 caracteres'));
+  const descriptionSchema = z
+    .string()
+    .max(200, 'La descripción tiene como máximo 200 caracteres')
+    .transform((d) => d.trim() || null)
+    .nullable();
+  const tagCreateSchema = z
+    .object({
+      name: tagSchema,
+      color: z.enum(TAG_COLORS).optional(),
+      group: groupNameSchema.nullable().optional(),
+      description: descriptionSchema.optional(),
+    })
+    .strict();
+  const tagPatchSchema = z
+    .object({
+      name: tagSchema.optional(),
+      color: z.enum(TAG_COLORS).optional(),
+      group: groupNameSchema.nullable().optional(),
+      description: descriptionSchema.optional(),
+    })
+    .strict()
+    .refine((v) => Object.keys(v).length > 0, 'No hay cambios');
+  const groupCreateSchema = z.object({ name: groupNameSchema, exclusive: z.boolean().optional() }).strict();
+  const groupPatchSchema = z
+    .object({ name: groupNameSchema.optional(), exclusive: z.boolean().optional() })
+    .strict()
+    .refine((v) => Object.keys(v).length > 0, 'No hay cambios');
+
+  /** Color estable para una etiqueta nueva sin color elegido. */
+  const autoColor = (name: string) => {
+    let h = 0;
+    for (const ch of name) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    return TAG_COLORS[1 + (h % (TAG_COLORS.length - 1))]!;
+  };
+
+  const canManageTags = (req: FastifyRequest) => user(req).role !== 'agent';
+  const tagParam = (raw: string) => tagSchema.safeParse(raw);
+  const pgCode = (e: unknown) => (e as { code?: string })?.code;
+
   app.get('/api/v1/contact-tags', async (req) => {
-    const rows = await tenant(req, async (c) =>
-      (
-        await c.query<{ tag: string; count: number }>(
-          `SELECT tg AS tag, count(*)::int AS count FROM contacts, unnest(tags) tg GROUP BY tg ORDER BY count(*) DESC, tg LIMIT 100`,
-        )
-      ).rows,
-    );
-    return { items: rows };
+    return tenant(req, async (c) => {
+      const tags = await c.query<{ tag: string; count: number; color: string | null; group_name: string | null; description: string | null }>(
+        `WITH used AS (SELECT tg, count(*)::int AS n FROM contacts, unnest(tags) tg GROUP BY tg)
+         SELECT coalesce(d.name, u.tg) AS tag, coalesce(u.n, 0) AS count, d.color, d.group_name, d.description
+           FROM contact_tag_defs d
+           FULL JOIN used u ON u.tg = d.name
+           LEFT JOIN contact_tag_groups g ON g.tenant_id = d.tenant_id AND g.name = d.group_name
+          ORDER BY g.position NULLS LAST, d.group_name NULLS LAST, d.position, coalesce(u.n, 0) DESC, 1
+          LIMIT 300`,
+      );
+      const groups = await c.query<{ name: string; exclusive: boolean }>(
+        'SELECT name, exclusive FROM contact_tag_groups ORDER BY position, created_at, name',
+      );
+      return {
+        items: tags.rows.map((t) => ({
+          tag: t.tag,
+          count: t.count,
+          color: t.color ?? autoColor(t.tag),
+          group: t.group_name,
+          description: t.description,
+        })),
+        groups: groups.rows,
+        canManage: canManageTags(req),
+      };
+    });
   });
+
+  app.post('/api/v1/contact-tags', async (req, reply) => {
+    const parsed = tagCreateSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const v = parsed.data;
+    try {
+      await tenant(req, (c) =>
+        c.query(
+          `INSERT INTO contact_tag_defs (tenant_id, name, color, group_name, description, position)
+           VALUES (app_current_tenant(), $1, $2, $3, $4, (SELECT coalesce(max(position), 0) + 1 FROM contact_tag_defs))`,
+          [v.name, v.color ?? autoColor(v.name), v.group ?? null, v.description ?? null],
+        ),
+      );
+    } catch (e) {
+      if (pgCode(e) === '23505') return err(reply, 409, 'conflict', 'Ya existe una etiqueta con ese nombre');
+      if (pgCode(e) === '23503') return err(reply, 400, 'invalid_input', 'Ese grupo no existe');
+      throw e;
+    }
+    return reply.code(201).send({ ok: true, name: v.name });
+  });
+
+  app.patch<{ Params: { name: string } }>('/api/v1/contact-tags/:name', async (req, reply) => {
+    if (!canManageTags(req)) return err(reply, 403, 'forbidden', 'Solo un administrador puede editar etiquetas');
+    const current = tagParam(req.params.name);
+    if (!current.success) return err(reply, 404, 'not_found', 'Etiqueta no encontrada');
+    const parsed = tagPatchSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const from = current.data;
+    const v = parsed.data;
+    let result: 'ok' | 'not_found' | 'merged';
+    try {
+      result = await tenant(req, async (c) => {
+        // Las etiquetas que solo existían en contactos (sin definición) se registran al editarlas.
+        await c.query(
+          `INSERT INTO contact_tag_defs (tenant_id, name, color)
+           SELECT app_current_tenant(), $1, $2 WHERE EXISTS (SELECT 1 FROM contacts WHERE $1 = ANY (tags))
+           ON CONFLICT DO NOTHING`,
+          [from, autoColor(from)],
+        );
+        const exists = await c.query('SELECT 1 FROM contact_tag_defs WHERE name = $1', [from]);
+        if (!exists.rowCount) return 'not_found';
+        let target = from;
+        let merged = false;
+        if (v.name && v.name !== from) {
+          target = v.name;
+          // Renombrar a una etiqueta que ya existe = fusionarlas: los contactos quedan con la otra.
+          merged = !!(await c.query('SELECT 1 FROM contact_tag_defs WHERE name = $1', [target])).rowCount;
+          await c.query(
+            `UPDATE contacts
+                SET tags = ARRAY(SELECT t FROM unnest(array_replace(tags, $1, $2)) WITH ORDINALITY AS x(t, i) GROUP BY t ORDER BY min(i)),
+                    updated_at = now()
+              WHERE $1 = ANY (tags)`,
+            [from, target],
+          );
+          if (merged) await c.query('DELETE FROM contact_tag_defs WHERE name = $1', [from]);
+          else await c.query('UPDATE contact_tag_defs SET name = $2 WHERE name = $1', [from, target]);
+        }
+        await c.query(
+          `UPDATE contact_tag_defs SET
+              color = CASE WHEN $2 THEN $3 ELSE color END,
+              group_name = CASE WHEN $4 THEN $5 ELSE group_name END,
+              description = CASE WHEN $6 THEN $7 ELSE description END
+            WHERE name = $1`,
+          [
+            target,
+            v.color !== undefined && !merged,
+            v.color ?? null,
+            v.group !== undefined && !merged,
+            v.group ?? null,
+            v.description !== undefined && !merged,
+            v.description ?? null,
+          ],
+        );
+        return merged ? 'merged' : 'ok';
+      });
+    } catch (e) {
+      if (pgCode(e) === '23503') return err(reply, 400, 'invalid_input', 'Ese grupo no existe');
+      throw e;
+    }
+    if (result === 'not_found') return err(reply, 404, 'not_found', 'Etiqueta no encontrada');
+    return { ok: true, merged: result === 'merged' };
+  });
+
+  app.delete<{ Params: { name: string } }>('/api/v1/contact-tags/:name', async (req, reply) => {
+    if (!canManageTags(req)) return err(reply, 403, 'forbidden', 'Solo un administrador puede borrar etiquetas');
+    const name = tagParam(req.params.name);
+    if (!name.success) return err(reply, 404, 'not_found', 'Etiqueta no encontrada');
+    const removed = await tenant(req, async (c) => {
+      const contacts = await c.query(
+        'UPDATE contacts SET tags = array_remove(tags, $1), updated_at = now() WHERE $1 = ANY (tags)',
+        [name.data],
+      );
+      const def = await c.query('DELETE FROM contact_tag_defs WHERE name = $1', [name.data]);
+      return { contacts: contacts.rowCount ?? 0, found: (def.rowCount ?? 0) + (contacts.rowCount ?? 0) > 0 };
+    });
+    if (!removed.found) return err(reply, 404, 'not_found', 'Etiqueta no encontrada');
+    return { ok: true, contacts: removed.contacts };
+  });
+
+  app.post('/api/v1/contact-tag-groups', async (req, reply) => {
+    if (!canManageTags(req)) return err(reply, 403, 'forbidden', 'Solo un administrador puede crear grupos');
+    const parsed = groupCreateSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    try {
+      await tenant(req, (c) =>
+        c.query(
+          `INSERT INTO contact_tag_groups (tenant_id, name, exclusive, position)
+           VALUES (app_current_tenant(), $1, $2, (SELECT coalesce(max(position), 0) + 1 FROM contact_tag_groups))`,
+          [parsed.data.name, parsed.data.exclusive ?? false],
+        ),
+      );
+    } catch (e) {
+      if (pgCode(e) === '23505') return err(reply, 409, 'conflict', 'Ya existe un grupo con ese nombre');
+      throw e;
+    }
+    return reply.code(201).send({ ok: true });
+  });
+
+  app.patch<{ Params: { name: string } }>('/api/v1/contact-tag-groups/:name', async (req, reply) => {
+    if (!canManageTags(req)) return err(reply, 403, 'forbidden', 'Solo un administrador puede editar grupos');
+    const parsed = groupPatchSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const v = parsed.data;
+    let count: number;
+    try {
+      count = await tenant(req, async (c) => {
+        const r = await c.query(
+          `UPDATE contact_tag_groups SET
+              name = CASE WHEN $2 THEN $3 ELSE name END,
+              exclusive = CASE WHEN $4 THEN $5 ELSE exclusive END
+            WHERE name = $1`,
+          [req.params.name, v.name !== undefined, v.name ?? null, v.exclusive !== undefined, v.exclusive ?? false],
+        );
+        return r.rowCount ?? 0;
+      });
+    } catch (e) {
+      if (pgCode(e) === '23505') return err(reply, 409, 'conflict', 'Ya existe un grupo con ese nombre');
+      throw e;
+    }
+    if (!count) return err(reply, 404, 'not_found', 'Grupo no encontrado');
+    return { ok: true };
+  });
+
+  app.delete<{ Params: { name: string } }>('/api/v1/contact-tag-groups/:name', async (req, reply) => {
+    if (!canManageTags(req)) return err(reply, 403, 'forbidden', 'Solo un administrador puede borrar grupos');
+    // Las etiquetas del grupo se conservan, sin grupo.
+    const count = await tenant(req, async (c) => (await c.query('DELETE FROM contact_tag_groups WHERE name = $1', [req.params.name])).rowCount ?? 0);
+    if (!count) return err(reply, 404, 'not_found', 'Grupo no encontrado');
+    return { ok: true };
+  });
+
+  /**
+   * Prepara las etiquetas de un contacto antes de guardarlas: registra las nuevas y, en los
+   * grupos de una sola opción, deja solo la última que se agregó (cambiar de "potencial" a
+   * "cliente" reemplaza en vez de acumular).
+   */
+  async function resolveContactTags(c: PoolClient, tags: string[]): Promise<string[]> {
+    if (!tags.length) return tags;
+    await c.query(
+      `INSERT INTO contact_tag_defs (tenant_id, name, color, position)
+       SELECT app_current_tenant(), t.name, t.color, (SELECT coalesce(max(position), 0) FROM contact_tag_defs) + t.i
+         FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS t(name, color, i)
+       ON CONFLICT DO NOTHING`,
+      [tags, tags.map(autoColor)],
+    );
+    const { rows } = await c.query<{ name: string; group_name: string }>(
+      `SELECT d.name, d.group_name FROM contact_tag_defs d
+         JOIN contact_tag_groups g ON g.tenant_id = d.tenant_id AND g.name = d.group_name
+        WHERE g.exclusive AND d.name = ANY ($1)`,
+      [tags],
+    );
+    const groupOf = new Map(rows.map((r) => [r.name, r.group_name]));
+    const taken = new Set<string>();
+    const keep: string[] = [];
+    for (const t of [...tags].reverse()) {
+      const g = groupOf.get(t);
+      if (g) {
+        if (taken.has(g)) continue;
+        taken.add(g);
+      }
+      keep.unshift(t);
+    }
+    return keep;
+  }
 
   app.get<{ Params: { id: string } }>('/api/v1/contacts/:id', async (req, reply) => {
     if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Contacto no encontrado');
@@ -763,6 +1010,9 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
     const v = parsed.data;
     const updated = await tenant(req, async (c) => {
+      // Primero se confirma que el contacto es de este negocio: si no, no se registra ninguna etiqueta.
+      if (!(await c.query('SELECT 1 FROM contacts WHERE id = $1', [req.params.id])).rowCount) return null;
+      const tags = v.tags !== undefined ? await resolveContactTags(c, v.tags) : [];
       const { rows } = await c.query<{ id: string; conversation_id: string | null }>(
         `UPDATE contacts SET
             name = CASE WHEN $2 THEN $3 ELSE name END,
@@ -777,20 +1027,20 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           v.name !== undefined,
           v.name ?? null,
           v.tags !== undefined,
-          v.tags ?? [],
+          tags,
           v.notes !== undefined,
           v.notes ?? null,
           v.optOutFollowups !== undefined,
           v.optOutFollowups ?? false,
         ],
       );
-      return rows[0] ?? null;
+      return rows[0] ? { ...rows[0], tags } : null;
     });
     if (!updated) return err(reply, 404, 'not_found', 'Contacto no encontrado');
     if (updated.conversation_id) {
       await deps.publish(user(req).tenantId, { type: 'conversation.updated', conversationId: updated.conversation_id });
     }
-    return { ok: true };
+    return v.tags !== undefined ? { ok: true, tags: updated.tags } : { ok: true };
   });
 
   // ---------------------------------------------------------------- fotos de productos

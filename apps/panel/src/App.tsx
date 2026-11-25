@@ -1,13 +1,17 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { api, ApiError, type Me } from './api';
 import { alertHandoff, setUnseen } from './alerts';
 import { Login } from './Login';
 import { Inbox } from './Inbox';
 import { Conversation } from './Conversation';
 import { Contacts } from './Contacts';
-import { Header, type Section } from './Header';
+import { Header, SECTION_PATHS, type Section } from './Header';
 import { ChannelAlerts } from './ChannelAlerts';
 import { Channels } from './Channels';
+import { ComingSoon } from './ComingSoon';
+import { unlockAudioOnGesture } from './sounds';
+import { Icon } from './ui';
 
 interface Route {
   section: Section;
@@ -21,13 +25,22 @@ function parsePath(path: string): Route {
   const contact = /^\/contactos(?:\/([0-9a-f-]{36}))?\/?$/i.exec(path);
   if (contact) return { section: 'contacts', id: contact[1] ?? null };
   if (/^\/whatsapp\/?$/i.test(path)) return { section: 'channels', id: null };
+  const soon = /^\/(facebook|instagram|tiktok)\/?$/i.exec(path);
+  if (soon) return { section: soon[1]!.toLowerCase() as Section, id: null };
   return { section: 'inbox', id: null };
 }
 
 function toPath(route: Route): string {
-  if (route.section === 'channels') return '/whatsapp';
   if (route.section === 'contacts') return route.id ? `/contactos/${route.id}` : '/contactos';
-  return route.id ? `/conversaciones/${route.id}` : '/';
+  if (route.section === 'inbox') return route.id ? `/conversaciones/${route.id}` : '/';
+  return SECTION_PATHS[route.section];
+}
+
+/** Cambia de vista con la View Transitions API cuando el navegador la tiene. */
+function withTransition(update: () => void) {
+  const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown };
+  if (doc.startViewTransition && !matchMedia('(prefers-reduced-motion: reduce)').matches) doc.startViewTransition(() => flushSync(update));
+  else update();
 }
 
 export function App() {
@@ -49,10 +62,17 @@ export function App() {
   useEffect(() => void loadMe(), [loadMe]);
 
   const go = useCallback((next: Route) => {
-    setRoute(next);
+    const sectionChanged = next.section !== routeRef.current.section;
+    const apply = () => setRoute(next);
+    if (sectionChanged) withTransition(apply);
+    else apply();
     history.pushState(null, '', toPath(next));
     setUnseen(0);
   }, []);
+  const routeRef = useRef(route);
+  routeRef.current = route;
+
+  useEffect(() => unlockAudioOnGesture(), []);
   const open = useCallback((id: string | null) => go({ section: 'inbox', id }), [go]);
 
   useEffect(() => {
@@ -100,7 +120,9 @@ export function App() {
     <div className="app">
       <Header me={me} live={live} section={route.section} onNavigate={(section) => go({ section, id: null })} onLogout={logout} />
       <ChannelAlerts tick={tick} />
-      {route.section === 'channels' ? (
+      {route.section === 'facebook' || route.section === 'instagram' || route.section === 'tiktok' ? (
+        <ComingSoon key={route.section} which={route.section} />
+      ) : route.section === 'channels' ? (
         <Channels tick={tick} />
       ) : route.section === 'contacts' ? (
         <Contacts tick={tick} selected={selected} onSelect={(id) => go({ section: 'contacts', id })} onOpenConversation={open} />
@@ -119,6 +141,7 @@ export function App() {
             />
           ) : (
             <div className="empty-pane">
+              <span className="empty-art" aria-hidden="true">{Icon.chats}</span>
               <p>Elige una conversación de la bandeja.</p>
               <p className="muted">Las derivadas por el bot aparecen en “Pendientes” y te avisamos con un sonido.</p>
             </div>

@@ -1,6 +1,9 @@
-import { useEffect, useState } from 'react';
-import { api, CHANNEL_LABELS, REASON_LABELS, type ConversationSummary, type Me, type View } from './api';
+import { useEffect, useMemo, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
+import { api, REASON_LABELS, type ConversationSummary, type Me, type View } from './api';
 import { ago } from './time';
+import { Avatar, Icon } from './ui';
+import { playSound } from './sounds';
 
 const TABS: { view: View; label: string }[] = [
   { view: 'pending', label: 'Pendientes' },
@@ -8,19 +11,34 @@ const TABS: { view: View; label: string }[] = [
   { view: 'all', label: 'Todas' },
 ];
 
-function preview(c: ConversationSummary): string {
-  if (c.handoff?.summary) return c.handoff.summary;
+const EMPTY: Record<View, { icon: string; text: string }> = {
+  pending: { icon: '🎉', text: 'No hay clientes esperando.' },
+  mine: { icon: '🗂️', text: 'No tienes conversaciones asignadas.' },
+  all: { icon: '💬', text: 'Todavía no hay conversaciones.' },
+};
+
+function Preview({ c }: { c: ConversationSummary }) {
+  if (c.handoff?.summary) return <p className="preview">{c.handoff.summary}</p>;
   const m = c.lastMessage;
-  if (!m) return 'Sin mensajes';
-  const who = m.author === 'customer' ? '' : m.author === 'bot' ? 'Bot: ' : 'Asesor: ';
-  return who + (m.type === 'image' ? `📷 ${m.body ?? 'Foto'}` : (m.body ?? ''));
+  if (!m) return <p className="preview">Sin mensajes</p>;
+  const who = m.author === 'customer' ? null : m.author === 'bot' ? 'Bot' : m.author === 'agent' ? 'Asesor' : null;
+  const body = m.type === 'image' ? `📷 ${m.body ?? 'Foto'}` : m.type === 'audio' ? `🎤 ${m.body ?? 'Nota de voz'}` : m.type === 'location' ? `📍 ${m.body ?? 'Ubicación'}` : (m.body ?? '');
+  return (
+    <p className="preview">
+      {who && <span className="who-tag">{who}: </span>}
+      {body}
+    </p>
+  );
 }
+
+const spring = { type: 'spring', stiffness: 480, damping: 38 } as const;
 
 export function Inbox({ me, tick, selected, onSelect }: { me: Me; tick: number; selected: string | null; onSelect: (id: string) => void }) {
   const [view, setView] = useState<View>('pending');
   const [items, setItems] = useState<ConversationSummary[] | null>(null);
   const [counts, setCounts] = useState<Partial<Record<View, number>>>({});
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -40,45 +58,121 @@ export function Inbox({ me, tick, selected, onSelect }: { me: Me; tick: number; 
     };
   }, [view, tick]);
 
+  const shown = useMemo(() => {
+    const q = query.trim().toLocaleLowerCase('es');
+    if (!q || !items) return items;
+    return items.filter((c) => `${c.contactName} ${c.lastMessage?.body ?? ''} ${c.handoff?.summary ?? ''}`.toLocaleLowerCase('es').includes(q));
+  }, [items, query]);
+
   return (
     <aside className="inbox" aria-label="Bandeja">
-      <nav className="tabs" role="tablist">
-        {TABS.map((t) => (
-          <button key={t.view} role="tab" aria-selected={view === t.view} className="tab" type="button" onClick={() => setView(t.view)}>
-            {t.label}
-            {counts[t.view] ? <span className={`count ${t.view === 'pending' ? 'hot' : ''}`}>{counts[t.view]}</span> : null}
-          </button>
-        ))}
-      </nav>
+      <div className="list-head">
+        <div className="list-title">
+          <h2>Bandeja</h2>
+          {counts.pending ? <span>{counts.pending} esperando asesor</span> : <span>Al día</span>}
+        </div>
+        <label className="search-box">
+          {Icon.search}
+          <input
+            className="search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Buscar cliente o mensaje"
+            aria-label="Buscar en la bandeja"
+            maxLength={80}
+          />
+        </label>
+        <nav className="tabs" role="tablist">
+          {TABS.map((t) => (
+            <button
+              key={t.view}
+              role="tab"
+              aria-selected={view === t.view}
+              className="tab"
+              type="button"
+              onClick={() => {
+                if (view !== t.view) playSound('tap');
+                setView(t.view);
+              }}
+            >
+              {view === t.view && <motion.i className="tab-pill" layoutId="inbox-tab" transition={spring} />}
+              <span>
+                {t.label}
+                <AnimatePresence initial={false}>
+                  {counts[t.view] ? (
+                    <motion.span
+                      key={counts[t.view]}
+                      className={`count ${t.view === 'pending' ? 'hot' : ''}`}
+                      initial={{ scale: 0.4, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0.4, opacity: 0 }}
+                      transition={{ type: 'spring', stiffness: 600, damping: 20 }}
+                    >
+                      {counts[t.view]}
+                    </motion.span>
+                  ) : null}
+                </AnimatePresence>
+              </span>
+            </button>
+          ))}
+        </nav>
+      </div>
+
       {error && <p className="error pad">{error}</p>}
-      {items === null && !error && <p className="muted pad">Cargando…</p>}
-      {items?.length === 0 && (
-        <p className="muted pad">{view === 'pending' ? 'No hay clientes esperando. 🎉' : view === 'mine' ? 'No tienes conversaciones asignadas.' : 'Sin conversaciones.'}</p>
+      {shown === null && !error && (
+        <div className="skeleton" aria-label="Cargando">
+          <i />
+          <i />
+          <i />
+        </div>
+      )}
+      {shown?.length === 0 && (
+        <motion.div className="list-empty" initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }}>
+          <span aria-hidden="true">{query ? '🔍' : EMPTY[view].icon}</span>
+          {query ? 'Ninguna conversación coincide.' : EMPTY[view].text}
+        </motion.div>
       )}
       <ul className="list">
-        {items?.map((c) => {
-          const phone = c.mode === 'human' && !c.assignedTo && !!c.agentPhoneAt;
-          const waiting = c.mode === 'human' && !c.assignedTo && !phone;
-          return (
-            <li key={c.id}>
-              <button type="button" className={`item ${selected === c.id ? 'active' : ''}`} onClick={() => onSelect(c.id)}>
-                <div className="item-top">
-                  <b>{c.contactName}</b>
-                  <span className="muted small">{ago(c.handoff && waiting ? c.handoff.requestedAt : c.updatedAt)}</span>
-                </div>
-                <div className="chips">
-                  <span className="chip">{CHANNEL_LABELS[c.channel] ?? c.channel}</span>
-                  {waiting && <span className="chip hot">Esperando asesor</span>}
-                  {phone && <span className="chip ok">Asesor desde el teléfono</span>}
-                  {c.handoff && <span className="chip">{REASON_LABELS[c.handoff.reason] ?? c.handoff.reason}</span>}
-                  {c.assignedTo && <span className="chip ok">{c.assignedTo.id === me.id ? 'Contigo' : c.assignedTo.name}</span>}
-                  {c.mode === 'bot' && <span className="chip muted-chip">Bot</span>}
-                </div>
-                <p className="preview">{preview(c)}</p>
-              </button>
-            </li>
-          );
-        })}
+        <AnimatePresence initial={true} mode="popLayout">
+          {shown?.map((c, i) => {
+            const phone = c.mode === 'human' && !c.assignedTo && !!c.agentPhoneAt;
+            const waiting = c.mode === 'human' && !c.assignedTo && !phone;
+            const withAgent = c.mode === 'human' && !waiting;
+            return (
+              <motion.li
+                key={c.id}
+                layout
+                initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, x: -24, transition: { duration: 0.18 } }}
+                transition={{ ...spring, delay: Math.min(i, 10) * 0.025 }}
+              >
+                <button
+                  type="button"
+                  className={`item ${selected === c.id ? 'active' : ''} ${waiting ? 'waiting' : ''} ${withAgent ? 'with-agent' : ''}`}
+                  onClick={() => onSelect(c.id)}
+                >
+                  <Avatar name={c.contactName} channel={c.channel} waiting={waiting} />
+                  <div className="item-top">
+                    <b>{c.contactName}</b>
+                    <span className="item-time">
+                      {waiting && c.handoff ? `Espera · ${ago(c.handoff.requestedAt)}` : ago(c.updatedAt)}
+                    </span>
+                  </div>
+                  <Preview c={c} />
+                  <div className="chips">
+                    {waiting && <span className="chip hot">Esperando asesor</span>}
+                    {phone && <span className="chip ok">Asesor desde el teléfono</span>}
+                    {c.assignedTo && <span className="chip ok">{c.assignedTo.id === me.id ? 'Contigo' : c.assignedTo.name}</span>}
+                    {c.handoff && <span className="chip">{REASON_LABELS[c.handoff.reason] ?? c.handoff.reason}</span>}
+                    {c.mode === 'bot' && <span className="chip muted-chip">Atiende el bot</span>}
+                  </div>
+                </button>
+              </motion.li>
+            );
+          })}
+        </AnimatePresence>
       </ul>
     </aside>
   );

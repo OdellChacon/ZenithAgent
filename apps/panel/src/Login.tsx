@@ -1,5 +1,9 @@
 import { useState, type FormEvent } from 'react';
 import { api, ApiError } from './api';
+import { BrandMark } from './Brand';
+
+/** Negocio dueño de este panel; el login aún no sabe a qué negocio entra el asesor. */
+const BRAND = (import.meta.env.VITE_PANEL_BRAND as string | undefined) ?? 'Inversiones Mora Mora';
 
 export function Login({ onLogin }: { onLogin: () => void }) {
   const [email, setEmail] = useState('');
@@ -25,8 +29,9 @@ export function Login({ onLogin }: { onLogin: () => void }) {
   return (
     <main className="login">
       <form className="card login-card" onSubmit={submit} noValidate>
-        <span className="logo big" aria-hidden="true">Z</span>
+        <BrandMark tenantName={BRAND} big />
         <h1>Panel de asesores</h1>
+        <span className="muted small">{BRAND}</span>
         <p className="muted">Atiende a los clientes que el bot te pasa.</p>
         <label>
           Correo

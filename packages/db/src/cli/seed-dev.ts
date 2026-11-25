@@ -68,8 +68,8 @@ try {
   let panelNote = ' Sin usuario del panel (define DEV_PANEL_EMAIL y DEV_PANEL_PASSWORD).';
   if (panelEmail && panelPassword) {
     const user = await client.query<{ id: string }>(
-      `INSERT INTO users (email, name, password_hash) VALUES ($1, 'Asesor de prueba', $2)
-       ON CONFLICT ((lower(email))) DO UPDATE SET password_hash = EXCLUDED.password_hash
+      `INSERT INTO users (email, name, password_hash) VALUES ($1, 'Asesor de ventas', $2)
+       ON CONFLICT ((lower(email))) DO UPDATE SET password_hash = EXCLUDED.password_hash, name = EXCLUDED.name
        RETURNING id`,
       [panelEmail, await hashPassword(panelPassword)],
     );

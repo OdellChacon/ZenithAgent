@@ -1,7 +1,21 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import { api, ApiError, CHANNEL_LABELS, REASON_LABELS, type ConversationDetail, type Me, type Message } from './api';
 import { clock, remaining } from './time';
-import { TagEditor } from './TagEditor';
+import { TagEditor } from './tags';
+import { Avatar, Icon, Ticks } from './ui';
+import { playSound } from './sounds';
+
+const WINDOW_MS = 24 * 3_600_000;
+
+function dayLabel(iso: string): string {
+  const d = new Date(iso);
+  const today = new Date();
+  const yesterday = new Date(Date.now() - 86_400_000);
+  if (d.toDateString() === today.toDateString()) return 'Hoy';
+  if (d.toDateString() === yesterday.toDateString()) return 'Ayer';
+  return d.toLocaleDateString('es-VE', { weekday: 'long', day: 'numeric', month: 'long' });
+}
 
 const DELIVERY_LABELS: Record<string, string> = {
   queued: 'En cola',
@@ -55,7 +69,7 @@ function CustomerMedia({ m }: { m: Message }) {
   return <p className="muted">[{kind} del cliente]{body ? ` ${body}` : ''}</p>;
 }
 
-function Bubble({ m }: { m: Message }) {
+function Bubble({ m, fresh }: { m: Message; fresh: boolean }) {
   const who =
     m.author === 'customer'
       ? null
@@ -69,7 +83,13 @@ function Bubble({ m }: { m: Message }) {
           ? (m.sentBy ?? 'Asesor · desde el teléfono')
           : 'Sistema';
   return (
-    <div className={`msg ${m.direction} ${m.author}`}>
+    <motion.div
+      className={`msg ${m.direction} ${m.author}`}
+      layout="position"
+      initial={fresh ? { opacity: 0, y: 14, scale: 0.92 } : false}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      transition={{ type: 'spring', stiffness: 520, damping: 32 }}
+    >
       {who && <span className="who">{who}</span>}
       {m.type === 'image' && m.imageId ? (
         <figure>
@@ -83,11 +103,12 @@ function Bubble({ m }: { m: Message }) {
       ) : (
         <p>{m.body}</p>
       )}
-      <span className="meta">
+      <span className="meta" title={m.direction === 'out' && m.delivery ? (DELIVERY_LABELS[m.delivery] ?? m.delivery) : undefined}>
         {clock(m.at)}
-        {m.direction === 'out' && m.delivery ? ` · ${DELIVERY_LABELS[m.delivery] ?? m.delivery}` : ''}
+        {m.direction === 'out' && m.delivery && <Ticks state={m.delivery} />}
+        {m.direction === 'out' && (m.delivery === 'failed' || m.delivery === 'blocked_window') && <span>{DELIVERY_LABELS[m.delivery]}</span>}
       </span>
-    </div>
+    </motion.div>
   );
 }
 
@@ -131,8 +152,23 @@ export function Conversation({
     return () => clearInterval(t);
   }, []);
 
+  // Mensajes ya mostrados: solo los nuevos entran con animación (y suenan si son del cliente).
+  const seen = useRef<Set<string> | null>(null);
   useEffect(() => {
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+    if (!data) return;
+    if (seen.current) {
+      const fresh = data.messages.filter((m) => !seen.current!.has(m.id));
+      if (fresh.some((m) => m.author === 'customer')) playSound('incoming');
+    }
+    seen.current = new Set(data.messages.map((m) => m.id));
+  }, [data]);
+
+  const firstScroll = useRef(true);
+  useEffect(() => {
+    const el = listRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: firstScroll.current ? 'instant' : 'smooth' });
+    if (data) firstScroll.current = false;
   }, [data?.messages.length]);
 
   if (error) return <section className="conversation"><p className="error pad">{error}</p></section>;
@@ -165,6 +201,7 @@ export function Conversation({
     await act(async () => {
       await api.send(id, body, clientId);
       setText('');
+      playSound('sent');
     });
   };
 
@@ -189,15 +226,18 @@ export function Conversation({
   return (
     <section className="conversation" aria-label={`Conversación con ${data.contact.name}`}>
       <div className="conv-head">
-        <button className="btn ghost back" type="button" onClick={onClose} aria-label="Volver a la bandeja">
-          ←
+        <button className="icon-btn back" type="button" onClick={onClose} aria-label="Volver a la bandeja">
+          {Icon.back}
         </button>
-        <div className="conv-title">
-          <b>{data.contact.name}</b>
-          <span className="muted small">
-            {CHANNEL_LABELS[data.channel] ?? data.channel}
-            {data.contact.phone ? ` · +${data.contact.phone}` : ''}
-          </span>
+        <div className="conv-who">
+          <Avatar name={data.contact.name} channel={data.channel} />
+          <div className="conv-title">
+            <b>{data.contact.name}</b>
+            <span className="muted small">
+              {CHANNEL_LABELS[data.channel] ?? data.channel}
+              {data.contact.phone ? ` · +${data.contact.phone}` : ''}
+            </span>
+          </div>
         </div>
         <span className={`chip ${status.tone}`}>{status.label}</span>
         <div className="conv-actions">
@@ -240,23 +280,44 @@ export function Conversation({
 
       <div className="window-line">
         {data.window.state === 'FREE' && windowLeft ? (
-          <span>Ventana de WhatsApp abierta: quedan <b>{windowLeft}</b> para responder con texto libre.</span>
+          <>
+            <span>Ventana de WhatsApp abierta: quedan <b>{windowLeft}</b> para responder con texto libre.</span>
+            <span className="window-bar" aria-hidden="true">
+              <i style={{ width: `${Math.max(2, Math.min(100, ((new Date(data.window.expiresAt!).getTime() - Date.now()) / WINDOW_MS) * 100))}%` }} />
+            </span>
+          </>
         ) : (
           <span className="warn">Ventana de 24 h cerrada.</span>
         )}
       </div>
 
       <div className="messages" ref={listRef}>
-        {data.messages.map((m) => (
-          <Bubble key={m.id} m={m} />
-        ))}
+        {data.messages.map((m, i) => {
+          const prev = data.messages[i - 1];
+          const newDay = !prev || new Date(prev.at).toDateString() !== new Date(m.at).toDateString();
+          return (
+            <Fragment key={m.id}>
+              {newDay && <span className="day-sep">{dayLabel(m.at)}</span>}
+              <Bubble m={m} fresh={!!seen.current && !seen.current.has(m.id)} />
+            </Fragment>
+          );
+        })}
       </div>
 
-      {notice && (
-        <p className="notice" role="status">
-          {notice}
-        </p>
-      )}
+      <AnimatePresence>
+        {notice && (
+          <motion.p
+            className="notice"
+            role="status"
+            initial={{ opacity: 0, y: 8, height: 0 }}
+            animate={{ opacity: 1, y: 0, height: 'auto' }}
+            exit={{ opacity: 0, y: 8, height: 0 }}
+            transition={{ type: 'spring', stiffness: 400, damping: 34 }}
+          >
+            {notice}
+          </motion.p>
+        )}
+      </AnimatePresence>
 
       <form className="composer" onSubmit={send}>
         {composerHint ? (
@@ -272,9 +333,15 @@ export function Conversation({
               rows={2}
               aria-label="Respuesta al cliente"
             />
-            <button className="btn primary" type="submit" disabled={busy || !text.trim() || !canWrite}>
-              Enviar
-            </button>
+            <motion.button
+              className="btn primary"
+              type="submit"
+              disabled={busy || !text.trim() || !canWrite}
+              whileTap={{ scale: 0.92 }}
+              animate={{ opacity: text.trim() ? 1 : 0.55 }}
+            >
+              Enviar {Icon.send}
+            </motion.button>
           </>
         )}
       </form>

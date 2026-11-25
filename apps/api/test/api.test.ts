@@ -309,7 +309,7 @@ describe.skipIf(!hasDb)('API del panel', () => {
     expect((await get('/api/v1/contacts?tag=arquitecto')).json().items.map((i: { id: string }) => i.id)).toEqual([contactId]);
     expect((await get('/api/v1/contacts?q=obra')).json().items.map((i: { id: string }) => i.id)).toContain(contactId);
     expect((await get('/api/v1/contacts?q=%25')).statusCode).toBe(200);
-    expect((await get('/api/v1/contact-tags')).json().items).toEqual(expect.arrayContaining([{ tag: 'arquitecto', count: 1 }]));
+    expect((await get('/api/v1/contact-tags')).json().items).toEqual(expect.arrayContaining([expect.objectContaining({ tag: 'arquitecto', count: 1 })]));
     // La conversación también muestra las etiquetas del contacto.
     expect((await get(`/api/v1/conversations/${convId}`)).json().contact).toMatchObject({ id: contactId, tags: ['arquitecto', 'obra grande'] });
 
@@ -319,6 +319,69 @@ describe.skipIf(!hasDb)('API del panel', () => {
     expect((await patch({ tags: ['hack'] }, ajeno.cookie)).statusCode).toBe(404);
     expect((await get('/api/v1/contacts?q=daniela', ajeno.cookie)).json().items).toEqual([]);
     expect((await get('/api/v1/contact-tags', ajeno.cookie)).json().items).toEqual([]);
+  });
+
+  it('administra etiquetas con color, grupos de una sola opción, renombrar, fusionar y borrar', async () => {
+    const convId = await seedConversation(t.tenantId, t.channelAccountId, { name: 'Ernesto Etiquetas' });
+    const contactId = (await owner.query<{ contact_id: string }>('SELECT contact_id FROM conversations WHERE id = $1', [convId])).rows[0]!.contact_id;
+    const admin = (await login(users.admin.email)).cookie;
+    const agent = (await login(users.ana.email)).cookie;
+    const call = (method: 'GET' | 'POST' | 'PATCH' | 'DELETE', url: string, c: string, payload?: unknown) =>
+      app.inject({ method, url, headers: headers(c), ...(payload ? { payload: payload as object } : {}) });
+    const tags = async () => (await call('GET', `/api/v1/contacts/${contactId}`, admin)).json().tags as string[];
+    const setTags = (list: string[], c = agent) => call('PATCH', `/api/v1/contacts/${contactId}`, c, { tags: list });
+    const g = `Tipo ${run}`.slice(0, 30);
+
+    // Grupo de una sola opción con dos etiquetas.
+    expect((await call('POST', '/api/v1/contact-tag-groups', agent, { name: g, exclusive: true })).statusCode).toBe(403);
+    expect((await call('POST', '/api/v1/contact-tag-groups', admin, { name: g, exclusive: true })).statusCode).toBe(201);
+    expect((await call('POST', '/api/v1/contact-tag-groups', admin, { name: g })).statusCode).toBe(409);
+    // Cualquier asesor puede crear etiquetas; el color se valida.
+    expect((await call('POST', '/api/v1/contact-tags', agent, { name: 'Mayorista X', color: 'blue', group: g, description: 'Compra al mayor' })).statusCode).toBe(201);
+    expect((await call('POST', '/api/v1/contact-tags', agent, { name: 'potencial x', color: 'amber', group: g })).statusCode).toBe(201);
+    expect((await call('POST', '/api/v1/contact-tags', agent, { name: 'mayorista x' })).statusCode).toBe(409);
+    expect((await call('POST', '/api/v1/contact-tags', agent, { name: 'otra', color: 'fucsia' })).statusCode).toBe(400);
+    expect((await call('POST', '/api/v1/contact-tags', agent, { name: 'otra', group: 'no existe' })).statusCode).toBe(400);
+
+    const list = (await call('GET', '/api/v1/contact-tags', agent)).json();
+    expect(list.canManage).toBe(false);
+    expect(list.groups).toEqual(expect.arrayContaining([{ name: g, exclusive: true }]));
+    expect(list.items).toEqual(
+      expect.arrayContaining([{ tag: 'mayorista x', count: 0, color: 'blue', group: g, description: 'Compra al mayor' }]),
+    );
+
+    // En un grupo de una sola opción queda la última que se agregó; las etiquetas nuevas se registran solas.
+    const r = await setTags(['potencial x', 'obra', 'mayorista x']);
+    expect(r.json()).toEqual({ ok: true, tags: ['obra', 'mayorista x'] });
+    expect(await tags()).toEqual(['obra', 'mayorista x']);
+    expect((await call('GET', '/api/v1/contact-tags', agent)).json().items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ tag: 'obra', count: 1, group: null })]),
+    );
+
+    // Renombrar cambia la etiqueta en los contactos; renombrar a una existente las fusiona.
+    expect((await call('PATCH', '/api/v1/contact-tags/obra', agent, { name: 'obra nueva' })).statusCode).toBe(403);
+    expect((await call('PATCH', '/api/v1/contact-tags/obra', admin, { name: 'obra nueva', color: 'teal' })).json()).toEqual({ ok: true, merged: false });
+    expect(await tags()).toEqual(['obra nueva', 'mayorista x']);
+    expect((await call('PATCH', `/api/v1/contact-tags/${encodeURIComponent('mayorista x')}`, admin, { name: 'obra nueva' })).json()).toEqual({
+      ok: true,
+      merged: true,
+    });
+    expect(await tags()).toEqual(['obra nueva']);
+    expect((await call('PATCH', '/api/v1/contact-tags/no-existe', admin, { color: 'red' })).statusCode).toBe(404);
+
+    // Borrar una etiqueta la quita de los contactos; borrar el grupo deja sus etiquetas sin grupo.
+    expect((await call('DELETE', `/api/v1/contact-tags/${encodeURIComponent('obra nueva')}`, agent)).statusCode).toBe(403);
+    expect((await call('DELETE', `/api/v1/contact-tags/${encodeURIComponent('obra nueva')}`, admin)).json()).toEqual({ ok: true, contacts: 1 });
+    expect(await tags()).toEqual([]);
+    expect((await call('DELETE', `/api/v1/contact-tag-groups/${encodeURIComponent(g)}`, admin)).statusCode).toBe(200);
+    expect((await call('GET', '/api/v1/contact-tags', agent)).json().items).toEqual(
+      expect.arrayContaining([expect.objectContaining({ tag: 'potencial x', group: null })]),
+    );
+
+    // Otro negocio no ve ni toca estas etiquetas.
+    const ajeno = (await login(users.ajeno.email)).cookie;
+    expect((await call('GET', '/api/v1/contact-tags', ajeno)).json().items.map((i: { tag: string }) => i.tag)).not.toContain('potencial x');
+    expect((await call('DELETE', `/api/v1/contact-tags/${encodeURIComponent('potencial x')}`, ajeno)).statusCode).toBe(403);
   });
 
   it('muestra los números desconectados por Meta solo a su negocio', async () => {

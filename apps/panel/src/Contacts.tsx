@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { api, ApiError, CHANNEL_LABELS, REASON_LABELS, type ContactDetail, type ContactSummary } from './api';
-import { TagEditor } from './TagEditor';
+import { TagChip, TagEditor, tagDef, tagLabel, useTagCatalog } from './tags';
+import { TagManager } from './TagManager';
 import { ago } from './time';
+import { motion, AnimatePresence } from 'motion/react';
+import { Avatar, Icon } from './ui';
 
 /** Señales que salen de los datos (no las escribe nadie): ayudan a priorizar. */
 function Signals({ c }: { c: ContactSummary }) {
@@ -38,10 +41,14 @@ export function Contacts({
   const [query, setQuery] = useState('');
   const [debounced, setDebounced] = useState('');
   const [tag, setTag] = useState<string | null>(null);
-  const [tags, setTags] = useState<{ tag: string; count: number }[]>([]);
+  const catalog = useTagCatalog();
+  const [managing, setManaging] = useState(false);
   const [items, setItems] = useState<ContactSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [reload, setReload] = useState(0);
+
+  // Si cambian las etiquetas (renombrar, unir, borrar), la lista se vuelve a pedir.
+  useEffect(() => setReload((r) => r + 1), [catalog]);
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query.trim()), 250);
@@ -50,11 +57,10 @@ export function Contacts({
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.contacts({ ...(debounced ? { q: debounced } : {}), ...(tag ? { tag } : {}) }), api.contactTags()])
-      .then(([list, t]) => {
+    Promise.all([api.contacts({ ...(debounced ? { q: debounced } : {}), ...(tag ? { tag } : {}) })])
+      .then(([list]) => {
         if (cancelled) return;
         setItems(list.items);
-        setTags(t.items);
         setError(null);
       })
       .catch(() => !cancelled && setError('No se pudieron cargar los contactos.'));
@@ -65,59 +71,109 @@ export function Contacts({
 
   return (
     <div className={`workspace ${selected ? 'has-selection' : ''}`}>
+      <TagManager open={managing} onClose={() => setManaging(false)} />
       <aside className="inbox" aria-label="Contactos">
-        <div className="contact-filters">
-          <input
-            className="search"
-            type="search"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Buscar por nombre, teléfono o etiqueta"
-            aria-label="Buscar contactos"
-            maxLength={80}
-          />
-          {tags.length > 0 && (
-            <div className="chips tag-filter" role="group" aria-label="Filtrar por etiqueta">
-              {tags.map((t) => (
-                <button
-                  key={t.tag}
-                  type="button"
-                  className={`chip tag ${tag === t.tag ? 'on' : ''}`}
-                  aria-pressed={tag === t.tag}
-                  onClick={() => setTag(tag === t.tag ? null : t.tag)}
-                >
-                  {t.tag} <span className="muted">{t.count}</span>
-                </button>
-              ))}
+        <div className="list-head">
+          <div className="list-title">
+            <h2>Contactos</h2>
+            {items && <span>{items.length} {items.length === 1 ? 'contacto' : 'contactos'}</span>}
+          </div>
+          <div className="contact-filters">
+            <label className="search-box">
+              {Icon.search}
+              <input
+                className="search"
+                type="search"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Buscar por nombre, teléfono o etiqueta"
+                aria-label="Buscar contactos"
+                maxLength={80}
+              />
+            </label>
+            <div className="tag-filter-bar">
+              <div className="tag-filter" role="group" aria-label="Filtrar por etiqueta">
+                {(catalog?.items ?? [])
+                  .filter((t) => t.count > 0 || tag === t.tag)
+                  .map((t) => (
+                    <button
+                      key={t.tag}
+                      type="button"
+                      className={`tfilter tc-${t.color} ${tag === t.tag ? 'on' : ''}`}
+                      aria-pressed={tag === t.tag}
+                      title={[t.group, t.description].filter(Boolean).join(' · ') || undefined}
+                      onClick={() => setTag(tag === t.tag ? null : t.tag)}
+                    >
+                      <i aria-hidden="true" />
+                      {tagLabel(t.tag)}
+                      <span>{t.count}</span>
+                    </button>
+                  ))}
+              </div>
+              <button type="button" className="btn ghost small tag-manage" onClick={() => setManaging(true)}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M3 12V4h8l9 9-8 8-9-9Z" />
+                  <circle cx="7.5" cy="8.5" r="1.3" />
+                </svg>
+                Gestionar etiquetas
+              </button>
             </div>
-          )}
+          </div>
         </div>
         {error && <p className="error pad">{error}</p>}
-        {items === null && !error && <p className="muted pad">Cargando…</p>}
-        {items?.length === 0 && <p className="muted pad">{debounced || tag ? 'Ningún contacto coincide.' : 'Todavía no hay contactos.'}</p>}
+        {items === null && !error && (
+          <div className="skeleton" aria-label="Cargando">
+            <i />
+            <i />
+            <i />
+          </div>
+        )}
+        {items?.length === 0 && (
+          <div className="list-empty">
+            <span aria-hidden="true">{debounced || tag ? '🔍' : '👥'}</span>
+            {debounced || tag ? 'Ningún contacto coincide.' : 'Todavía no hay contactos.'}
+          </div>
+        )}
         <ul className="list">
-          {items?.map((c) => {
-            const interest = interestLine(c);
-            return (
-              <li key={c.id}>
-                <button type="button" className={`item ${selected === c.id ? 'active' : ''}`} onClick={() => onSelect(c.id)}>
-                  <div className="item-top">
-                    <b>{c.name}</b>
-                    <span className="muted small">{ago(c.lastActivityAt)}</span>
-                  </div>
-                  <div className="chips">
-                    {c.tags.map((t) => (
-                      <span key={t} className="chip tag">
-                        {t}
-                      </span>
-                    ))}
-                    <Signals c={c} />
-                  </div>
-                  {interest && <p className="preview">{interest}</p>}
-                </button>
-              </li>
-            );
-          })}
+          <AnimatePresence initial={true} mode="popLayout">
+            {items?.map((c, i) => {
+              const interest = interestLine(c);
+              const waiting = !!c.conversation?.waitingAdvisor;
+              const withAgent = c.conversation?.mode === 'human' && !waiting && c.conversation.status !== 'closed';
+              return (
+                <motion.li
+                  key={c.id}
+                  layout
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, transition: { duration: 0.15 } }}
+                  transition={{ type: 'spring', stiffness: 480, damping: 38, delay: Math.min(i, 10) * 0.025 }}
+                >
+                  <button
+                    type="button"
+                    className={`item ${selected === c.id ? 'active' : ''} ${waiting ? 'waiting' : ''} ${withAgent ? 'with-agent' : ''}`}
+                    onClick={() => onSelect(c.id)}
+                  >
+                    <Avatar name={c.name} channel={c.channels[0]} waiting={waiting} />
+                    <div className="item-top">
+                      <b>{c.name}</b>
+                      <span className="item-time">{ago(c.lastActivityAt)}</span>
+                    </div>
+                    <div className="item-sub">{c.phone ? `+${c.phone}` : c.channels.map((ch) => CHANNEL_LABELS[ch] ?? ch).join(' · ')}</div>
+                    {interest && <p className="interest">{interest}</p>}
+                    {(c.tags.length > 0 || waiting || withAgent || c.lastHandoffReason || c.followupSent || c.optOutFollowups) && (
+                      <div className="chips">
+                        {c.tags.map((t) => (
+                          <TagChip key={t} tag={t} color={tagDef(catalog, t)?.color ?? 'gray'} />
+                        ))}
+                        <Signals c={c} />
+                      </div>
+                    )}
+                  </button>
+                </motion.li>
+              );
+            })}
+          </AnimatePresence>
         </ul>
       </aside>
       {selected ? (
@@ -131,6 +187,7 @@ export function Contacts({
         />
       ) : (
         <div className="empty-pane">
+          <span className="empty-art" aria-hidden="true">{Icon.contacts}</span>
           <p>Elige un contacto para ver su ficha.</p>
           <p className="muted">Ponles etiquetas (por ejemplo “arquitecto” u “obra”) para encontrarlos y priorizarlos.</p>
         </div>
