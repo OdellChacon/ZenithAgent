@@ -150,7 +150,14 @@ export async function runBrainTurn(params: {
       // A veces el modelo cierra sin texto después de buscar y mandar fotos: se le pide la respuesta.
       nudged = true;
       messages.pop();
-      const note = { type: 'text' as const, text: '[Nota interna: escribe ahora tu respuesta al cliente con lo que encontraste.]' };
+      const asked = lastCustomerText(params.messages);
+      const note = {
+        type: 'text' as const,
+        text:
+          '[Nota del sistema, NO es un mensaje del cliente: todavía no le escribiste nada al cliente' +
+          (asked ? ` sobre su mensaje "${asked.slice(0, 300)}"` : '') +
+          '. Escríbele ahora tu respuesta con los productos que encontraste, como tu primer mensaje sobre eso.]',
+      };
       const last = messages.at(-1);
       if (last?.role === 'user' && Array.isArray(last.content)) (last.content as unknown[]).push(note);
       else messages.push({ role: 'user', content: [note] });
@@ -197,6 +204,22 @@ const BLOCKED_SUMMARY: Record<'empty' | 'mentions_price' | 'too_long', string> =
   too_long: 'La respuesta del bot salió demasiado larga y se frenó. Lea la conversación y responda al cliente.',
 };
 
+/** Último texto que escribió el cliente (para recordárselo al modelo si se queda en blanco). */
+function lastCustomerText(messages: BetaMessageParam[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!;
+    if (m.role !== 'user') continue;
+    if (typeof m.content === 'string') return m.content.trim() || null;
+    const text = (m.content as { type: string; text?: string }[])
+      .filter((b) => b.type === 'text' && b.text && !b.text.startsWith('['))
+      .map((b) => b.text!)
+      .join(' ')
+      .trim();
+    if (text) return text;
+  }
+  return null;
+}
+
 const plain = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 /**
@@ -215,7 +238,7 @@ export function completeListing(reply: string, effects: ToolEffects): string {
   const list = names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} y ${names.at(-1)}`;
   const more =
     listing.total > listing.names.length
-      ? ` En total son unos ${listing.total} modelos; si me dice el estilo que busca (mármol, cemento, madera, piedra…), le muestro el resto.`
+      ? ` En total son unos ${listing.total} modelos; si me dice un color, un acabado o para qué espacio es, le muestro el resto.`
       : '';
   const extra = `También tenemos ${list}. Si quiere, le mando las fotos.${more}`;
   const parts = reply.split(/\n\s*\n/);

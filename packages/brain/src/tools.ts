@@ -119,7 +119,7 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
         },
         superficie: { type: ['string', 'null'], enum: ['piso', 'pared', null] },
         uso: { type: ['string', 'null'], enum: ['interior', 'exterior', null] },
-        limite: { type: 'integer', description: 'Cantidad máxima de resultados (1 a 12). Usa 12 cuando el cliente pregunta qué hay de un color, estilo o tipo.' },
+        limite: { type: 'integer', description: 'Cantidad máxima de resultados (1 a 15). Usa 15 cuando el cliente pregunta qué hay de un color, estilo o tipo.' },
       },
       required: ['texto', 'categoria', 'superficie', 'uso', 'limite'],
       additionalProperties: false,
@@ -332,7 +332,7 @@ function matchSummary(rows: ProductRow[], total?: number): { best: number; extra
       best,
       extra: {
         coincidencias_altas: total,
-        nota_opciones: `Hay ${total} productos que coinciden bien; aquí van los ${rows.length} más fieles. Son demasiados para nombrarlos todos: dígale al cliente cuántos hay, nómbrele los más representativos agrupados por estilo (por ejemplo mármol, cemento, madera, piedra) y pregúntele qué estilo o espacio busca para mostrarle el resto con otra búsqueda.`,
+        nota_opciones: `Hay ${total} productos que coinciden bien; aquí van los ${rows.length} más fieles. Son demasiados para nombrarlos todos: dígale al cliente cuántos hay, nómbrele los más representativos, agrupados por lo que los distingue (color, acabado, estilo), y pregúntele qué color, acabado o espacio busca para mostrarle el resto con otra búsqueda.`,
       },
     };
   }
@@ -394,7 +394,7 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         category: categoria || null,
         surface: superficie,
         usage: uso,
-        limit: Math.min(Math.max(limite, 1), 12),
+        limit: Math.min(Math.max(limite, 1), 15),
       };
       const rows = await ctx.catalog.search(filters);
       effects.seen ??= new Map();
@@ -406,12 +406,17 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         if (filters.text && rows.length >= filters.limit) {
           const all = await ctx.catalog.search({ ...filters, limit: 200 });
           const top = Math.max(0, ...all.map((r) => r.score ?? 0));
-          total = all.filter((r) => (r.score ?? 0) >= top * 0.6).length;
+          total = new Set(all.filter((r) => (r.score ?? 0) >= top * 0.6).map((r) => r.name)).size;
         }
         const summary = matchSummary(rows, total);
         const best = summary.best;
         const strong = best ? rows.filter((r) => (r.score ?? 0) >= best * 0.6).map((r) => r.name) : [];
-        if (strong.length > 3) effects.listing = { names: [...new Set(strong)], total: total ?? strong.length };
+        // La lista que se completa sale de la primera búsqueda del turno (la del pedido del
+        // cliente); las siguientes suelen ser variaciones que traen otras cosas.
+        if (strong.length > 3 && !effects.listing) {
+          const names = [...new Set(strong)];
+          effects.listing = { names, total: Math.max(total ?? 0, names.length) };
+        }
         return withPhotos(
           json({ resultados: rows.length, ...summary.extra, productos: rows.map(presentWith(variants, summary.best)) }),
           rows,

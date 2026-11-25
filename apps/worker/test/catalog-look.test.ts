@@ -103,13 +103,15 @@ describe.skipIf(!hasDb)('descripción visual del catálogo', () => {
 
 describe('termPattern', () => {
   it('une el masculino y el femenino y agrega los nombres de color de los modelos', () => {
-    expect(termPattern('negra')).toBe('negr|nero|black');
-    expect(termPattern('negro')).toBe('negr|nero|black');
-    expect(termPattern('blanca')).toBe('blanc|bianc|white|nieve');
-    expect(termPattern('gris')).toBe('gris|grigi|grey|gray|plomo|ceniz|grafit|perla');
-    expect(termPattern('beige')).toBe('beige|crema|arena|marfil|hueso|sand');
-    expect(termPattern('azul')).toBe('azul|turquesa|celeste|aqua|blue');
-    expect(termPattern('piso')).toBe('piso');
+    expect(termPattern('negra')).toBe('\\m(?:negr|nero|black)');
+    expect(termPattern('negro')).toBe('\\m(?:negr|nero|black)');
+    expect(termPattern('blanca')).toBe('\\m(?:blanc|bianc|white|nieve)');
+    expect(termPattern('gris')).toBe('\\m(?:gris|grigi|grey|gray|plomo|ceniz|grafit|perla)');
+    expect(termPattern('beige')).toBe('\\m(?:beige|crema|arena|marfil|hueso|sand)');
+    expect(termPattern('azul')).toBe('\\m(?:azul|turquesa|celeste|aqua|blue)');
+    expect(termPattern('marmoleado')).toBe('\\m(?:marmolead|marmol|marble|carrara)');
+    expect(termPattern('grisaceo')).toBe('\\m(?:grisace|gris|grigi|grey|gray|plomo|ceniz|grafit|perla)');
+    expect(termPattern('piso')).toBe('\\m(?:piso)');
   });
 });
 

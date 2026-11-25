@@ -338,7 +338,9 @@ describe('runBrainTurn', () => {
     const { llm, calls } = scriptedLlm([text(''), text('Claro, le muestro opciones.')]);
     const res = await runBrainTurn({ ...base, llm, messages: customer('¿Qué cerámicas grises tienen?'), tools: { catalog: catalog(), wastePercent: null } });
     expect(res).toMatchObject({ outcome: 'replied', reply: 'Claro, le muestro opciones.' });
-    expect(JSON.stringify(calls[1]!.messages)).toContain('escribe ahora tu respuesta al cliente');
+    const nudge = JSON.stringify(calls[1]!.messages);
+    expect(nudge).toContain('NO es un mensaje del cliente');
+    expect(nudge).toContain('sobre su mensaje \\"¿Qué cerámicas grises tienen?\\"');
     // Si vuelve a quedar vacía, no se insiste: se bloquea y deriva como antes.
     const twice = await runBrainTurn({ ...base, llm: scriptedLlm([text(''), text('')]).llm, messages: customer('Hola'), tools: { catalog: catalog(), wastePercent: null } });
     expect(twice).toMatchObject({ outcome: 'blocked_by_validator', error: 'empty' });
@@ -476,7 +478,7 @@ describe('runBrainTurn', () => {
     ]);
     const cat = catalog();
     await runBrainTurn({ ...base, llm, messages: customer('¿Qué tienen?'), tools: { catalog: cat, wastePercent: null } });
-    expect(cat.search.mock.calls[0]?.[0].limit).toBe(12);
+    expect(cat.search.mock.calls[0]?.[0].limit).toBe(15);
   });
 
   it('deriva a un asesor cuando preguntan el precio', async () => {

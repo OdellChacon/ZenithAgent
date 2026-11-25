@@ -41,6 +41,11 @@ const SYNONYMS: Record<string, string[]> = {
   verde: ['oliva', 'menta', 'green'],
   terracot: ['oxido', 'ladrillo', 'teja', 'rojiz'],
   dorad: ['gold', 'oro'],
+  // Estilos
+  marmol: ['marble', 'carrara'],
+  mader: ['wood'],
+  cement: ['concrete'],
+  piedr: ['stone', 'pizarra', 'roca'],
 };
 
 /**
@@ -62,7 +67,9 @@ export function categoryPattern(term: string | null): string | null {
 export function termPattern(term: string): string {
   const stem = term.length >= 5 && /[ao]$/.test(term) ? term.slice(0, -1) : term;
   const key = SYNONYMS[stem] ? stem : Object.keys(SYNONYMS).find((k) => stem.length >= 4 && (k.startsWith(stem) || stem.startsWith(k)));
-  return [stem, ...(key ? SYNONYMS[key]! : [])].join('|');
+  // "marmoleado" → también "marmol"; "grisaceo" → también "gris".
+  // \m = inicio de palabra en Postgres: "stone" no debe coincidir dentro de "listones".
+  return `\\m(?:${[...new Set([stem, ...(key ? [key, ...SYNONYMS[key]!] : [])])].join('|')})`;
 }
 
 /** Lado mayor de las fotos del catálogo que ve el modelo: alcanza para comparar y gasta pocos tokens. */
