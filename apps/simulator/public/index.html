@@ -47,8 +47,6 @@
   .device { position: absolute; top: 0; left: 0; width: 436px; height: 944px; transform: scale(var(--s, 1)); transform-origin: 0 0;
             border-radius: 54px; background: var(--frame); box-shadow: 0 0 0 1.5px var(--frame-edge) inset, 0 0 0 3px #08090a inset, 0 50px 90px -35px rgba(16,24,40,.6), 0 14px 32px -14px rgba(16,24,40,.4); }
   .device[data-color="grey"]  { --frame: linear-gradient(160deg, #c9ccd1, #8d9198 45%, #b7bbc1); --frame-edge: #e7e9ec; --btn: #a3a7ad; }
-  .device[data-color="blue"]  { --frame: linear-gradient(160deg, #7e9cc4, #3e5f8c 45%, #6f8db6); --frame-edge: #a9c0de; --btn: #56759f; }
-  .device[data-color="green"] { --frame: linear-gradient(160deg, #8fbfae, #3f7d69 45%, #7aae9b); --frame-edge: #b7dccf; --btn: #548f7b; }
   /* Botones en el lateral derecho: volumen y encendido. */
   .btn { position: absolute; right: -3px; width: 3.5px; border-radius: 0 3px 3px 0; background: var(--btn); }
   .btn.vol { top: 228px; height: 96px; }
@@ -234,14 +232,6 @@
       <button type="button" data-theme="dark">Oscuro</button>
     </div>
 
-    <div class="label">Teléfono: TECNO POVA 6</div>
-    <div class="seg" role="group" aria-label="Color del teléfono">
-      <button type="button" data-color="grey">Gris</button>
-      <button type="button" data-color="blue">Azul</button>
-      <button type="button" data-color="green">Verde</button>
-    </div>
-    <div class="meta-line">166,2 × 76,8 mm · pantalla 6,78″ AMOLED, 1080 × 2460</div>
-
     <div class="label">Cliente</div>
     <div class="row">
       <input id="name" class="field" maxlength="60" autocomplete="off" aria-label="Nombre del cliente">
@@ -249,18 +239,12 @@
     </div>
     <div class="meta-line">Número simulado: <code id="number"></code></div>
 
-    <div class="label">Asesor desde la app del negocio</div>
-    <form id="agentForm" class="row">
-      <input id="agentText" class="field" maxlength="4096" autocomplete="off" placeholder="Responder como asesor…" aria-label="Mensaje del asesor desde el teléfono de la tienda">
-      <button type="submit" class="ghost">Enviar</button>
-    </form>
-    <div class="meta-line">Simula que alguien de la tienda contesta desde WhatsApp Business: el bot se calla en este chat.</div>
-
     <div class="label">Estado</div>
     <div class="status"><span id="dot" class="dot"></span><span id="conn">Conectando…</span></div>
 
     <div class="note">
-      Se muestra lo que vería el cliente. El bot todavía no envía "escribiendo…" ni confirmaciones de lectura, así que los mensajes quedan con doble check gris mientras responde.
+      Se muestra lo que vería el cliente: el bot marca sus mensajes como leídos (doble check azul) y muestra "escribiendo…" mientras responde.
+      Cuando el bot decide que hace falta un asesor, el pase aparece en el panel de asesores y se atiende desde ahí.
       Por dentro el canal siempre es WhatsApp: Instagram y Messenger solo cambian la apariencia hasta que existan sus conectores.
     </div>
   </section>
@@ -345,7 +329,7 @@
   const BUSINESS = { name: 'Inversiones Mora Mora', handle: 'inversionesmoramora', initials: 'IMM', about: 'Cerámicas, sanitarios y muebles de baño · San Cristóbal' };
   const randomNumber = () => '58414' + String(Math.floor(1000000 + Math.random() * 8999999));
   const saved = store.get('sim-state-v2', null);
-  let state = { number: randomNumber(), name: 'Cliente de prueba', skin: 'wa', theme: 'light', color: 'grey', messages: [], ...(saved || {}) };
+  let state = { number: randomNumber(), name: 'Cliente de prueba', skin: 'wa', theme: 'light', messages: [], ...(saved || {}) };
   let pending = 0;
   let pendingTimer = null;
   let source = null;
@@ -509,8 +493,6 @@
   function renderPanel() {
     document.querySelectorAll('[data-skin]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.skin === state.skin)));
     document.querySelectorAll('[data-theme]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.theme === state.theme)));
-    document.querySelectorAll('button[data-color]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.color === state.color)));
-    $('device').dataset.color = state.color;
     $('number').textContent = '+' + state.number;
     if (document.activeElement !== $('name')) $('name').value = state.name;
   }
@@ -576,28 +558,6 @@
     save(); renderChat();
   }
 
-  $('agentForm').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const input = $('agentText');
-    const text = input.value.trim();
-    if (!text) return;
-    input.value = '';
-    try {
-      const res = await fetch('/api/agent-reply', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ to: state.number, text }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        state.messages.push({ kind: 'system', text: (body.error && body.error.message) || 'No se pudo enviar el mensaje del asesor', at: new Date().toISOString() });
-        save(); renderChat();
-      }
-    } catch {
-      state.messages.push({ kind: 'system', text: 'El simulador no responde.', at: new Date().toISOString() });
-      save(); renderChat();
-    }
-  });
-
   $('composer').addEventListener('submit', (e) => {
     e.preventDefault();
     const input = $('input');
@@ -662,7 +622,6 @@
   // ------------------------------------------------------------------ controles
   document.querySelectorAll('[data-skin]').forEach((b) => b.addEventListener('click', () => { state.skin = b.dataset.skin; save(); renderAll(); }));
   document.querySelectorAll('[data-theme]').forEach((b) => b.addEventListener('click', () => { state.theme = b.dataset.theme; save(); renderAll(); }));
-  document.querySelectorAll('button[data-color]').forEach((b) => b.addEventListener('click', () => { state.color = b.dataset.color; save(); renderPanel(); }));
 
   // El teléfono se dibuja a tamaño real en px de CSS y se reduce entero para caber en la ventana.
   const fitDevice = () => {
