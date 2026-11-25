@@ -27,6 +27,9 @@ const MEDIA_LABEL: Record<string, string> = {
 
 const IMAGE_INTRO = '[El cliente envió esta foto:]';
 
+/** Cómo ve el modelo una foto que ya le mandó el negocio al cliente. */
+export const PHOTO_SENT_PREFIX = '[Foto enviada al cliente: ';
+
 /**
  * Texto para el modelo de lo que no es texto ni foto. La nota de voz va transcrita; de la
  * ubicación y las tarjetas de contacto solo pasan nombres y dirección: ni coordenadas ni
@@ -89,7 +92,11 @@ export function toModelMessages(
         blocks.push({ type: 'text', text: MEDIA_LABEL[m.type] ?? '[Mensaje no compatible]' });
       }
     }
-    if (!described && m.body?.trim()) blocks.push({ type: 'text', text: m.body.trim() });
+    if (m.direction === 'out' && m.type === 'image') {
+      // Las fotos que mandó el negocio llevan el nombre como pie. Si pasaran como texto suelto, el
+      // modelo aprende a escribir el nombre solo en un mensaje: se marcan como foto.
+      blocks.push({ type: 'text', text: `${PHOTO_SENT_PREFIX}${m.body?.trim() || 'producto'}]` });
+    } else if (!described && m.body?.trim()) blocks.push({ type: 'text', text: m.body.trim() });
     if (!blocks.length) continue;
 
     const last = turns[turns.length - 1];

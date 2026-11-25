@@ -11,6 +11,7 @@ import {
   pendingCustomerImages,
   pendingVoiceNotes,
   runBrainTurn,
+  PHOTO_SENT_PREFIX,
   splitBubbles,
   typingPauseMs,
   toModelMessages,
@@ -335,7 +336,14 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       }
     }
 
-    const bubbles = splitBubbles(brain.reply);
+    // El nombre de cada foto ya va como pie: un mensaje que solo repite ese nombre (o la marca
+    // interna "[Foto enviada…]") sobra.
+    const photoNames = new Set(brain.photos.map((p) => p.name.trim().toLocaleLowerCase('es')));
+    const cleaned = brain.reply
+      .split('\n')
+      .filter((line) => !line.trim().startsWith(PHOTO_SENT_PREFIX))
+      .join('\n');
+    const bubbles = splitBubbles(cleaned).filter((b) => !photoNames.has(b.replace(/[*_]/g, '').trim().toLocaleLowerCase('es')));
     if (!bubbles.length) bubbles.push(brain.reply);
     let textId: string | null = null;
     for (const [i, bubble] of bubbles.entries()) {

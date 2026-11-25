@@ -181,7 +181,11 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
     for (const from of ['584141230011', '584141230012']) {
       const msg = await customerSays('¿Me envía fotos del Aconna Beige?', from);
       const turn = await processBrainJob(
-        { pool: app, llm: scriptedLlm([tool('enviar_fotos', { producto_ids: [aconna!.id, sanitario!.id] }), text('Aquí tiene la foto.')]).llm },
+        { pool: app, llm: scriptedLlm([
+            tool('enviar_fotos', { producto_ids: [aconna!.id, sanitario!.id] }),
+            // El modelo a veces repite el nombre de la foto o la marca interna: no se manda.
+            text('*Aconna Beige*\n\n[Foto enviada al cliente: Aconna Beige]\nAquí tiene la foto.'),
+          ]).llm },
         { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId },
       );
       if (turn.result !== 'replied') throw new Error('se esperaba respuesta');

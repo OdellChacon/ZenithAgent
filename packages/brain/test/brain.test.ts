@@ -513,6 +513,16 @@ describe('notas de voz, ubicaciones y contactos para el modelo', () => {
     expect(text).not.toMatch(/7\.76|5841/);
   });
 
+  it('las fotos que mandó el negocio se marcan como foto, no como texto suelto', () => {
+    const out = toModelMessages([
+      { id: 'a', direction: 'in', author: 'customer', type: 'text', body: 'Busco cerámica negra' },
+      { id: 'b', direction: 'out', author: 'bot', type: 'image', body: 'Notte Nero' },
+      { id: 'c', direction: 'out', author: 'bot', type: 'text', body: 'Le muestro el Notte Nero.' },
+      { id: 'd', direction: 'in', author: 'customer', type: 'text', body: 'Me gusta' },
+    ]);
+    expect(out[1]).toEqual({ role: 'assistant', content: '[Foto enviada al cliente: Notte Nero]\n\nLe muestro el Notte Nero.' });
+  });
+
   it('solo transcribe las notas de voz nuevas y sin texto', () => {
     const pending = pendingVoiceNotes([
       { id: 'viejo', direction: 'in', author: 'customer', type: 'audio', body: null },

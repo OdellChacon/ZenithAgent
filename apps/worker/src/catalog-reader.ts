@@ -27,6 +27,24 @@ export function normalizeTerms(text: string | null): string[] {
   return [...new Set(words.map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w)))].slice(0, 8);
 }
 
+/** Nombres de color en italiano o inglés que usan los modelos del catálogo (Notte Nero, Monte Bianco…). */
+const SYNONYMS: Record<string, string[]> = {
+  negr: ['nero', 'black'],
+  blanc: ['bianc', 'white'],
+  gris: ['grigi', 'grey', 'gray'],
+  marron: ['brown'],
+  dorad: ['gold', 'oro'],
+};
+
+/**
+ * Patrón (regex de Postgres) para una palabra ya normalizada: sin la vocal final de género
+ * ("negra" y "negro" → negr) y con sus equivalentes. Las palabras ya son [a-z0-9], no hay que escapar.
+ */
+export function termPattern(term: string): string {
+  const stem = term.length >= 5 && /[ao]$/.test(term) ? term.slice(0, -1) : term;
+  return [stem, ...(SYNONYMS[stem] ?? [])].join('|');
+}
+
 /**
  * Lector del catálogo para las herramientas del bot. Cada consulta corre en su propia
  * transacción con el tenant fijado, así que RLS impide leer productos de otro negocio.
@@ -37,24 +55,34 @@ export function createCatalogReader(pool: Pool, tenantId: string): CatalogReader
       const terms = normalizeTerms(filters.text);
       const category = normalizeTerms(filters.category)[0] ?? null;
       return withTenant(pool, tenantId, async (client) => {
+        // Puntaje por palabra: en el nombre pesa más; después el color principal de la foto, los
+        // demás colores, el aspecto de la foto y, al final, la ficha (que a veces trae el color mal).
         const { rows } = await client.query<ProductRow & { score: number }>(
           `WITH candidates AS (
              SELECT ${COLUMNS},
-                    unaccent(lower(name || ' ' || coalesce(description, '') || ' ' || coalesce(category_name, '') || ' ' ||
-                                   coalesce(format, '') || ' ' || attributes::text || ' ' || coalesce(look::text, ''))) AS doc
+                    unaccent(lower(name)) AS n,
+                    unaccent(lower(coalesce(look->'colores'->>0, ''))) AS c1,
+                    unaccent(lower(coalesce(look->>'colores', ''))) AS cs,
+                    unaccent(lower(coalesce(look::text, ''))) AS lk,
+                    unaccent(lower(coalesce(description, '') || ' ' || coalesce(category_name, '') || ' ' ||
+                                   coalesce(format, '') || ' ' || attributes::text)) AS rest
                FROM products
               WHERE active
                 AND ($1::text IS NULL OR unaccent(lower(coalesce(category, '') || ' ' || coalesce(category_name, ''))) LIKE '%' || $1 || '%')
                 AND ($2::text IS NULL OR unaccent(lower(coalesce(attributes->>'surface', ''))) LIKE '%' || $2 || '%')
                 AND ($3::text IS NULL OR unaccent(lower(coalesce(attributes->>'usage', ''))) LIKE '%' || $3 || '%'))
            SELECT ${BASE_COLUMNS}, has_photo,
-                  (SELECT count(*) FROM unnest($4::text[]) AS w WHERE doc LIKE '%' || w || '%')::int AS score
+                  (SELECT coalesce(sum(
+                            CASE WHEN n ~ w THEN 4 ELSE 0 END + CASE WHEN c1 ~ w THEN 3 ELSE 0 END +
+                            CASE WHEN cs ~ w THEN 2 ELSE 0 END + CASE WHEN lk ~ w THEN 1 ELSE 0 END +
+                            CASE WHEN rest ~ w THEN 0.5 ELSE 0 END), 0)
+                     FROM unnest($4::text[]) AS w)::float AS score
              FROM candidates
             WHERE cardinality($4::text[]) = 0
-               OR EXISTS (SELECT 1 FROM unnest($4::text[]) AS w WHERE doc LIKE '%' || w || '%')
-            ORDER BY score DESC, name
+               OR EXISTS (SELECT 1 FROM unnest($4::text[]) AS w WHERE n ~ w OR lk ~ w OR rest ~ w)
+            ORDER BY score DESC, has_photo DESC, name
             LIMIT $5`,
-          [category, filters.surface, filters.usage, terms, filters.limit],
+          [category, filters.surface, filters.usage, terms.map(termPattern), filters.limit],
         );
         return rows.map(({ score: _score, ...row }) => row);
       });

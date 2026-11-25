@@ -212,7 +212,8 @@ function presentProduct(p: ProductRow) {
     m2_por_caja: p.area_per_box_m2 !== null ? Number(p.area_per_box_m2) : null,
     piezas_por_caja: p.pieces_per_box,
     aspecto: a.design ?? p.look?.aspecto ?? null,
-    color: a.color ?? (p.look?.colores.length ? p.look.colores.join(', ') : null),
+    // El color de la foto manda: la ficha del fabricante a veces trae otro (ej. "Negro" en un gris).
+    color: p.look?.colores.length ? p.look.colores.join(', ') : (a.color ?? null),
     // Descrito por IA a partir de la foto del catálogo: sirve para comparar con lo que pide el cliente.
     como_se_ve: p.look ? [p.look.descripcion, p.look.patron ? `patrón: ${p.look.patron}` : ''].filter(Boolean).join(' · ') : null,
     coleccion: a.collection ?? null,

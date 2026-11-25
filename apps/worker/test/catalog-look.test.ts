@@ -4,7 +4,7 @@ import sharp from 'sharp';
 import { withTenant, type Pool } from '@zenith/db';
 import { normalizeImage, syncProducts, type ProductInput } from '@zenith/catalog';
 import { describeCatalog, parseLook } from '../src/catalog-look.js';
-import { createCatalogReader } from '../src/catalog-reader.js';
+import { createCatalogReader, termPattern } from '../src/catalog-reader.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 import { scriptedLlm, text } from '../../../packages/brain/test/fake-llm.js';
 
@@ -84,5 +84,52 @@ describe.skipIf(!hasDb)('descripción visual del catálogo', () => {
     expect((await search('chevron')).map((p) => p.name)).toEqual(['Archi Cenizo']);
     const again = await describeCatalog({ pool: app, tenantId: t.tenantId, llm: scriptedLlm([]).llm, model: 'modelo-prueba' });
     expect(again.described).toBe(0);
+  });
+});
+
+describe('termPattern', () => {
+  it('une el masculino y el femenino y agrega los nombres de color de los modelos', () => {
+    expect(termPattern('negra')).toBe('negr|nero|black');
+    expect(termPattern('negro')).toBe('negr|nero|black');
+    expect(termPattern('blanca')).toBe('blanc|bianc|white');
+    expect(termPattern('gris')).toBe('gris|grigi|grey|gray');
+    expect(termPattern('piso')).toBe('piso');
+  });
+});
+
+describe.skipIf(!hasDb)('orden de la búsqueda por relevancia', () => {
+  let owner: pg.Pool;
+  let app: Pool;
+  let t: Awaited<ReturnType<typeof seedTenant>>;
+
+  beforeAll(async () => {
+    ({ owner, app } = await setupDb());
+    t = await seedTenant(owner, 'orden');
+    const add = (id: string, name: string, colores: string[], attributes: Record<string, unknown>) =>
+      owner.query(
+        `INSERT INTO products (tenant_id, source, external_id, name, category, category_name, attributes, look)
+         VALUES ($1, 'prueba', $2, $3, 'ceramicas', 'Cerámicas', $4, $5)`,
+        [t.tenantId, id, name, attributes, { aspecto: ['piedra'], colores, patron: null, descripcion: 'Cerámica.' }],
+      );
+    // Adrisa: la ficha dice "Negro" pero la foto es gris (pasa en el catálogo real).
+    await add('1', 'Adrisa Dual', ['gris', 'grisáceo'], { color: 'Negro' });
+    await add('2', 'Brooklyn', ['gris oscuro', 'óxido', 'negro'], {});
+    await add('3', 'Notte Nero', ['negro', 'gris'], { color: 'Negro' });
+    await add('4', 'Blanco Sal', ['blanco'], {});
+  });
+
+  afterAll(async () => {
+    if (t) await owner.query('DELETE FROM tenants WHERE id = $1', [t.tenantId]);
+    await owner?.end();
+    await app?.end();
+  });
+
+  it('pone primero lo que de verdad es del color pedido, no el orden alfabético', async () => {
+    const reader = createCatalogReader(app, t.tenantId);
+    const search = (q: string, limit = 5) => reader.search({ text: q, category: null, surface: null, usage: null, limit });
+    // "cerámica" coincide con todas: las que además son negras van primero.
+    expect((await search('cerámica negra')).map((p) => p.name)).toEqual(['Notte Nero', 'Brooklyn', 'Adrisa Dual', 'Blanco Sal']);
+    expect((await search('negro', 2)).map((p) => p.name)).toEqual(['Notte Nero', 'Brooklyn']);
+    expect((await search('blancas')).map((p) => p.name)).toEqual(['Blanco Sal']);
   });
 });
