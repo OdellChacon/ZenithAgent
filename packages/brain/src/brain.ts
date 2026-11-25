@@ -105,7 +105,7 @@ export async function runBrainTurn(params: {
     usage.cacheReadTokens += response.usage.cache_read_input_tokens ?? 0;
 
     if (response.stop_reason === 'refusal') {
-      return fail('refusal', 'El modelo rechazó responder esta conversación');
+      return fail('refusal', 'El bot no quiso responder este mensaje por seguridad. Lea la conversación y atienda al cliente.');
     }
 
     // Se devuelve el contenido completo (incluidos los bloques de pensamiento) sin tocarlo.
@@ -138,7 +138,7 @@ export async function runBrainTurn(params: {
       continue;
     }
 
-    if (response.stop_reason === 'max_tokens') return fail('error', 'La respuesta superó el límite de tokens');
+    if (response.stop_reason === 'max_tokens') return fail('error', 'El bot no logró terminar su respuesta. Lea la conversación y responda al cliente.');
 
     const text = response.content
       .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === 'text')
@@ -160,7 +160,7 @@ export async function runBrainTurn(params: {
     const check = checkReply(text);
     if (!check.ok) {
       return {
-        ...fail('blocked_by_validator', `Respuesta bloqueada por el validador (${check.reason})`),
+        ...fail('blocked_by_validator', BLOCKED_SUMMARY[check.reason]),
         error: check.reason,
       };
     }
@@ -168,7 +168,7 @@ export async function runBrainTurn(params: {
     if (!effects.handoff && promisesHandoff(check.text)) {
       effects.handoff = {
         reason: 'otro',
-        summary: 'El bot le dijo al cliente que un asesor lo atendería, pero no dejó resumen. Revise la conversación.',
+        summary: 'El bot le dijo al cliente que un asesor lo atendería. Lea la conversación y escríbale.',
       };
     }
 
@@ -187,8 +187,15 @@ export async function runBrainTurn(params: {
     };
   }
 
-  return fail('error', 'Se alcanzó el máximo de iteraciones con herramientas');
+  return fail('error', 'El bot no logró armar una respuesta (buscó varias veces sin terminar). Lea la conversación y responda al cliente.');
 }
+
+/** Lo que lee el asesor en el pase cuando se frenó la respuesta del bot (el motivo técnico queda en ai_runs.error). */
+const BLOCKED_SUMMARY: Record<'empty' | 'mentions_price' | 'too_long', string> = {
+  empty: 'El bot no logró escribir una respuesta para este mensaje. Lea la conversación y responda al cliente.',
+  mentions_price: 'El bot iba a dar un precio y se frenó (no maneja precios). El cliente necesita una cotización: atiéndalo usted.',
+  too_long: 'La respuesta del bot salió demasiado larga y se frenó. Lea la conversación y responda al cliente.',
+};
 
 const plain = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
