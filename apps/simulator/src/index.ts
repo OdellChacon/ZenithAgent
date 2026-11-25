@@ -8,7 +8,7 @@ const env = z
     META_APP_SECRET: z.string().min(1, 'Define META_APP_SECRET (el mismo que usa el gateway)'),
     DEV_WHATSAPP_PHONE_NUMBER_ID: z.string().min(1, 'Define DEV_WHATSAPP_PHONE_NUMBER_ID (el del seed de desarrollo)'),
     SIMULATOR_PORT: z.coerce.number().int().min(1).max(65535).default(4010),
-    SIMULATOR_GATEWAY_URL: z.string().url().default('http://localhost:3000'),
+    SIMULATOR_GATEWAY_URL: z.string().url().default('http://127.0.0.1:3000'),
   })
   .parse(process.env);
 
