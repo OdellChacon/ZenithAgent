@@ -70,6 +70,7 @@
 /* Tema oscuro: por elección del asesor o, si no eligió, por el sistema operativo. */
 
 @media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .brand-mark { --mark: var(--lime); }
   :root:not([data-theme='light']) {
     color-scheme: dark;
     --bg: oklch(16% 0.016 150);
@@ -104,6 +105,7 @@
     --shadow-lg: 0 30px 80px -20px oklch(0% 0 0 / .7);
   }
 }
+:root[data-theme='dark'] .brand-mark { --mark: var(--lime); }
 :root[data-theme='dark'] {
   color-scheme: dark;
   --bg: oklch(16% 0.016 150);
@@ -514,17 +516,21 @@ button.chip.tag.on .muted { color: inherit; opacity: .8; }
 
 /* Marca */
 .brand-mark {
-  width: 38px; height: 38px; border-radius: 12px; display: grid; place-items: center; flex: none;
-  background: radial-gradient(120% 120% at 30% 20%, oklch(32% 0.04 145), var(--forest));
-  color: var(--lime);
-  box-shadow: 0 6px 18px -8px oklch(84% 0.17 128 / .55), inset 0 1px 0 oklch(100% 0 0 / .08), inset 0 0 0 1px oklch(84% 0.17 128 / .18);
+  --mark: oklch(34% 0.06 145);
+  width: 34px; height: 34px; display: grid; place-items: center; flex: none; color: var(--mark);
+  transition: color .3s;
 }
-.brand-mark svg { width: 24px; height: 24px; }
-.brand-mark.big { width: 60px; height: 60px; border-radius: 18px; }
-.brand-mark.big svg { width: 36px; height: 36px; }
-.brand-word { font-family: var(--font-display); font-weight: 650; font-size: 21px; letter-spacing: .01em; line-height: 1; }
-.brand-text { display: grid; gap: 3px; }
-.brand-text small { font-size: 11.5px; color: var(--muted); letter-spacing: .02em; white-space: nowrap; }
+.brand-mark svg { width: 32px; height: 32px; overflow: visible; }
+.brand-mark.big {
+  width: 64px; height: 64px; border-radius: 20px;
+  background: radial-gradient(circle at 30% 25%, color-mix(in oklch, var(--lime) 30%, transparent), transparent 70%), var(--raise);
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow-md);
+}
+.brand-mark.big svg { width: 38px; height: 38px; }
+.brand .brand-word { font-family: var(--font-display); font-weight: 600; font-size: 22px; letter-spacing: .02em; line-height: 1; color: var(--mark-word, var(--ink)); }
+.brand .brand-text { display: grid; gap: 4px; }
+.brand .brand-text small { font-size: 11.5px; color: var(--muted); letter-spacing: .01em; white-space: nowrap; }
 .brand:hover .brand-mark svg { animation: spin-globe 2.4s var(--ease-out); }
 @keyframes spin-globe { to { transform: rotateY(360deg); } }
 

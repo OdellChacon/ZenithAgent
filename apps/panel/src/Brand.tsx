@@ -6,7 +6,7 @@
 import type { ReactNode } from 'react';
 
 const IMM_GLOBE = (
-  <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true">
+  <svg viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.55" aria-hidden="true">
     <circle cx="16" cy="16" r="13" />
     <ellipse cx="16" cy="16" rx="6.5" ry="13" />
     <line x1="3" y1="16" x2="29" y2="16" />
