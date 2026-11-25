@@ -46,6 +46,7 @@ describe('normalizeTerms', () => {
     expect(normalizeTerms('¿Cerámicas de MADERA para el baño?')).toEqual(['ceramica', 'madera', 'bano']);
     expect(normalizeTerms('algo tipo madera')).toEqual(['madera']);
     expect(normalizeTerms(null)).toEqual([]);
+    expect(normalizeTerms('cerámicas grises, azules y marrones')).toEqual(['ceramica', 'gris', 'azul', 'marron']);
   });
 });
 

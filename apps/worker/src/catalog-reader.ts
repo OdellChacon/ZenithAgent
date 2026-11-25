@@ -24,16 +24,22 @@ export function normalizeTerms(text: string | null): string[] {
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
     .filter((w) => w.length >= 3 && !STOPWORDS.has(w));
-  // Se quita la "s" final para que "ceramicas" encuentre "ceramica" y viceversa.
-  return [...new Set(words.map((w) => (w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w)))].slice(0, 8);
+  // Plurales: "grises" → gris, "azules" → azul, "marrones" → marron (consonante + es);
+  // "ceramicas" → ceramica, "verdes" → verde (solo la s).
+  const singular = (w: string) => (w.length > 4 && /[^aeiou]es$/.test(w) ? w.slice(0, -2) : w.length > 4 && w.endsWith('s') ? w.slice(0, -1) : w);
+  return [...new Set(words.map(singular))].slice(0, 8);
 }
 
 /** Nombres de color en italiano o inglés que usan los modelos del catálogo (Notte Nero, Monte Bianco…). */
 const SYNONYMS: Record<string, string[]> = {
   negr: ['nero', 'black'],
-  blanc: ['bianc', 'white'],
-  gris: ['grigi', 'grey', 'gray'],
-  marron: ['brown'],
+  blanc: ['bianc', 'white', 'nieve'],
+  gris: ['grigi', 'grey', 'gray', 'plomo', 'ceniz', 'grafit', 'perla'],
+  marron: ['brown', 'cafe', 'avellana', 'chocolate', 'camel', 'nogal'],
+  beige: ['crema', 'arena', 'marfil', 'hueso', 'sand'],
+  azul: ['turquesa', 'celeste', 'aqua', 'blue'],
+  verde: ['oliva', 'menta', 'green'],
+  terracot: ['oxido', 'ladrillo', 'teja', 'rojiz'],
   dorad: ['gold', 'oro'],
 };
 
@@ -41,10 +47,11 @@ const SYNONYMS: Record<string, string[]> = {
  * Los clientes dicen "cerámica" o "porcelanato" para cualquier revestimiento de piso o pared,
  * aunque el catálogo lo separe en Cerámicas, Ceranattos y Porcelanato: se buscan en todas.
  */
+const TILE_CATEGORY = 'ceramic|ceranatt|porcelanat';
 const TILE_WORDS = /^(ceramic|ceranatt|porcelanat|revestimient|baldos|piso|azulej)/;
 export function categoryPattern(term: string | null): string | null {
   if (!term) return null;
-  if (TILE_WORDS.test(term)) return 'ceramic|ceranatt|porcelanat';
+  if (TILE_WORDS.test(term)) return TILE_CATEGORY;
   return term.length >= 5 && /[ao]$/.test(term) ? term.slice(0, -1) : term;
 }
 
@@ -54,7 +61,8 @@ export function categoryPattern(term: string | null): string | null {
  */
 export function termPattern(term: string): string {
   const stem = term.length >= 5 && /[ao]$/.test(term) ? term.slice(0, -1) : term;
-  return [stem, ...(SYNONYMS[stem] ?? [])].join('|');
+  const key = SYNONYMS[stem] ? stem : Object.keys(SYNONYMS).find((k) => stem.length >= 4 && (k.startsWith(stem) || stem.startsWith(k)));
+  return [stem, ...(key ? SYNONYMS[key]! : [])].join('|');
 }
 
 /** Lado mayor de las fotos del catálogo que ve el modelo: alcanza para comparar y gasta pocos tokens. */
@@ -97,6 +105,9 @@ export function createCatalogReader(pool: Pool, tenantId: string): CatalogReader
                FROM products
               WHERE active
                 AND ($1::text IS NULL OR unaccent(lower(coalesce(category, '') || ' ' || coalesce(category_name, ''))) ~ $1)
+                -- La tienda tiene algunos sanitarios dentro de Porcelanato o Ceranattos: al buscar
+                -- revestimientos se dejan fuera por el nombre.
+                AND ($1::text IS DISTINCT FROM '${TILE_CATEGORY}' OR NOT unaccent(lower(name)) ~ '^(sanitario|sala |lavamanos|orinal|taza)')
                 AND ($2::text IS NULL OR unaccent(lower(coalesce(attributes->>'surface', ''))) LIKE '%' || $2 || '%')
                 AND ($3::text IS NULL OR unaccent(lower(coalesce(attributes->>'usage', ''))) LIKE '%' || $3 || '%'))
            SELECT ${BASE_COLUMNS}, has_photo,

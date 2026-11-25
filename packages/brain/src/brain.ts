@@ -79,7 +79,9 @@ export async function runBrainTurn(params: {
 
   if (!messages.length) return fail('error', 'Conversación sin mensajes del cliente');
 
-  while (iterations < config.maxIterations) {
+  // Una vuelta extra si el modelo termina sin escribirle nada al cliente.
+  let nudged = false;
+  while (iterations < config.maxIterations + (nudged ? 1 : 0)) {
     iterations++;
     const response = await params.llm.create({
       model: config.model,
@@ -144,6 +146,17 @@ export async function runBrainTurn(params: {
       .join('\n')
       .trim();
 
+    if (!text && !nudged) {
+      // A veces el modelo cierra sin texto después de buscar y mandar fotos: se le pide la respuesta.
+      nudged = true;
+      messages.pop();
+      const note = { type: 'text' as const, text: '[Nota interna: escribe ahora tu respuesta al cliente con lo que encontraste.]' };
+      const last = messages.at(-1);
+      if (last?.role === 'user' && Array.isArray(last.content)) (last.content as unknown[]).push(note);
+      else messages.push({ role: 'user', content: [note] });
+      continue;
+    }
+
     const check = checkReply(text);
     if (!check.ok) {
       return {
@@ -159,9 +172,10 @@ export async function runBrainTurn(params: {
       };
     }
 
+    sendPromisedPhotos(check.text, effects);
     return {
       outcome: effects.handoff ? 'handoff' : 'replied',
-      reply: check.text,
+      reply: completeListing(check.text, effects),
       handoff: effects.handoff,
       photos: effects.photos,
       ...(effects.stopFollowups ? { stopFollowups: true } : {}),
@@ -174,4 +188,56 @@ export async function runBrainTurn(params: {
   }
 
   return fail('error', 'Se alcanzó el máximo de iteraciones con herramientas');
+}
+
+const plain = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+/**
+ * Si la búsqueda encontró varias opciones que coinciden bien y la respuesta no las nombra todas,
+ * agrega las que faltan antes de la pregunta final: el cliente no tiene por qué saber qué
+ * modelos preguntar. Con más opciones de las que caben, dice cuántas hay en total.
+ */
+export function completeListing(reply: string, effects: ToolEffects): string {
+  const listing = effects.listing;
+  if (!listing || effects.handoff) return reply;
+  const said = plain(reply);
+  const shown = new Set(effects.photos.map((p) => p.name));
+  const missing = listing.names.filter((n) => !shown.has(n) && !said.includes(plain(n)));
+  if (!missing.length) return reply;
+  const names = missing.map((n) => `*${n}*`);
+  const list = names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} y ${names.at(-1)}`;
+  const more =
+    listing.total > listing.names.length
+      ? ` En total son unos ${listing.total} modelos; si me dice el estilo que busca (mármol, cemento, madera, piedra…), le muestro el resto.`
+      : '';
+  const extra = `También tenemos ${list}. Si quiere, le mando las fotos.${more}`;
+  const parts = reply.split(/\n\s*\n/);
+  // Antes del último párrafo con pregunta, para que la conversación siga terminando en ella.
+  let q = -1;
+  parts.forEach((p, i) => {
+    if (p.includes('?')) q = i;
+  });
+  if (q > 0) return [...parts.slice(0, q), extra, ...parts.slice(q)].join('\n\n');
+  return `${reply}\n\n${extra}`;
+}
+
+/** "le envié", "le mando", "le acabo de enviar", "en la primera foto"… */
+const CLAIMS_PHOTOS = /\b(?:le|les)\s+(?:acabo\s+de\s+)?(?:envi|mand|adjunt|compart)\p{L}*|\b(?:primera|segunda|tercera)\s+foto|\ben\s+las\s+fotos\b/iu;
+
+/**
+ * Si el bot dice que mandó fotos sin usar enviar_fotos, se mandan las de los productos que nombró
+ * (de los que trajo la búsqueda, con foto, en el orden en que los nombró, máximo 3): lo que el
+ * cliente lee tiene que ser cierto.
+ */
+export function sendPromisedPhotos(reply: string, effects: ToolEffects): void {
+  if (effects.photos.length || !effects.seen?.size) return;
+  // Las ofertas ("¿Quiere que le mande las fotos?") no cuentan: solo afirmaciones.
+  const statements = reply.split(/(?<=[.!?…])\s+|\n+/).filter((x) => !/^¿|\?\s*$/.test(x.trim()));
+  if (!statements.some((x) => CLAIMS_PHOTOS.test(plain(x)))) return;
+  const said = plain(reply);
+  const named = [...effects.seen.entries()]
+    .filter(([name, p]) => p.hasPhoto && said.includes(plain(name)))
+    .sort(([a], [b]) => said.indexOf(plain(a)) - said.indexOf(plain(b)))
+    .slice(0, 3);
+  for (const [name, p] of named) effects.photos.push({ productId: p.id, name });
 }

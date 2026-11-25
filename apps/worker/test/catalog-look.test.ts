@@ -63,7 +63,8 @@ describe.skipIf(!hasDb)('descripción visual del catálogo', () => {
   it('describe solo los productos con foto, lo guarda aparte y la búsqueda lo encuentra por su aspecto', async () => {
     const reader = createCatalogReader(app, t.tenantId);
     const search = (q: string) => reader.search({ text: q, category: null, surface: null, usage: null, limit: 5 });
-    expect(await search('gris madera')).toEqual([]);
+    // Sin la descripción de la foto, nada en la ficha dice madera ni chevron.
+    expect(await search('madera chevron')).toEqual([]);
 
     const { llm, calls } = scriptedLlm([
       text('{"aspecto":["madera","geométrico"],"colores":["gris"],"patron":"chevron","descripcion":"Listones grises tipo madera en diagonal."}'),
@@ -104,8 +105,10 @@ describe('termPattern', () => {
   it('une el masculino y el femenino y agrega los nombres de color de los modelos', () => {
     expect(termPattern('negra')).toBe('negr|nero|black');
     expect(termPattern('negro')).toBe('negr|nero|black');
-    expect(termPattern('blanca')).toBe('blanc|bianc|white');
-    expect(termPattern('gris')).toBe('gris|grigi|grey|gray');
+    expect(termPattern('blanca')).toBe('blanc|bianc|white|nieve');
+    expect(termPattern('gris')).toBe('gris|grigi|grey|gray|plomo|ceniz|grafit|perla');
+    expect(termPattern('beige')).toBe('beige|crema|arena|marfil|hueso|sand');
+    expect(termPattern('azul')).toBe('azul|turquesa|celeste|aqua|blue');
     expect(termPattern('piso')).toBe('piso');
   });
 });

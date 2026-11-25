@@ -84,6 +84,13 @@ export interface ToolEffects {
   stopFollowups?: boolean;
   /** Enviar la foto de la fachada, con la dirección como pie, antes del texto. */
   storefront?: boolean;
+  /**
+   * Opciones que coinciden bien con lo último que pidió el cliente (cuando son más de 3). Si la
+   * respuesta del bot no las nombra todas, el sistema agrega las que faltan.
+   */
+  listing?: { names: string[]; total: number };
+  /** Productos que trajeron las búsquedas del turno, por nombre (para mandar fotos prometidas). */
+  seen?: Map<string, { id: string; hasPhoto: boolean }>;
 }
 
 // --------------------------------------------------------------------- definiciones
@@ -315,10 +322,20 @@ const presentWith = (variants: Map<string, string[]>, best = 0) => (p: ProductRo
  * Cuántos productos coinciden bien con lo pedido. Con más de 3, el resultado le recuerda al bot
  * que, si el cliente preguntó qué hay, se los nombre todos (el modelo tiende a quedarse con 2).
  */
-function matchSummary(rows: ProductRow[]): { best: number; extra: Record<string, unknown> } {
+function matchSummary(rows: ProductRow[], total?: number): { best: number; extra: Record<string, unknown> } {
   const best = Math.max(0, ...rows.map((r) => r.score ?? 0));
   if (!best) return { best: 0, extra: {} };
   const high = rows.filter((r) => (r.score ?? 0) >= best * 0.6).length;
+  // Más de las que caben en un mensaje: un vendedor dice cuántas hay y ayuda a elegir por estilo.
+  if (total !== undefined && total > rows.length) {
+    return {
+      best,
+      extra: {
+        coincidencias_altas: total,
+        nota_opciones: `Hay ${total} productos que coinciden bien; aquí van los ${rows.length} más fieles. Son demasiados para nombrarlos todos: dígale al cliente cuántos hay, nómbrele los más representativos agrupados por estilo (por ejemplo mármol, cemento, madera, piedra) y pregúntele qué estilo o espacio busca para mostrarle el resto con otra búsqueda.`,
+      },
+    };
+  }
   return {
     best,
     extra: {
@@ -380,9 +397,21 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         limit: Math.min(Math.max(limite, 1), 12),
       };
       const rows = await ctx.catalog.search(filters);
+      effects.seen ??= new Map();
+      for (const r of rows) if (!effects.seen.has(r.name)) effects.seen.set(r.name, { id: r.id, hasPhoto: r.has_photo });
       if (rows.length) {
         const variants = await withVariants(rows, ctx);
-        const summary = matchSummary(rows);
+        // Si se llenó el límite, se cuentan aparte cuántas coinciden bien en todo el catálogo.
+        let total: number | undefined;
+        if (filters.text && rows.length >= filters.limit) {
+          const all = await ctx.catalog.search({ ...filters, limit: 200 });
+          const top = Math.max(0, ...all.map((r) => r.score ?? 0));
+          total = all.filter((r) => (r.score ?? 0) >= top * 0.6).length;
+        }
+        const summary = matchSummary(rows, total);
+        const best = summary.best;
+        const strong = best ? rows.filter((r) => (r.score ?? 0) >= best * 0.6).map((r) => r.name) : [];
+        if (strong.length > 3) effects.listing = { names: [...new Set(strong)], total: total ?? strong.length };
         return withPhotos(
           json({ resultados: rows.length, ...summary.extra, productos: rows.map(presentWith(variants, summary.best)) }),
           rows,

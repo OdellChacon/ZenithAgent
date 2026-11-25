@@ -10,6 +10,8 @@ import {
   runBrainTurn,
   TenantSettingsError,
   pendingCustomerImages,
+  completeListing,
+  sendPromisedPhotos,
   designBase,
   identifyProductInPhoto,
   polishReply,
@@ -330,6 +332,51 @@ describe('runBrainTurn', () => {
     expect(await identifyProductInPhoto(scriptedLlm([text('0')]).llm, 'm', photo, cands)).toBeNull();
     expect(await identifyProductInPhoto(scriptedLlm([text('Ninguno')]).llm, 'm', photo, cands)).toBeNull();
     expect(await identifyProductInPhoto(scriptedLlm([text('7')]).llm, 'm', photo, cands)).toBeNull();
+  });
+
+  it('si el modelo termina sin escribir nada, se le pide la respuesta una vez', async () => {
+    const { llm, calls } = scriptedLlm([text(''), text('Claro, le muestro opciones.')]);
+    const res = await runBrainTurn({ ...base, llm, messages: customer('¿Qué cerámicas grises tienen?'), tools: { catalog: catalog(), wastePercent: null } });
+    expect(res).toMatchObject({ outcome: 'replied', reply: 'Claro, le muestro opciones.' });
+    expect(JSON.stringify(calls[1]!.messages)).toContain('escribe ahora tu respuesta al cliente');
+    // Si vuelve a quedar vacía, no se insiste: se bloquea y deriva como antes.
+    const twice = await runBrainTurn({ ...base, llm: scriptedLlm([text(''), text('')]).llm, messages: customer('Hola'), tools: { catalog: catalog(), wastePercent: null } });
+    expect(twice).toMatchObject({ outcome: 'blocked_by_validator', error: 'empty' });
+  });
+
+  it('si el bot dice que mandó fotos sin mandarlas, se mandan las de los productos que nombró', () => {
+    const seen = new Map([
+      ['Bosco Camel', { id: 'b', hasPhoto: true }],
+      ['Archi Terra', { id: 'a', hasPhoto: true }],
+      ['Sin Foto', { id: 's', hasPhoto: false }],
+      ['Brunel Dual', { id: 'r', hasPhoto: true }],
+    ]);
+    const effects = { handoff: null, photos: [] as { productId: string; name: string }[], seen };
+    sendPromisedPhotos('Le envío tres modelos: *Archi Terra*, *Bosco Camel* y *Sin Foto*.', effects);
+    expect(effects.photos).toEqual([{ productId: 'a', name: 'Archi Terra' }, { productId: 'b', name: 'Bosco Camel' }]);
+    // Una oferta en pregunta no es una afirmación.
+    const offer = { handoff: null, photos: [] as { productId: string; name: string }[], seen };
+    sendPromisedPhotos('Tenemos el Brunel Dual. ¿Quiere que le mande las fotos?', offer);
+    expect(offer.photos).toEqual([]);
+  });
+
+  it('completeListing agrega antes de la pregunta las opciones que el bot no nombró', () => {
+    const effects = {
+      handoff: null,
+      photos: [{ productId: 'x', name: 'Notte Nero' }],
+      listing: { names: ['Notte Nero', 'Stasera', 'Toba', 'Violina', 'Brooklyn'], total: 5 },
+    };
+    const out = completeListing('Tenemos el *Notte Nero* y el *Stasera*.\n\n¿Es para piso o pared?', effects);
+    expect(out).toBe(
+      'Tenemos el *Notte Nero* y el *Stasera*.\n\nTambién tenemos *Toba*, *Violina* y *Brooklyn*. Si quiere, le mando las fotos.\n\n¿Es para piso o pared?',
+    );
+    // Si ya los nombró todos (aunque sea sin tildes ni mayúsculas), no agrega nada.
+    expect(completeListing('notte nero, stasera, toba, violina y brooklyn', effects)).toBe('notte nero, stasera, toba, violina y brooklyn');
+    // Con más de las que caben, dice cuántas hay.
+    const many = { ...effects, listing: { names: ['Notte Nero', 'Stasera', 'Toba', 'Violina'], total: 20 } };
+    expect(completeListing('Tenemos el Notte Nero, el Stasera y el Toba.', many)).toContain('*Violina*. Si quiere, le mando las fotos. En total son unos 20 modelos');
+    // Si se deriva a un asesor, no se toca.
+    expect(completeListing('Le paso con un asesor.', { ...effects, handoff: { reason: 'otro' as const, summary: 'x' } })).toBe('Le paso con un asesor.');
   });
 
   it('designBase separa el diseño del color y deja fuera los nombres genéricos', () => {
