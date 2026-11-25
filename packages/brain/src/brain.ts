@@ -4,7 +4,7 @@ import { TOOL_DEFINITIONS, runTool, type HandoffReason, type ToolContext, type T
 import { checkReply, promisesHandoff } from './validate.js';
 
 /** Etiqueta de cada foto del catálogo que se le muestra al modelo tras una búsqueda. */
-export const CATALOG_PHOTO_PREFIX = '[Foto del catálogo: ';
+export const CATALOG_PHOTO_PREFIX = '[Foto del catálogo, solo para que la mires (el cliente no la ha visto): ';
 
 export interface BrainConfig {
   model: string;

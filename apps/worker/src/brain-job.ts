@@ -12,6 +12,7 @@ import {
   pendingVoiceNotes,
   runBrainTurn,
   PHOTO_SENT_PREFIX,
+  identifyProductInPhoto,
   splitBubbles,
   typingPauseMs,
   toModelMessages,
@@ -208,6 +209,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     );
   }
 
+  // La foto más reciente del cliente en este turno, para reconocer si es un producto del catálogo.
+  const latestCustomerImage = images?.size ? [...images.values()].at(-1) : undefined;
+
   let brain: BrainResult;
   try {
     brain = await runBrainTurn({
@@ -228,6 +232,14 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
         // El modelo ve las fotos de los productos que encuentra: más si el cliente mandó una foto
         // para comparar. Tope por turno para que varias búsquedas no disparen el costo.
         catalogPhotos: { perSearch: images?.size ? 4 : 3, remaining: CATALOG_PHOTOS_PER_TURN },
+        ...(latestCustomerImage && (deps.config?.model ?? deps.voice?.model)
+          ? {
+              identifyPhoto: {
+                run: (candidates) => identifyProductInPhoto(deps.llm, (deps.config?.model ?? deps.voice?.model)!, latestCustomerImage, candidates),
+                remaining: 2,
+              },
+            }
+          : {}),
       },
       ...(deps.config ? { config: deps.config } : {}),
     });

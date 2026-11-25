@@ -66,6 +66,11 @@ export interface ToolContext {
    * imagen con imagen: `perSearch` por búsqueda y `remaining` en todo el turno (se va descontando).
    */
   catalogPhotos?: { perSearch: number; remaining: number };
+  /**
+   * Si el cliente mandó una foto: pregunta si alguno de los productos encontrados es exactamente
+   * ese (con un modelo de visión). `remaining` limita las consultas por turno.
+   */
+  identifyPhoto?: { run: (candidates: { name: string; photo: CatalogPhoto }[]) => Promise<string | null>; remaining: number };
 }
 
 /** Lo que las herramientas piden al sistema además de responder (se aplica al guardar). */
@@ -230,11 +235,76 @@ async function withPhotos(outcome: ToolOutcome, rows: ProductRow[], ctx: ToolCon
     return photo ? [{ label: r.name, photo }] : [];
   });
   budget.remaining -= images.length;
-  return images.length ? { ...outcome, images } : outcome;
+  if (!images.length) return outcome;
+
+  const identify = ctx.identifyPhoto;
+  if (identify && identify.remaining > 0) {
+    identify.remaining--;
+    let same: string | null = null;
+    try {
+      same = await identify.run(images.map((i) => ({ name: i.label, photo: i.photo })));
+    } catch {
+      same = null; // sin la comparación el resultado sigue sirviendo
+    }
+    if (same) {
+      const data = JSON.parse(outcome.content) as { productos?: { nombre: string; mismo_diseno_en_otros_colores?: string[] }[] };
+      const variants = data.productos?.find((p) => p.nombre === same)?.mismo_diseno_en_otros_colores ?? [];
+      const also = variants.length
+        ? ` Como buen vendedor, ofrézcale también los otros colores del mismo modelo: ${variants.join(', ')}.`
+        : ' Después siga asesorándolo (espacio, metros).';
+      return {
+        ...outcome,
+        images,
+        content: JSON.stringify({
+          es_el_mismo_de_la_foto_del_cliente: same,
+          nota_foto: `La foto del cliente es el ${same}: dígale primero que sí lo tiene y muéstrele ese.${also}`,
+          ...data,
+        }),
+      };
+    }
+  }
+  return { ...outcome, images };
 }
 
 const json = (value: unknown): ToolOutcome => ({ content: JSON.stringify(value), isError: false });
 const error = (message: string): ToolOutcome => ({ content: JSON.stringify({ error: message }), isError: true });
+
+/** Primeras palabras que no forman un diseño propio: "Marmol Oslo" y "Marmol Alba" son modelos distintos. */
+const GENERIC_BASES = new Set(['marmol', 'mármol', 'sanitario', 'lavamanos', 'orinal', 'taza']);
+
+/** "Archi Cenizo" → "Archi"; "Exterior Medellin Gris" → "Exterior Medellin". null si no hay base útil. */
+export function designBase(name: string): string | null {
+  const words = name.trim().split(/\s+/);
+  if (words.length < 2) return null;
+  const base = words.slice(0, -1).join(' ');
+  if (base.length < 4 || GENERIC_BASES.has(base.toLocaleLowerCase('es'))) return null;
+  return base;
+}
+
+/**
+ * Otros colores del mismo diseño para los primeros resultados (ej. Archi Cenizo → Archi Terra),
+ * para que el bot los ofrezca como "también viene en…" en vez de buscar parecidos.
+ */
+async function withVariants(rows: ProductRow[], ctx: ToolContext): Promise<Map<string, string[]>> {
+  const out = new Map<string, string[]>();
+  const bases = new Map<string, ProductRow[]>();
+  for (const r of rows.slice(0, 3)) {
+    const base = designBase(r.name);
+    if (!base) continue;
+    if (!bases.has(base)) {
+      const found = await ctx.catalog.search({ text: base, category: null, surface: null, usage: null, limit: 8 });
+      bases.set(base, found.filter((f) => f.name.toLocaleLowerCase('es').startsWith(`${base.toLocaleLowerCase('es')} `)));
+    }
+    const others = [...new Set(bases.get(base)!.filter((f) => f.name !== r.name).map((f) => f.name))];
+    if (others.length) out.set(r.id, others);
+  }
+  return out;
+}
+
+const presentWith = (variants: Map<string, string[]>) => (p: ProductRow) => {
+  const v = variants.get(p.id);
+  return v ? { ...presentProduct(p), mismo_diseno_en_otros_colores: v } : presentProduct(p);
+};
 
 function presentProduct(p: ProductRow) {
   const a = p.attributes;
@@ -284,7 +354,10 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         limit: Math.min(Math.max(limite, 1), 8),
       };
       const rows = await ctx.catalog.search(filters);
-      if (rows.length) return withPhotos(json({ resultados: rows.length, productos: rows.map(presentProduct) }), rows, ctx);
+      if (rows.length) {
+        const variants = await withVariants(rows, ctx);
+        return withPhotos(json({ resultados: rows.length, productos: rows.map(presentWith(variants)) }), rows, ctx);
+      }
 
       // La categoría que dice el cliente no siempre es la del catálogo ("porcelanato" puede estar
       // en otra categoría, o la categoría tener productos mal puestos): se busca lo mismo sin ella.
@@ -294,7 +367,7 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
           return withPhotos(json({
             resultados: anyCategory.length,
             nota: `En la categoría "${filters.category}" no hubo coincidencias; estos productos de otras categorías sí coinciden con lo que busca el cliente.`,
-            productos: anyCategory.map(presentProduct),
+            productos: anyCategory.map(presentWith(await withVariants(anyCategory, ctx))),
           }), anyCategory, ctx);
         }
       }
@@ -309,7 +382,7 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         resultados: 0,
         nota:
           'No hubo coincidencias exactas. Abajo van los productos más parecidos del catálogo: ofréceselos al cliente. ' +
-          'No digas que no hay stock (no conoces el inventario) y no repitas la búsqueda; si nada encaja, ofrece conseguirlo bajo pedido con un asesor.',
+          'No digas que no hay stock (no conoces el inventario). Si nada de esto encaja, prueba una búsqueda con otras palabras o ofrece conseguirlo bajo pedido con un asesor.',
         sugerencias: similar.map(presentProduct),
       }), similar, ctx);
     }

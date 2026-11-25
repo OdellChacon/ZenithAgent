@@ -10,6 +10,8 @@ import {
   runBrainTurn,
   TenantSettingsError,
   pendingCustomerImages,
+  designBase,
+  identifyProductInPhoto,
   polishReply,
   pendingVoiceNotes,
   promisesHandoff,
@@ -282,6 +284,61 @@ describe('runBrainTurn', () => {
     expect(result).toContain('No digas que no hay stock');
   });
 
+  it('agrega los otros colores del mismo diseño a los resultados', async () => {
+    const terra = { ...PRODUCT, id: '22222222-2222-4222-8222-222222222222', name: 'Archi Terra' };
+    const cenizo = { ...PRODUCT, name: 'Archi Cenizo' };
+    const cat = catalog([cenizo, terra]);
+    const { llm, calls } = scriptedLlm([
+      tool('buscar_productos', { texto: 'gris geométrico', categoria: null, superficie: null, uso: null, limite: 3 }),
+      text('Sí, ese lo tenemos: es el Archi Cenizo.'),
+    ]);
+    await runBrainTurn({ ...base, llm, messages: customer('¿Tienen este?'), tools: { catalog: cat, wastePercent: null } });
+    const result = JSON.parse(String((calls[1]!.messages.at(-1)!.content as { content: string }[])[0]!.content));
+    expect(result.productos[0]).toMatchObject({ nombre: 'Archi Cenizo', mismo_diseno_en_otros_colores: ['Archi Terra'] });
+    expect(result.productos[1]).toMatchObject({ nombre: 'Archi Terra', mismo_diseno_en_otros_colores: ['Archi Cenizo'] });
+    // Solo una búsqueda extra por diseño, aunque haya dos productos de la misma familia.
+    expect(cat.search).toHaveBeenCalledTimes(2);
+  });
+
+  it('si la foto del cliente es uno de los productos, el resultado lo dice', async () => {
+    const rows = [
+      { ...PRODUCT, name: 'Archi Cenizo', has_photo: true },
+      { ...PRODUCT, id: '22222222-2222-4222-8222-222222222222', name: 'Libano Gris', has_photo: true },
+    ];
+    const cat = { ...catalog(rows), photos: vi.fn(async (ids: string[]) => new Map(ids.map((id) => [id, { mediaType: 'image/jpeg' as const, base64: 'X' }]))) };
+    const run = vi.fn(async (c: { name: string }[]) => c[0]!.name);
+    const { llm, calls } = scriptedLlm([
+      tool('buscar_productos', { texto: 'gris geométrico', categoria: null, superficie: null, uso: null, limite: 3 }),
+      text('Sí, ese lo tenemos: es el Archi Cenizo.'),
+    ]);
+    await runBrainTurn({
+      ...base,
+      llm,
+      messages: customer('¿Tienen este?'),
+      tools: { catalog: cat, wastePercent: null, catalogPhotos: { perSearch: 4, remaining: 8 }, identifyPhoto: { run, remaining: 2 } },
+    });
+    expect(run).toHaveBeenCalledWith([expect.objectContaining({ name: 'Archi Cenizo' }), expect.objectContaining({ name: 'Libano Gris' })]);
+    expect(JSON.stringify(calls[1]!.messages.at(-1))).toContain('es_el_mismo_de_la_foto_del_cliente\\":\\"Archi Cenizo');
+  });
+
+  it('identifyProductInPhoto devuelve el nombre del número elegido, o null', async () => {
+    const photo = { mediaType: 'image/jpeg' as const, base64: 'X' };
+    const cands = [{ name: 'Archi Cenizo', photo }, { name: 'Libano Gris', photo }];
+    const yes = scriptedLlm([text('1')]);
+    expect(await identifyProductInPhoto(yes.llm, 'm', photo, cands)).toBe('Archi Cenizo');
+    expect(JSON.stringify(yes.calls[0]!.messages)).toContain('Producto 2:');
+    expect(await identifyProductInPhoto(scriptedLlm([text('0')]).llm, 'm', photo, cands)).toBeNull();
+    expect(await identifyProductInPhoto(scriptedLlm([text('Ninguno')]).llm, 'm', photo, cands)).toBeNull();
+    expect(await identifyProductInPhoto(scriptedLlm([text('7')]).llm, 'm', photo, cands)).toBeNull();
+  });
+
+  it('designBase separa el diseño del color y deja fuera los nombres genéricos', () => {
+    expect(designBase('Archi Cenizo')).toBe('Archi');
+    expect(designBase('Exterior Medellin Gris')).toBe('Exterior Medellin');
+    expect(designBase('Marmol Oslo')).toBeNull();
+    expect(designBase('Brooklyn')).toBeNull();
+  });
+
   it('después de buscar, el modelo ve las fotos del catálogo, con tope por turno', async () => {
     const rows = ['a', 'b', 'c'].map((x, i) => ({ ...PRODUCT, id: `${x.repeat(8)}-1111-4111-8111-111111111111`, name: `Madera ${i + 1}`, has_photo: i !== 1 }));
     const cat = {
@@ -299,8 +356,8 @@ describe('runBrainTurn', () => {
     // Solo los que tienen foto: Madera 1 y Madera 3.
     expect(cat.photos).toHaveBeenNthCalledWith(1, [rows[0]!.id, rows[2]!.id]);
     const first = JSON.stringify(calls[1]!.messages.at(-1));
-    expect(first).toContain('[Foto del catálogo: Madera 1]');
-    expect(first).toContain('[Foto del catálogo: Madera 3]');
+    expect(first).toContain('el cliente no la ha visto): Madera 1]');
+    expect(first).toContain('el cliente no la ha visto): Madera 3]');
     expect(first).toContain('"data":"FOTO-a"');
     expect(first).not.toContain('Madera 2]');
     // Quedaba 1 foto en el turno: la segunda búsqueda trae solo una.
@@ -317,7 +374,9 @@ describe('runBrainTurn', () => {
     cat.search.mockImplementationOnce(async () => []);
     const res = await runBrainTurn({ ...base, llm, messages: customer('Porcelanato gris para terraza'), tools: { catalog: cat, wastePercent: null } });
     expect(res.outcome).toBe('replied');
-    expect(cat.search).toHaveBeenCalledTimes(2);
+    // 1.ª con categoría, 2.ª sin ella, 3.ª los otros colores del mismo diseño ("Aconna …").
+    expect(cat.search).toHaveBeenCalledTimes(3);
+    expect(cat.search.mock.calls[2]?.[0]).toMatchObject({ text: 'Aconna' });
     expect(cat.search.mock.calls[1]?.[0]).toMatchObject({ text: 'gris', category: null, surface: 'piso', usage: 'exterior' });
     const result = JSON.stringify(calls[1]?.messages.at(-1));
     expect(result).toContain('otras categorías');

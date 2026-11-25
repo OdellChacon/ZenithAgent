@@ -11,3 +11,4 @@ export * from './validate.js';
 export * from './followup.js';
 export * from './human.js';
 export * from './transcribe.js';
+export * from './identify.js';
