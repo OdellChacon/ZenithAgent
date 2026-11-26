@@ -17,6 +17,16 @@ export interface TagCatalog {
   groups: TagGroup[];
   canManage: boolean;
 }
+export interface MessageTemplate {
+  name: string;
+  language: string;
+  category: string;
+  body: string;
+  params: number;
+  header: string | null;
+  footer: string | null;
+  buttons: string[];
+}
 export type View = 'pending' | 'mine' | 'all';
 export type WindowState = 'FREE' | 'TEMPLATE_ONLY' | 'HUMAN_AGENT_ONLY' | 'CLOSED';
 
@@ -154,6 +164,9 @@ export const api = {
   list: (view: View) => request<{ items: ConversationSummary[] }>('GET', `/conversations?view=${view}`),
   get: (id: string) => request<ConversationDetail>('GET', `/conversations/${encodeURIComponent(id)}`),
   take: (id: string) => request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/take`),
+  templates: (id: string) => request<{ items: MessageTemplate[] }>('GET', `/conversations/${encodeURIComponent(id)}/templates`),
+  sendTemplate: (id: string, t: { name: string; language: string; params: string[]; clientId: string }) =>
+    request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/templates`, t),
   send: (id: string, text: string, clientId: string) =>
     request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/messages`, { text, clientId }),
   finish: (id: string, action: 'release' | 'close') => request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/finish`, { action }),

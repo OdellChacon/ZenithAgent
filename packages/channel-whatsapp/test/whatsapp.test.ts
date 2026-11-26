@@ -8,6 +8,9 @@ import {
   verifyMetaSignature,
   WhatsAppPayloadError,
   WhatsAppSendError,
+  countTemplateParams,
+  renderTemplateBody,
+  toApprovedTemplate,
 } from '../src/index.js';
 import { accountUpdateWebhook, echoWebhook, historyWebhook, stateSyncWebhook, imageWebhook, PHONE_NUMBER_ID, statusWebhook, textWebhook } from './fixtures.js';
 
@@ -352,5 +355,23 @@ describe('sendWhatsAppText', () => {
     await expect(sendWhatsAppText({ ...base, fetch: fetchMock }, '584141112233', 'x'.repeat(4097))).rejects.toThrow(WhatsAppSendError);
     await expect(sendWhatsAppText({ ...base, graphApiVersion: 'latest', fetch: fetchMock }, '584141112233', 'x')).rejects.toThrow(WhatsAppSendError);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('plantillas aprobadas', () => {
+  it('lee el cuerpo, cuenta los datos y deja fuera las que no se pueden mandar', () => {
+    expect(countTemplateParams('Hola {{1}}, soy {{2}} y {{ 1 }}')).toBe(2);
+    expect(renderTemplateBody('Hola {{1}}, soy {{2}}', ['Rosa', 'Ana'])).toBe('Hola Rosa, soy Ana');
+    expect(
+      toApprovedTemplate({
+        name: 'x',
+        language: 'es',
+        status: 'APPROVED',
+        category: 'utility',
+        components: [{ type: 'HEADER', format: 'TEXT', text: 'Mora Mora' }, { type: 'BODY', text: 'Hola {{1}}' }, { type: 'FOOTER', text: 'Pie' }],
+      }),
+    ).toEqual({ name: 'x', language: 'es', category: 'UTILITY', body: 'Hola {{1}}', params: 1, header: 'Mora Mora', footer: 'Pie', buttons: [] });
+    expect(toApprovedTemplate({ name: 'x', language: 'es', status: 'PENDING', components: [{ type: 'BODY', text: 'a' }] })).toBeNull();
+    expect(toApprovedTemplate({ name: 'x', language: 'es', status: 'APPROVED', components: [{ type: 'HEADER', format: 'TEXT', text: 'Hola {{1}}' }, { type: 'BODY', text: 'a' }] })).toBeNull();
   });
 });

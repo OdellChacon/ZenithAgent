@@ -3,6 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { api, ApiError, CHANNEL_LABELS, REASON_LABELS, type ConversationDetail, type Me, type Message } from './api';
 import { clock, remaining } from './time';
 import { TagEditor } from './tags';
+import { TemplateComposer } from './TemplateComposer';
 import { Avatar, Icon, Ticks } from './ui';
 import { playSound } from './sounds';
 
@@ -80,7 +81,7 @@ function Bubble({ m, fresh }: { m: Message; fresh: boolean }) {
             ? 'Bot · seguimiento'
             : 'Bot'
         : m.author === 'agent'
-          ? (m.sentBy ?? 'Asesor · desde el teléfono')
+          ? `${m.sentBy ?? 'Asesor · desde el teléfono'}${m.type === 'template' ? ' · plantilla' : ''}`
           : 'Sistema';
   return (
     <motion.div
@@ -220,8 +221,8 @@ export function Conversation({
 
   let composerHint: string | null = null;
   if (!mine) composerHint = otherAgent ? `Esta conversación la atiende ${data.assignedTo!.name}.` : 'Toma la conversación para responder.';
-  else if (data.window.state !== 'FREE')
-    composerHint = 'Pasaron más de 24 h desde el último mensaje del cliente: WhatsApp solo permite plantillas aprobadas (aún no disponibles en el panel).';
+  // Ventana cerrada: el asesor escribe con una plantilla aprobada (TemplateComposer).
+  const needsTemplate = mine && data.window.state !== 'FREE';
 
   return (
     <section className="conversation" aria-label={`Conversación con ${data.contact.name}`}>
@@ -319,6 +320,17 @@ export function Conversation({
         )}
       </AnimatePresence>
 
+      {needsTemplate ? (
+        <TemplateComposer
+          conversationId={id}
+          contactName={data.contact.name}
+          agentName={me.name}
+          onSent={() => {
+            setNotice('Plantilla enviada. Cuando el cliente responda, se abre otra vez la ventana para escribirle libre.');
+            onChanged();
+          }}
+        />
+      ) : (
       <form className="composer" onSubmit={send}>
         {composerHint ? (
           <p className="muted small hint">{composerHint}</p>
@@ -345,6 +357,7 @@ export function Conversation({
           </>
         )}
       </form>
+      )}
     </section>
   );
 }

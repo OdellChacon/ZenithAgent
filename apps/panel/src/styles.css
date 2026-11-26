@@ -855,3 +855,33 @@ input.tm-name:focus { outline: none; border-color: var(--accent); text-transform
 .empty-state.lg p { font-size: 14px; max-width: 360px; }
 .empty-state.lg .empty-glyph { animation: float 5s ease-in-out infinite; }
 @keyframes float { 0%, 100% { translate: 0 0; } 50% { translate: 0 -5px; } }
+
+/* ================================================================== plantillas (fuera de 24 h) */
+.tpl { margin: 10px 14px 14px; padding: 14px; border-radius: 18px; background: var(--panel-solid); border: 1px solid var(--line); box-shadow: var(--shadow-md); display: grid; gap: 12px; max-height: 55vh; overflow-y: auto; }
+.tpl-head { display: flex; gap: 12px; align-items: flex-start; }
+.tpl-head b { display: block; font-size: 14px; }
+.tpl-head p { margin: 2px 0 0; }
+.tpl-icon { width: 36px; height: 36px; border-radius: 11px; display: grid; place-items: center; flex: none; background: var(--warn-soft); color: var(--warn); }
+.tpl-icon svg { width: 19px; height: 19px; }
+.tpl-error { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tpl-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.tpl-card { width: 100%; text-align: left; display: grid; gap: 4px; padding: 10px 12px; border-radius: 13px; border: 1px solid var(--line); background: var(--raise); cursor: pointer; transition: border-color .2s, box-shadow .2s, transform .15s var(--ease-out); }
+.tpl-card:hover { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.tpl-card:active { transform: scale(.99); }
+.tpl-card-top { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tpl-card-body { font-size: 13px; color: var(--muted); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tpl-back { margin-left: auto; }
+.tpl-form { display: grid; gap: 12px; }
+.tpl-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; }
+.tpl-fields label { display: grid; gap: 4px; font-size: 12px; font-weight: 600; color: var(--muted); }
+.tpl-fields input { padding: 8px 11px; border: 1px solid var(--line); border-radius: 10px; background: var(--raise); color: var(--ink); }
+.tpl-fields input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.tpl-bubble { justify-self: end; max-width: min(460px, 92%); padding: 10px 12px; border-radius: 16px 16px 5px 16px; background: var(--agent); display: grid; gap: 6px; box-shadow: var(--shadow-sm); }
+.tpl-preview { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 14px; }
+.tpl-preview mark { border-radius: 5px; padding: 0 3px; }
+.tpl-filled { background: color-mix(in srgb, var(--accent) 22%, transparent); color: inherit; }
+.tpl-missing { background: var(--hot-soft); color: var(--hot); font-size: 12px; font-weight: 600; }
+.tpl-buttons { display: grid; gap: 4px; border-top: 1px solid color-mix(in srgb, var(--ink) 12%, transparent); padding-top: 6px; }
+.tpl-buttons span { text-align: center; font-size: 13px; font-weight: 600; color: var(--accent); }
+.tpl-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
+.tpl-actions .btn svg { width: 16px; height: 16px; }

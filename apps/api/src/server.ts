@@ -9,8 +9,11 @@ import {
   requestSmbAppData,
   subscribeAppToWaba,
   WhatsAppOnboardingError,
+  listWhatsAppTemplates,
+  renderTemplateBody,
+  type ApprovedTemplate,
 } from '@zenith/channel-whatsapp';
-import { disconnectReasonLabel, dummyHash, encryptCredentials, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
+import { decryptCredentials, disconnectReasonLabel, dummyHash, encryptCredentials, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 
 import {
@@ -33,6 +36,8 @@ export interface ApiDeps {
   subscribe(tenantId: string, onEvent: (event: PanelEvent) => void): Promise<() => Promise<void>>;
   /** Cookie Secure: true en producción (https). */
   secureCookies: boolean;
+  /** Acceso a Graph API con el token de cada número (para leer sus plantillas aprobadas). */
+  graph?: { graphApiVersion: string; graphBaseUrl?: string; masterKey: Buffer; fetch?: typeof fetch };
   /** Alta de números con el registro insertado de Meta. Sin esto, el panel no ofrece conectar. */
   whatsappSignup?: WhatsAppSignupConfig;
   now?: () => Date;
@@ -387,6 +392,138 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       await deps.publish(u.tenantId, { type: 'message.new', conversationId: req.params.id, direction: 'out', author: 'agent' });
     }
     return { ok: true };
+  });
+
+  // ---------------------------------------------------------------- plantillas (fuera de las 24 h)
+
+  /** Plantillas aprobadas por número, guardadas unos minutos para no pedírselas a Meta cada vez. */
+  const templateCache = new Map<string, { at: number; items: ApprovedTemplate[] }>();
+  const TEMPLATE_TTL_MS = 5 * 60_000;
+
+  async function approvedTemplates(c: PoolClient, conversationId: string): Promise<ApprovedTemplate[] | { error: string }> {
+    const g = deps.graph;
+    if (!g) return { error: 'El servidor no tiene configurado el acceso a Meta (META_GRAPH_API_VERSION y ENCRYPTION_MASTER_KEY).' };
+    const { rows } = await c.query<{ id: string; waba_id: string | null; credentials_enc: Buffer | null }>(
+      `SELECT ca.id, ca.waba_id, ca.credentials_enc FROM conversations c JOIN channel_accounts ca ON ca.id = c.channel_account_id WHERE c.id = $1`,
+      [conversationId],
+    );
+    const acc = rows[0];
+    if (!acc) return { error: 'Conversación no encontrada' };
+    const cached = templateCache.get(acc.id);
+    if (cached && Date.now() - cached.at < TEMPLATE_TTL_MS) return cached.items;
+    if (!acc.waba_id || !acc.credentials_enc) return { error: 'Este número no tiene su cuenta de WhatsApp Business registrada: vuelva a conectarlo desde la sección WhatsApp.' };
+    let token: string;
+    try {
+      token = (JSON.parse(decryptCredentials(acc.credentials_enc, g.masterKey, acc.id)) as { accessToken?: string }).accessToken ?? '';
+    } catch {
+      token = '';
+    }
+    if (!token) return { error: 'No se pudieron leer las credenciales del número: vuelva a conectarlo.' };
+    try {
+      const items = await listWhatsAppTemplates(
+        { graphApiVersion: g.graphApiVersion, ...(g.graphBaseUrl ? { graphBaseUrl: g.graphBaseUrl } : {}), ...(g.fetch ? { fetch: g.fetch } : {}) },
+        token,
+        acc.waba_id,
+      );
+      templateCache.set(acc.id, { at: Date.now(), items });
+      return items;
+    } catch (e) {
+      return { error: `Meta no devolvió las plantillas: ${(e as Error).message}` };
+    }
+  }
+
+  app.get<{ Params: { id: string } }>('/api/v1/conversations/:id/templates', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Conversación no encontrada');
+    const result = await tenant(req, (c) => approvedTemplates(c, req.params.id));
+    if ('error' in result) return err(reply, 503, 'templates_unavailable', result.error);
+    return { items: result };
+  });
+
+  // Meta no admite saltos de línea, tabulaciones ni más de 4 espacios seguidos en los valores.
+  const templateParam = z
+    .string()
+    .transform((v) => v.trim())
+    .pipe(
+      z
+        .string()
+        .min(1, 'Completa todos los datos de la plantilla')
+        .max(200, 'Cada dato de la plantilla tiene como máximo 200 caracteres')
+        .refine((v) => !/[\n\r\t]| {4,}/.test(v), 'Los datos de la plantilla no pueden tener saltos de línea ni muchos espacios seguidos'),
+    );
+  const templateSendSchema = z
+    .object({
+      name: z.string().min(1).max(512),
+      language: z.string().min(2).max(15),
+      params: z.array(templateParam).max(20),
+      clientId: z.string().uuid().optional(),
+    })
+    .strict();
+
+  app.post<{ Params: { id: string } }>('/api/v1/conversations/:id/templates', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Conversación no encontrada');
+    const parsed = templateSendSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const v = parsed.data;
+    const u = user(req);
+    const clientId = v.clientId ?? randomUUID();
+    const result = await tenant(req, async (c) => {
+      const conv = await loadConversation(c, req.params.id);
+      if (!conv) return { error: 'not_found' as const };
+      if (conv.assigned_user_id !== u.userId) return { error: 'not_assigned' as const };
+      if (!conv.recipient) return { error: 'no_recipient' as const };
+      const list = await approvedTemplates(c, conv.id);
+      if ('error' in list) return { error: 'unavailable' as const, message: list.error };
+      const tpl = list.find((t) => t.name === v.name && t.language === v.language);
+      if (!tpl) return { error: 'unknown_template' as const };
+      if (v.params.length !== tpl.params) return { error: 'bad_params' as const, expected: tpl.params };
+
+      const key = outboundIdempotencyKey(conv.id, clientId, `agent-template:${u.userId}`);
+      const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+      if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
+
+      const body = renderTemplateBody(tpl.body, v.params);
+      const message = await c.query<{ id: string }>(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, sent_by_user_id)
+         VALUES ($1, $2, 'out', 'agent', 'template', $3, $4) RETURNING id`,
+        [u.tenantId, conv.id, body, u.userId],
+      );
+      const outbound = await c.query<{ id: string }>(
+        `INSERT INTO outbound_messages (tenant_id, conversation_id, message_id, idempotency_key, channel, payload)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          u.tenantId,
+          conv.id,
+          message.rows[0]!.id,
+          key,
+          conv.channel,
+          JSON.stringify({ kind: 'template', name: tpl.name, language: tpl.language, bodyParams: v.params, to: conv.recipient, author: 'agent' }),
+        ],
+      );
+      await c.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conv.id]);
+      return { id: outbound.rows[0]!.id, duplicate: false };
+    });
+
+    if ('error' in result) {
+      switch (result.error) {
+        case 'not_found':
+          return err(reply, 404, 'not_found', 'Conversación no encontrada');
+        case 'not_assigned':
+          return err(reply, 409, 'not_assigned', 'Toma la conversación antes de responder');
+        case 'no_recipient':
+          return err(reply, 409, 'no_recipient', 'No se encontró el destinatario de esta conversación');
+        case 'unavailable':
+          return err(reply, 503, 'templates_unavailable', result.message);
+        case 'unknown_template':
+          return err(reply, 400, 'unknown_template', 'Esa plantilla no está aprobada para este número');
+        case 'bad_params':
+          return err(reply, 400, 'invalid_input', `La plantilla pide ${result.expected} ${result.expected === 1 ? 'dato' : 'datos'}`);
+      }
+    }
+    if (!result.duplicate) {
+      await deps.enqueueOutbound(u.tenantId, [result.id]);
+      await deps.publish(u.tenantId, { type: 'message.new', conversationId: req.params.id, direction: 'out', author: 'agent' });
+    }
+    return { ok: true, outboundMessageId: result.id };
   });
 
   const finishSchema = z.object({ action: z.enum(['release', 'close']) });

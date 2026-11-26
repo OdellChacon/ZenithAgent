@@ -4,7 +4,7 @@ import type pg from 'pg';
 import type { PanelEvent } from '@zenith/core';
 import type { Pool } from '@zenith/db';
 import { buildApi } from '../src/server.js';
-import { decryptCredentials, hashPassword, verifyPassword } from '@zenith/core';
+import { decryptCredentials, encryptCredentials, hashPassword, verifyPassword } from '@zenith/core';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 
 describe('contraseñas', () => {
@@ -49,6 +49,22 @@ describe.skipIf(!hasDb)('API del panel', () => {
     }
     if (url.pathname.endsWith('/subscribed_apps') || url.pathname.endsWith('/register')) return json(200, { success: true });
     if (url.pathname.endsWith('/smb_app_data')) return json(200, { messaging_product: 'whatsapp', request_id: 'req-1' });
+    if (url.pathname.endsWith('/message_templates')) {
+      if (init && (init.headers as Record<string, string>)?.Authorization !== 'Bearer TOKEN-PLANTILLAS') return json(401, { error: { code: 190, message: 'Invalid OAuth access token' } });
+      return json(200, {
+        data: [
+          {
+            name: 'retomar_consulta',
+            language: 'es',
+            status: 'APPROVED',
+            category: 'UTILITY',
+            components: [{ type: 'BODY', text: 'Hola {{1}}, le escribe {{2}}. ¿Seguimos con su consulta?' }, { type: 'BUTTONS', buttons: [{ type: 'QUICK_REPLY', text: 'Sí' }] }],
+          },
+          // Con foto en el encabezado: el panel todavía no la sabe mandar, no se ofrece.
+          { name: 'promo_foto', language: 'es', status: 'APPROVED', category: 'MARKETING', components: [{ type: 'HEADER', format: 'IMAGE' }, { type: 'BODY', text: 'Oferta' }] },
+        ],
+      });
+    }
     return json(200, { display_phone_number: '+58 414-0000001', verified_name: 'Inversiones Prueba', is_on_biz_app: graph.bizApp, platform_type: 'CLOUD_API' });
   };
 
@@ -112,6 +128,7 @@ describe.skipIf(!hasDb)('API del panel', () => {
       enqueueOutbound: async (tenantId, ids) => void enqueued.push({ tenantId, ids }),
       publish: async (_tenantId, event) => void published.push(event),
       subscribe: async () => async () => undefined,
+      graph: { graphApiVersion: 'v27.0', graphBaseUrl: 'https://graph.prueba.test', masterKey, fetch: fakeGraph },
       whatsappSignup: {
         appId: 'APP-1',
         appSecret: 'SECRETO',
@@ -382,6 +399,60 @@ describe.skipIf(!hasDb)('API del panel', () => {
     const ajeno = (await login(users.ajeno.email)).cookie;
     expect((await call('GET', '/api/v1/contact-tags', ajeno)).json().items.map((i: { tag: string }) => i.tag)).not.toContain('potencial x');
     expect((await call('DELETE', `/api/v1/contact-tags/${encodeURIComponent('potencial x')}`, ajeno)).statusCode).toBe(403);
+  });
+
+  it('fuera de las 24 h el asesor elige una plantilla aprobada, la completa y la envía', async () => {
+    // Número con su cuenta de WhatsApp Business y su token cifrado.
+    await owner.query('UPDATE channel_accounts SET waba_id = $2, credentials_enc = $3 WHERE id = $1', [
+      t.channelAccountId,
+      '123456789',
+      encryptCredentials(JSON.stringify({ accessToken: 'TOKEN-PLANTILLAS' }), masterKey, t.channelAccountId),
+    ]);
+    const convId = await seedConversation(t.tenantId, t.channelAccountId, { hoursSinceInbound: 30, name: 'Rosa Plantilla' });
+    const { cookie } = await login(users.ana.email);
+    const call = (method: 'GET' | 'POST', path: string, payload?: unknown, c = cookie) =>
+      app.inject({ method, url: `/api/v1/conversations/${convId}${path}`, headers: headers(c), ...(payload ? { payload: payload as object } : {}) });
+
+    const list = await call('GET', '/templates');
+    expect(list.statusCode).toBe(200);
+    expect(list.json().items).toEqual([
+      { name: 'retomar_consulta', language: 'es', category: 'UTILITY', body: 'Hola {{1}}, le escribe {{2}}. ¿Seguimos con su consulta?', params: 2, header: null, footer: null, buttons: ['Sí'] },
+    ]);
+
+    // El texto libre sigue cerrado; hay que tomar la conversación para mandar la plantilla.
+    const send = (payload: unknown) => call('POST', '/templates', payload);
+    expect((await send({ name: 'retomar_consulta', language: 'es', params: ['Rosa', 'Ana'] })).statusCode).toBe(409);
+    expect((await call('POST', '/take')).statusCode).toBe(200);
+    expect((await call('POST', '/messages', { text: 'Hola' })).statusCode).toBe(409);
+
+    expect((await send({ name: 'no_existe', language: 'es', params: [] })).json().error.code).toBe('unknown_template');
+    expect((await send({ name: 'retomar_consulta', language: 'es', params: ['Rosa'] })).json().error.message).toBe('La plantilla pide 2 datos');
+    expect((await send({ name: 'retomar_consulta', language: 'es', params: ['Rosa', 'línea\nnueva'] })).statusCode).toBe(400);
+
+    const before = enqueued.length;
+    const ok = await send({ name: 'retomar_consulta', language: 'es', params: [' Rosa ', 'Ana'], clientId: randomUUID() });
+    expect(ok.statusCode).toBe(200);
+    expect(enqueued.length).toBe(before + 1);
+    const row = (
+      await owner.query(
+        `SELECT m.type, m.author, m.body, o.payload FROM outbound_messages o JOIN messages m ON m.id = o.message_id WHERE o.id = $1`,
+        [ok.json().outboundMessageId],
+      )
+    ).rows[0];
+    expect(row).toMatchObject({
+      type: 'template',
+      author: 'agent',
+      body: 'Hola Rosa, le escribe Ana. ¿Seguimos con su consulta?',
+      payload: { kind: 'template', name: 'retomar_consulta', language: 'es', bodyParams: ['Rosa', 'Ana'], author: 'agent' },
+    });
+    // El panel muestra el mensaje como del asesor.
+    const detail = (await app.inject({ method: 'GET', url: `/api/v1/conversations/${convId}`, headers: headers(cookie) })).json();
+    expect(detail.messages.at(-1)).toMatchObject({ type: 'template', author: 'agent', body: 'Hola Rosa, le escribe Ana. ¿Seguimos con su consulta?' });
+
+    // Otro negocio no ve ni usa las plantillas de esta conversación.
+    const ajeno = (await login(users.ajeno.email)).cookie;
+    expect((await call('GET', '/templates', undefined, ajeno)).statusCode).toBe(503);
+    graphCalls.length = 0; // el Meta falso es compartido con otras pruebas
   });
 
   it('muestra los números desconectados por Meta solo a su negocio', async () => {

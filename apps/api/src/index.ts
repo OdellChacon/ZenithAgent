@@ -69,6 +69,15 @@ const app = buildApi({
   pool,
   secureCookies: env.COOKIE_SECURE === 'true',
   whatsappSignup: signupConfig(),
+  ...(env.META_GRAPH_API_VERSION && env.ENCRYPTION_MASTER_KEY
+    ? {
+        graph: {
+          graphApiVersion: env.META_GRAPH_API_VERSION,
+          masterKey: parseMasterKey(env.ENCRYPTION_MASTER_KEY),
+          ...(env.META_GRAPH_BASE_URL ? { graphBaseUrl: env.META_GRAPH_BASE_URL } : {}),
+        },
+      }
+    : {}),
   enqueueOutbound: async (tenantId, outboundMessageIds) => {
     await outbound.add('send', { tenantId, outboundMessageIds }, {
       jobId: outboundMessageIds[0],
