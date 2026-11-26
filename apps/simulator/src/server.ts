@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { readFile } from 'node:fs/promises';
 import Fastify, { type FastifyInstance } from 'fastify';
@@ -28,6 +29,8 @@ export interface SimulatorDeps {
 
 export interface SimTemplate {
   language: string;
+  /** MARKETING o UTILITY, como la clasifica Meta. */
+  category?: string;
   body: string;
   buttons?: string[];
 }
@@ -96,7 +99,32 @@ export function renderSimTemplate(template: SimTemplate, params: string[]): stri
 /** Como Meta: JPEG o PNG de hasta 5 MB. */
 const MEDIA_TYPES = new Set(['image/jpeg', 'image/png']);
 /** Notas de voz que acepta el simulador (WhatsApp las manda en ogg/opus). */
-const AUDIO_TYPES = new Set(['audio/ogg', 'audio/mpeg']);
+const AUDIO_TYPES = new Set(['audio/ogg', 'audio/mpeg', 'audio/webm']);
+
+/**
+ * Chrome graba las notas de voz en webm/opus; WhatsApp las manda en ogg/opus. El simulador
+ * cambia el contenedor (sin recodificar) para que el negocio reciba lo mismo que con Meta.
+ */
+function webmToOgg(data: Buffer, ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg'): Promise<Buffer | null> {
+  return new Promise((resolve) => {
+    let proc;
+    try {
+      proc = spawn(ffmpegPath, ['-loglevel', 'error', '-i', 'pipe:0', '-c:a', 'copy', '-f', 'ogg', 'pipe:1'], { windowsHide: true });
+    } catch {
+      return resolve(null);
+    }
+    const out: Buffer[] = [];
+    const timer = setTimeout(() => proc.kill('SIGKILL'), 15_000);
+    proc.stdout.on('data', (c: Buffer) => out.push(c));
+    proc.on('error', () => resolve(null));
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      resolve(code === 0 && out.length ? Buffer.concat(out) : null);
+    });
+    proc.stdin.on('error', () => undefined);
+    proc.stdin.end(data);
+  });
+}
 
 const sharedSchema = z
   .object({
@@ -208,8 +236,14 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     } catch {
       return bad('El audio supera los 5 MB');
     }
-    const mime = file.mimetype.split(';')[0]!.trim();
-    if (!AUDIO_TYPES.has(mime)) return bad('Solo audio ogg o mp3');
+    let mime = file.mimetype.split(';')[0]!.trim();
+    if (!AUDIO_TYPES.has(mime)) return bad('Solo audio ogg, webm o mp3');
+    if (mime === 'audio/webm') {
+      const ogg = await webmToOgg(data);
+      if (!ogg) return bad('No se pudo convertir la nota de voz (¿está instalado ffmpeg?)');
+      data = ogg;
+      mime = 'audio/ogg';
+    }
     const field = (name: string) => {
       const f = file.fields[name];
       const one = Array.isArray(f) ? f[0] : f;
@@ -457,6 +491,24 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
   const synced = new Set<string>();
   const bearer = (auth: string | undefined) => /^Bearer \S+$/.test(auth ?? '');
   const badVersion = (v: string) => !/^v\d+\.\d+$/.test(v);
+
+  /** Plantillas aprobadas de la cuenta (las de templates.json), con la forma de Graph. */
+  app.get<{ Params: { version: string; wabaId: string } }>('/:version/:wabaId/message_templates', async (req, reply) => {
+    if (!/^Bearer \S+$/.test(req.headers.authorization ?? '')) {
+      return reply.code(401).send({ error: { code: 190, message: 'Falta el token de acceso' } });
+    }
+    const data = Object.entries(deps.templates ?? {}).map(([name, t]) => ({
+      name,
+      language: t.language,
+      status: 'APPROVED',
+      category: t.category ?? 'UTILITY',
+      components: [
+        { type: 'BODY', text: t.body },
+        ...(t.buttons?.length ? [{ type: 'BUTTONS', buttons: t.buttons.map((text) => ({ type: 'QUICK_REPLY', text })) }] : []),
+      ],
+    }));
+    return { data };
+  });
 
   app.get<{ Params: { version: string }; Querystring: Record<string, string | undefined> }>('/:version/oauth/access_token', async (req, reply) => {
     if (badVersion(req.params.version)) return reply.code(404).send({ error: { code: 'not_found', message: 'No existe' } });

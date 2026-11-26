@@ -103,6 +103,21 @@
   .out .bubble { background: var(--out-bg); color: var(--out-ink); background-attachment: var(--out-attach, scroll); }
   .bubble a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
   /* Fotos */
+  /* Nota de voz */
+  .bubble.voice { display: flex; align-items: center; gap: 8px; min-width: 210px; padding-right: 10px; }
+  .voice .play { width: 34px; height: 34px; border-radius: 50%; border: 0; display: grid; place-items: center; cursor: pointer; background: transparent; color: inherit; flex: none; }
+  .voice .play svg { width: 26px; height: 26px; fill: currentColor; }
+  .voice .play:disabled { opacity: .4; cursor: default; }
+  .voice .wave { flex: 1; height: 26px; display: flex; align-items: center; gap: 2px; }
+  .voice .wave i { flex: 1; border-radius: 2px; background: currentColor; opacity: .35; }
+  .voice .dur { font-size: 11.5px; opacity: .7; font-variant-numeric: tabular-nums; min-width: 30px; }
+  .voice .stamp { position: static; margin-left: 4px; }
+  /* Grabando */
+  .rec { flex: 1; display: flex; align-items: center; gap: 10px; height: 44px; padding: 0 12px; border-radius: 24px; background: var(--input-bg); color: var(--input-icon); }
+  .rec .dot { width: 10px; height: 10px; border-radius: 50%; background: #e53935; animation: pulse 1s infinite; }
+  .rec .time { font-variant-numeric: tabular-nums; flex: 1; font-size: 15px; }
+  .rec button { border: 0; background: transparent; cursor: pointer; color: inherit; display: grid; place-items: center; width: 36px; height: 36px; }
+  .rec button svg { width: 22px; height: 22px; fill: currentColor; }
   .bubble.photo { padding: 3px; width: 250px; max-width: 78%; }
   .bubble.photo img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: calc(var(--r) - 2px); background: rgba(0,0,0,.06); }
   .bubble.photo .caption { padding: 5px 6px 4px; }
@@ -289,6 +304,9 @@
     emoji: '<path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm3.5-9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zm-7 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3zm3.5 6.5c2.33 0 4.31-1.46 5.11-3.5H6.89c.8 2.04 2.78 3.5 5.11 3.5z"/>',
     attach: '<path d="M16.5 6v11.5c0 2.21-1.79 4-4 4s-4-1.79-4-4V5c0-1.38 1.12-2.5 2.5-2.5s2.5 1.12 2.5 2.5v10.5c0 .55-.45 1-1 1s-1-.45-1-1V6H10v9.5c0 1.38 1.12 2.5 2.5 2.5s2.5-1.12 2.5-2.5V5c0-2.21-1.79-4-4-4S7 2.79 7 5v12.5c0 3.04 2.46 5.5 5.5 5.5s5.5-2.46 5.5-5.5V6h-1.5z" transform="rotate(45 12 12)"/>',
     camera: '<path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4z"/><path d="M9 2 7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/>',
+    trash: '<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>',
+    play: '<path d="M8 5v14l11-7z"/>',
+    pause: '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>',
     mic: '<path d="M12 14c1.66 0 2.99-1.34 2.99-3L15 5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3zm5.3-3c0 3-2.54 5.1-5.3 5.1S6.7 14 6.7 11H5c0 3.41 2.72 6.23 6 6.72V21h2v-3.28c3.28-.48 6-3.3 6-6.72h-1.7z"/>',
     micOutline: '<rect x="9" y="3" width="6" height="11" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
     send: '<path d="M3.4 20.4 20.85 12.9a1 1 0 0 0 0-1.84L3.4 3.6a.99.99 0 0 0-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .71.73 1.2 1.39.91z"/>',
@@ -376,15 +394,19 @@
          <button class="action" type="submit" aria-label="Enviar"><span data-empty>${svg('mic')}</span><span data-full hidden>${svg('send')}</span></button>`
       : s === 'ig'
       ? `<div class="input-wrap"><span class="action" data-pick>${svg('camera')}</span>${ta}
-           <span class="icon" data-empty>${svg('micOutline')}</span><span class="icon" data-empty data-pick>${svg('imageOutline')}</span><span class="icon" data-empty>${svg('sticker')}</span>
+           <span class="icon" data-empty data-mic>${svg('micOutline')}</span><span class="icon" data-empty data-pick>${svg('imageOutline')}</span><span class="icon" data-empty>${svg('sticker')}</span>
            <button class="text-send" type="submit" data-full hidden>Enviar</button></div>`
-      : `<span class="icon" data-empty>${svg('plus')}</span><span class="icon" data-empty data-pick>${svg('camera')}</span><span class="icon" data-empty data-pick>${svg('image')}</span><span class="icon" data-empty>${svg('mic')}</span>
+      : `<span class="icon" data-empty>${svg('plus')}</span><span class="icon" data-empty data-pick>${svg('camera')}</span><span class="icon" data-empty data-pick>${svg('image')}</span><span class="icon" data-empty data-mic>${svg('mic')}</span>
          <div class="input-wrap">${ta}<span class="icon">${svg('emoji')}</span></div>
          <button class="action" type="submit" aria-label="Enviar"><span data-empty>${svg('like')}</span><span data-full hidden>${svg('send')}</span></button>`;
 
     const input = $('input');
     input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('composer').requestSubmit(); } });
     input.addEventListener('input', () => { autosize(); toggleComposer(); });
+    $('composer').querySelectorAll('[data-mic]').forEach((el) => {
+      el.setAttribute('role', 'button'); el.tabIndex = 0; el.title = 'Grabar una nota de voz'; el.style.cursor = 'pointer';
+      el.addEventListener('click', () => void startRecording());
+    });
     $('composer').querySelectorAll('[data-pick]').forEach((el) => {
       el.setAttribute('role', 'button'); el.tabIndex = 0; el.title = 'Enviar una foto';
       el.addEventListener('click', () => $('picker').click());
@@ -461,7 +483,11 @@
         }
         const stamp = s === 'wa' ? `<span class="stamp">${timeOf(g.at)}${side === 'out' ? statusIcon(g) : ''}</span>` : '';
         const slot = s !== 'wa' && side === 'in' ? (last ? `<div class="avatar sm">${BUSINESS.initials}</div>` : '<span class="slot"></span>') : '';
-        if (g.image) {
+        if (g.voice) {
+          html += `<div class="line ${side}">${slot}<div class="${cls} voice"${style}>`
+            + `<button type="button" class="play" data-play="${escape(g.id)}"${g.voice.url ? '' : ' disabled title="El audio ya no está disponible"'} aria-label="Reproducir nota de voz">${svg(playing === g.id ? 'pause' : 'play')}</button>`
+            + `<span class="wave">${waveBars(g.id)}</span><span class="dur">${duration(g.voice.seconds)}</span>${stamp}</div></div>`;
+        } else if (g.image) {
           // Foto con pie: en WhatsApp va dentro de la burbuja; en Instagram y Messenger, suelta.
           const caption = g.text ? `<div class="caption">${formatText(g.text, s === 'wa')}${stamp}</div>` : stamp ? `<div class="caption only-stamp">${stamp}</div>` : '';
           html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><img src="${escape(g.image)}" alt="${escape(g.text || (side === 'out' ? 'Foto enviada' : 'Foto del producto'))}" loading="lazy">${caption}</div></div>`;
@@ -562,7 +588,8 @@
     e.preventDefault();
     const input = $('input');
     const text = input.value.trim();
-    if (!text) return;
+    // En WhatsApp el botón verde es el micrófono mientras la caja está vacía.
+    if (!text) { if (state.skin === 'wa') void startRecording(); return; }
     input.value = ''; autosize(); toggleComposer(); input.focus();
     const msg = { id: 'c' + Date.now(), kind: 'customer', text, at: new Date().toISOString(), status: 'sending' };
     void deliver(msg, () => fetch('/api/send', {
@@ -617,6 +644,81 @@
     if (caption) form.append('caption', caption);
     form.append('file', blob, 'foto.jpg');
     void deliver(msg, () => fetch('/api/send-image', { method: 'POST', body: form }));
+  });
+
+  // ------------------------------------------------------------------ notas de voz
+  // Graba con el micrófono del navegador. Chrome graba webm/opus y Firefox ogg/opus; el
+  // simulador lo pasa a ogg/opus, como manda WhatsApp, antes de avisarle al negocio.
+  let recorder = null, chunks = [], recStart = 0, recTimer = null, cancelled = false;
+  let playing = null; const players = new Map();
+  const MAX_SECONDS = 120;
+
+  function duration(sec) { const t = Math.max(0, Math.round(sec || 0)); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; }
+  function waveBars(seed) {
+    let h = 0; for (const c of String(seed)) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    let out = '';
+    for (let i = 0; i < 28; i++) { h = (h * 1103515245 + 12345) >>> 0; out += `<i style="height:${20 + (h % 80)}%"></i>`; }
+    return out;
+  }
+
+  async function startRecording() {
+    if (recorder) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) {
+      state.messages.push({ kind: 'system', text: 'Este navegador no permite grabar audio', at: new Date().toISOString() }); save(); renderChat(); return;
+    }
+    let stream;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {
+      state.messages.push({ kind: 'system', text: 'No hay permiso para usar el micrófono', at: new Date().toISOString() }); save(); renderChat(); return;
+    }
+    const type = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
+    recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
+    chunks = []; cancelled = false; recStart = Date.now();
+    recorder.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
+    recorder.onstop = () => {
+      stream.getTracks().forEach((t) => t.stop());
+      const seconds = (Date.now() - recStart) / 1000;
+      const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+      recorder = null; clearInterval(recTimer); renderChrome();
+      if (!cancelled && seconds >= 0.8) void sendVoice(blob, seconds);
+    };
+    recorder.start();
+    $('composer').innerHTML = `<div class="rec" role="status" aria-live="polite"><span class="dot"></span><span class="time" id="recTime">0:00</span>`
+      + `<button type="button" id="recCancel" aria-label="Cancelar la grabación" title="Cancelar">${svg('trash')}</button></div>`
+      + `<button class="action" type="button" id="recSend" aria-label="Enviar nota de voz">${svg('send')}</button>`;
+    $('recCancel').addEventListener('click', () => { cancelled = true; if (recorder) recorder.stop(); });
+    $('recSend').addEventListener('click', () => { if (recorder) recorder.stop(); });
+    recTimer = setInterval(() => {
+      const sec = (Date.now() - recStart) / 1000;
+      const t = $('recTime'); if (t) t.textContent = duration(sec);
+      if (sec >= MAX_SECONDS && recorder) recorder.stop();
+    }, 250);
+  }
+
+  async function sendVoice(blob, seconds) {
+    // Se guarda como data URL (si es corta) para poder reproducirla después de recargar.
+    let url = URL.createObjectURL(blob);
+    if (blob.size < 400 * 1024) {
+      url = await new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => res(url); r.readAsDataURL(blob); });
+    }
+    const msg = { id: 'c' + Date.now(), kind: 'customer', text: '', voice: { url, seconds }, at: new Date().toISOString(), status: 'sending' };
+    const form = new FormData();
+    form.append('from', state.number);
+    form.append('name', state.name || 'Cliente de prueba');
+    form.append('file', blob, blob.type.includes('ogg') ? 'nota.ogg' : 'nota.webm');
+    void deliver(msg, () => fetch('/api/send-audio', { method: 'POST', body: form }));
+  }
+
+  $('chat').addEventListener('click', (e) => {
+    const btn = e.target.closest && e.target.closest('[data-play]');
+    if (!btn || btn.disabled) return;
+    const id = btn.dataset.play;
+    const m = state.messages.find((x) => x.id === id);
+    if (!m || !m.voice || !m.voice.url) return;
+    if (playing && players.get(playing)) players.get(playing).pause();
+    if (playing === id) { playing = null; renderChat(); return; }
+    let a = players.get(id);
+    if (!a) { a = new Audio(m.voice.url); a.onended = () => { playing = null; renderChat(); }; players.set(id, a); }
+    a.currentTime = 0; void a.play(); playing = id; renderChat();
   });
 
   // ------------------------------------------------------------------ controles

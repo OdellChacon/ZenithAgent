@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { describe, expect, it, vi } from 'vitest';
 import {
   exchangeSignupCode,
@@ -127,6 +128,37 @@ describe('simulador: papel de Meta', () => {
     });
     expect(res.statusCode).toBe(400);
   });
+
+  it.skipIf(spawnSync('ffmpeg', ['-version'], { windowsHide: true }).status !== 0)(
+    'una nota de voz grabada en webm (Chrome) le llega al negocio como ogg/opus',
+    async () => {
+      // Un segundo de tono en webm/opus, como lo graba Chrome.
+      const webm = spawnSync(
+        'ffmpeg',
+        ['-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=1', '-c:a', 'libopus', '-f', 'webm', 'pipe:1'],
+        { windowsHide: true, maxBuffer: 1 << 20 },
+      ).stdout;
+      const { app, sent } = setup();
+      const form = new FormData();
+      form.append('from', '584141234567');
+      form.append('name', 'Ana');
+      form.append('file', new Blob([new Uint8Array(webm)], { type: 'audio/webm;codecs=opus' }), 'nota.webm');
+      const req = new Request('http://x', { method: 'POST', body: form });
+      const res = await app.inject({
+        method: 'POST',
+        url: '/api/send-audio',
+        headers: { 'content-type': req.headers.get('content-type')! },
+        payload: Buffer.from(await req.arrayBuffer()),
+      });
+      expect(res.statusCode).toBe(200);
+      const [event] = parseWhatsAppWebhook(JSON.parse(sent[0]!.body));
+      expect(event).toMatchObject({ kind: 'message', media: [{ type: 'audio', mimeType: 'audio/ogg; codecs=opus' }] });
+      // El archivo que se baja empieza con la firma de un ogg.
+      const mediaId = (event as { media: { externalMediaId: string }[] }).media[0]!.externalMediaId;
+      const file = await app.inject({ method: 'GET', url: `/sim-media/${mediaId}` });
+      expect(file.rawPayload.subarray(0, 4).toString()).toBe('OggS');
+    },
+  );
 
   it('el cliente manda una foto: el webhook lleva su id y se baja como en la Graph API', async () => {
     const { app, sent } = setup();
