@@ -41,6 +41,14 @@ const SYNONYMS: Record<string, string[]> = {
   verde: ['oliva', 'menta', 'green'],
   terracot: ['oxido', 'ladrillo', 'teja', 'rojiz'],
   dorad: ['gold', 'oro'],
+  // Cómo se les dice en Venezuela y en otros países
+  pocet: ['sanitari', 'inodor', 'taza'],
+  inodor: ['sanitari', 'pocet', 'taza'],
+  excusad: ['sanitari'],
+  retret: ['sanitari'],
+  lavab: ['lavaman'],
+  ovalin: ['lavaman'],
+  lavatori: ['lavaman'],
   // Estilos
   marmol: ['marble', 'carrara'],
   mader: ['wood'],
@@ -54,9 +62,22 @@ const SYNONYMS: Record<string, string[]> = {
  */
 const TILE_CATEGORY = 'ceramic|ceranatt|porcelanat';
 const TILE_WORDS = /^(ceramic|ceranatt|porcelanat|revestimient|baldos|piso|azulej)/;
+const TOILET_WORDS = /^(sanitari|pocet|inodor|excusad|retret|taza|wc)/;
+const BASIN_WORDS = /^(lavaman|lavab|ovalin|lavatori)/;
+/**
+ * Productos que son de una categoría aunque la tienda los tenga en otra (ej. "Sanitario Cadíz"
+ * dentro de Ceranattos): se reconocen por el comienzo del nombre.
+ */
+const CATEGORY_BY_NAME: Record<string, string> = {
+  sanitari: '^(sanitario|sala |taza|orinal)',
+  lavaman: '^lavamanos',
+};
+
 export function categoryPattern(term: string | null): string | null {
   if (!term) return null;
   if (TILE_WORDS.test(term)) return TILE_CATEGORY;
+  if (TOILET_WORDS.test(term)) return 'sanitari';
+  if (BASIN_WORDS.test(term)) return 'lavaman';
   return term.length >= 5 && /[ao]$/.test(term) ? term.slice(0, -1) : term;
 }
 
@@ -111,7 +132,8 @@ export function createCatalogReader(pool: Pool, tenantId: string): CatalogReader
                                    coalesce(format, '') || ' ' || attributes::text)) AS rest
                FROM products
               WHERE active
-                AND ($1::text IS NULL OR unaccent(lower(coalesce(category, '') || ' ' || coalesce(category_name, ''))) ~ $1)
+                AND ($1::text IS NULL OR unaccent(lower(coalesce(category, '') || ' ' || coalesce(category_name, ''))) ~ $1
+                     OR ($6::text IS NOT NULL AND unaccent(lower(name)) ~ $6))
                 -- La tienda tiene algunos sanitarios dentro de Porcelanato o Ceranattos: al buscar
                 -- revestimientos se dejan fuera por el nombre.
                 AND ($1::text IS DISTINCT FROM '${TILE_CATEGORY}' OR NOT unaccent(lower(name)) ~ '^(sanitario|sala |lavamanos|orinal|taza)')
@@ -131,7 +153,7 @@ export function createCatalogReader(pool: Pool, tenantId: string): CatalogReader
                OR EXISTS (SELECT 1 FROM unnest($4::text[]) AS w WHERE n ~ w OR lk ~ w OR rest ~ w)
             ORDER BY score DESC, has_photo DESC, name
             LIMIT $5`,
-          [category, filters.surface, filters.usage, terms.map(termPattern), filters.limit],
+          [category, filters.surface, filters.usage, terms.map(termPattern), filters.limit, category ? (CATEGORY_BY_NAME[category] ?? null) : null],
         );
         return rows.map((row) => ({ ...row, score: Number(row.score) }));
       });

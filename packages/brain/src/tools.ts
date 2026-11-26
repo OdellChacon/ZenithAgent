@@ -318,6 +318,22 @@ const presentWith = (variants: Map<string, string[]>, best = 0) => (p: ProductRo
   return out;
 };
 
+/** Búsqueda solo por categoría: todos los resultados son del tipo pedido. */
+function categorySummary(rows: ProductRow[], total?: number): { best: number; extra: Record<string, unknown> } {
+  const n = total ?? rows.length;
+  if (n <= 3) return { best: 0, extra: {} };
+  return {
+    best: 0,
+    extra: {
+      total_en_la_categoria: n,
+      nota_opciones:
+        n > rows.length
+          ? `Hay ${n} productos de este tipo; aquí van ${rows.length}. Dígale al cliente cuántos hay, nómbrele los más representativos agrupados por lo que los distingue (color, forma, instalación) y pregúntele qué busca para mostrarle el resto.`
+          : `Hay ${n} productos de este tipo. Si el cliente preguntó qué hay, nómbraselos todos en una línea corta cada uno, agrupados por lo que los distingue (color, forma, instalación).`,
+    },
+  };
+}
+
 /**
  * Cuántos productos coinciden bien con lo pedido. Con más de 3, el resultado le recuerda al bot
  * que, si el cliente preguntó qué hay, se los nombre todos (el modelo tiende a quedarse con 2).
@@ -403,17 +419,18 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         const variants = await withVariants(rows, ctx);
         // Si se llenó el límite, se cuentan aparte cuántas coinciden bien en todo el catálogo.
         let total: number | undefined;
-        if (filters.text && rows.length >= filters.limit) {
+        if (rows.length >= filters.limit) {
           const all = await ctx.catalog.search({ ...filters, limit: 200 });
           const top = Math.max(0, ...all.map((r) => r.score ?? 0));
-          total = new Set(all.filter((r) => (r.score ?? 0) >= top * 0.6).map((r) => r.name)).size;
+          total = new Set(all.filter((r) => !filters.text || (r.score ?? 0) >= top * 0.6).map((r) => r.name)).size;
         }
-        const summary = matchSummary(rows, total);
+        const summary = filters.text ? matchSummary(rows, total) : categorySummary(rows, total);
         const best = summary.best;
-        const strong = best ? rows.filter((r) => (r.score ?? 0) >= best * 0.6).map((r) => r.name) : [];
+        // Sin palabras (solo categoría, ej. "¿qué lavamanos tienen?") todos los resultados cuentan.
+        const strong = !filters.text ? rows.map((r) => r.name) : best ? rows.filter((r) => (r.score ?? 0) >= best * 0.6).map((r) => r.name) : [];
         // La lista que se completa sale de la primera búsqueda del turno (la del pedido del
         // cliente); las siguientes suelen ser variaciones que traen otras cosas.
-        if (strong.length > 3 && !effects.listing) {
+        if (strong.length >= 2 && !effects.listing) {
           const names = [...new Set(strong)];
           effects.listing = { names, total: Math.max(total ?? 0, names.length) };
         }

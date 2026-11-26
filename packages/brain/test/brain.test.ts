@@ -11,6 +11,8 @@ import {
   TenantSettingsError,
   pendingCustomerImages,
   completeListing,
+  coreName,
+  wasNamed,
   sendPromisedPhotos,
   designBase,
   identifyProductInPhoto,
@@ -381,6 +383,34 @@ describe('runBrainTurn', () => {
     expect(completeListing('Le paso con un asesor.', { ...effects, handoff: { reason: 'otro' as const, summary: 'x' } })).toBe('Le paso con un asesor.');
   });
 
+  it('reconoce los nombres cortos con que el bot nombra los lavamanos', () => {
+    expect(coreName('Lavamanos Cairo Vessel (Sobreponer)')).toBe('Cairo Vessel');
+    expect(coreName('Lavamanos Cascade Vessel Negro(Sobreponer)')).toBe('Cascade Vessel Negro');
+    expect(coreName('Sanitario Smart')).toBe('Sanitario Smart');
+    const all = ['Lavamanos Cascade Vessel (Sobreponer)', 'Lavamanos Cascade Vessel Gris (Sobreponer)'];
+    // Nombrar el gris no cuenta como nombrar el blanco, que se llama casi igual.
+    expect(wasNamed(all[0]!, 'tenemos el cascade vessel gris', all)).toBe(false);
+    expect(wasNamed(all[1]!, 'tenemos el cascade vessel gris', all)).toBe(true);
+    expect(wasNamed(all[0]!, 'el cascade vessel gris y el cascade vessel blanco', all)).toBe(true);
+  });
+
+  it('una búsqueda solo por categoría completa la lista con todos los productos', async () => {
+    const rows = ['Lavamanos Cairo Vessel (Sobreponer)', 'Lavamanos Praga Gold', 'Lavamanos Marsella (Empotrar)', 'Prisma MJ Negro'].map((name, i) => ({
+      ...PRODUCT,
+      id: `${String(i + 1).repeat(8)}-1111-4111-8111-111111111111`,
+      name,
+      category: 'lavamanos',
+    }));
+    const { llm } = scriptedLlm([
+      tool('buscar_productos', { texto: null, categoria: 'lavamanos', superficie: null, uso: null, limite: 15 }),
+      text('Tenemos el *Cairo Vessel* y el *Praga Gold*.\n\n¿Para qué baño es?'),
+    ]);
+    const res = await runBrainTurn({ ...base, llm, messages: customer('¿Qué lavamanos tienen?'), tools: { catalog: catalog(rows), wastePercent: null } });
+    expect(res.reply).toBe(
+      'Tenemos el *Cairo Vessel* y el *Praga Gold*.\n\nTambién tenemos *Lavamanos Marsella (Empotrar)* y *Prisma MJ Negro*. Si quiere, le mando las fotos.\n\n¿Para qué baño es?',
+    );
+  });
+
   it('designBase separa el diseño del color y deja fuera los nombres genéricos', () => {
     expect(designBase('Archi Cenizo')).toBe('Archi');
     expect(designBase('Exterior Medellin Gris')).toBe('Exterior Medellin');
@@ -621,7 +651,7 @@ describe('detalles humanos', () => {
 
     it('la nota lo incluye', () => {
       const note = conversationNote({ customerName: null, now: new Date('2026-11-28T23:00:00Z'), timezone: 'America/Caracas', openingHours: hours });
-      expect(note).toContain('La tienda está cerrada: abre el lunes a las 8:00 a. m.');
+      expect(note).toContain('La tienda está cerrada (abre el lunes a las 8:00 a. m.). Tú sigues atendiendo normal');
     });
   });
 });

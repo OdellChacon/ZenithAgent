@@ -118,8 +118,9 @@ describe('termPattern', () => {
 describe('categoryPattern', () => {
   it('"cerámica" o "porcelanato" buscan en todos los revestimientos', () => {
     for (const t of ['ceramica', 'porcelanato', 'ceranatto', 'revestimiento', 'piso']) expect(categoryPattern(t)).toBe('ceramic|ceranatt|porcelanat');
-    expect(categoryPattern('sanitarios')).toBe('sanitarios');
-    expect(categoryPattern('lavamano')).toBe('lavaman');
+    // Sanitarios y lavamanos, con como se les dice en Venezuela y otros países.
+    for (const t of ['sanitarios', 'poceta', 'inodoro']) expect(categoryPattern(t)).toBe('sanitari');
+    for (const t of ['lavamano', 'lavabo', 'ovalin']) expect(categoryPattern(t)).toBe('lavaman');
     expect(categoryPattern(null)).toBeNull();
   });
 });

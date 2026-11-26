@@ -223,6 +223,30 @@ function lastCustomerText(messages: BetaMessageParam[]): string | null {
 const plain = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
 
 /**
+ * Nombre corto con el que el bot suele mencionar un producto: sin el tipo al principio
+ * ("Lavamanos") ni lo que va entre paréntesis ("(Sobreponer)").
+ * "Lavamanos Cairo Vessel (Sobreponer)" → "Cairo Vessel".
+ */
+export function coreName(name: string): string {
+  return name.replace(/\s*\([^)]*\)\s*$/, '').replace(/^lavamanos\s+/i, '').trim() || name;
+}
+
+/**
+ * ¿La respuesta nombra este producto? Vale el nombre completo o el corto, pero el corto no cuenta
+ * cuando solo aparece como parte de otro nombre ("Cascade Vessel" dentro de "Cascade Vessel Gris").
+ */
+export function wasNamed(name: string, said: string, others: string[]): boolean {
+  if (said.includes(plain(name))) return true;
+  const core = plain(coreName(name));
+  const count = (s: string, x: string) => s.split(x).length - 1;
+  const inside = others
+    .map((o) => plain(coreName(o)))
+    .filter((o) => o !== core && o.includes(core))
+    .reduce((sum, o) => sum + count(said, o), 0);
+  return count(said, core) > inside;
+}
+
+/**
  * Si la búsqueda encontró varias opciones que coinciden bien y la respuesta no las nombra todas,
  * agrega las que faltan antes de la pregunta final: el cliente no tiene por qué saber qué
  * modelos preguntar. Con más opciones de las que caben, dice cuántas hay en total.
@@ -232,7 +256,7 @@ export function completeListing(reply: string, effects: ToolEffects): string {
   if (!listing || effects.handoff) return reply;
   const said = plain(reply);
   const shown = new Set(effects.photos.map((p) => p.name));
-  const missing = listing.names.filter((n) => !shown.has(n) && !said.includes(plain(n)));
+  const missing = listing.names.filter((n) => !shown.has(n) && !wasNamed(n, said, listing.names));
   if (!missing.length) return reply;
   const names = missing.map((n) => `*${n}*`);
   const list = names.length === 1 ? names[0]! : `${names.slice(0, -1).join(', ')} y ${names.at(-1)}`;
@@ -266,8 +290,8 @@ export function sendPromisedPhotos(reply: string, effects: ToolEffects): void {
   if (!statements.some((x) => CLAIMS_PHOTOS.test(plain(x)))) return;
   const said = plain(reply);
   const named = [...effects.seen.entries()]
-    .filter(([name, p]) => p.hasPhoto && said.includes(plain(name)))
-    .sort(([a], [b]) => said.indexOf(plain(a)) - said.indexOf(plain(b)))
+    .filter(([name, p]) => p.hasPhoto && wasNamed(name, said, [...effects.seen!.keys()]))
+    .sort(([a], [b]) => said.indexOf(plain(coreName(a))) - said.indexOf(plain(coreName(b))))
     .slice(0, 3);
   for (const [name, p] of named) effects.photos.push({ productId: p.id, name });
 }

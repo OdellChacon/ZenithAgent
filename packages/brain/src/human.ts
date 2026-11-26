@@ -127,7 +127,7 @@ export function conversationNote(p: {
     ? ''
     : status.open
       ? ` La tienda está abierta (cierra a las ${status.closesAt}).`
-      : ` La tienda está cerrada: abre ${status.opensAt}.`;
+      : ` La tienda está cerrada (abre ${status.opensAt}). Tú sigues atendiendo normal: no lo menciones ni prometas que un asesor escribirá, salvo que uses derivar_a_asesor.`;
   return [
     `[Datos internos, no los escribió el cliente: en la tienda es ${label} (de ${part}).${store}`,
     name
