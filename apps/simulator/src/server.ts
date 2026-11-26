@@ -186,7 +186,10 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     ],
   });
 
-  app.get('/', async (_req, reply) => reply.type('text/html; charset=utf-8').send(await readFile(UI_PATH, 'utf8')));
+  // Sin caché: así el navegador siempre carga la última versión de la página del simulador.
+  app.get('/', async (_req, reply) =>
+    reply.type('text/html; charset=utf-8').header('cache-control', 'no-store').send(await readFile(UI_PATH, 'utf8')),
+  );
 
   // ---------------------------------------------------------------- papel de cliente
 

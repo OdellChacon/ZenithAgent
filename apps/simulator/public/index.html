@@ -661,15 +661,24 @@
     return out;
   }
 
+  let askingMic = false;
   async function startRecording() {
-    if (recorder) return;
+    if (recorder || askingMic) return;
     if (!navigator.mediaDevices || !window.MediaRecorder) {
       state.messages.push({ kind: 'system', text: 'Este navegador no permite grabar audio', at: new Date().toISOString() }); save(); renderChat(); return;
     }
+    // Se ve al instante, aunque Chrome todavía esté pidiendo el permiso del micrófono.
+    askingMic = true;
+    $('composer').innerHTML = `<div class="rec" role="status" aria-live="polite"><span class="time">Activando el micrófono… (permita el acceso si el navegador lo pide)</span></div>`;
     let stream;
-    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {
-      state.messages.push({ kind: 'system', text: 'No hay permiso para usar el micrófono', at: new Date().toISOString() }); save(); renderChat(); return;
+    try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (err) {
+      askingMic = false; renderChrome();
+      const why = err && err.name === 'NotFoundError' ? 'No se encontró ningún micrófono en este equipo'
+        : err && err.name === 'NotAllowedError' ? 'El navegador no dio permiso para usar el micrófono (revíselo en el candado de la barra de direcciones)'
+        : 'No se pudo usar el micrófono';
+      state.messages.push({ kind: 'system', text: why, at: new Date().toISOString() }); save(); renderChat(); return;
     }
+    askingMic = false;
     const type = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm'].find((t) => MediaRecorder.isTypeSupported(t)) || '';
     recorder = new MediaRecorder(stream, type ? { mimeType: type } : undefined);
     chunks = []; cancelled = false; recStart = Date.now();
