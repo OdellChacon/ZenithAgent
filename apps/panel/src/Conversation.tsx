@@ -267,7 +267,7 @@ export function Conversation({
 
   const pickCatalog = (c: Catalog) => {
     if (!canWrite) {
-      setNotice(mine ? 'No se puede escribirle a este cliente ahora.' : 'Toma la conversación para mandar catálogos.');
+      setNotice(catalogBlockedReason);
       return;
     }
     setNotice(null);
@@ -336,6 +336,12 @@ export function Conversation({
   // Ventana cerrada en WhatsApp: el asesor escribe con una plantilla aprobada (TemplateComposer).
   const needsTemplate = mine && data.channel === 'whatsapp' && data.window.state !== 'FREE';
   const channelName = CHANNEL_LABELS[data.channel] ?? data.channel;
+  // Por qué no se puede mandar un catálogo ahora, dicho con la causa real.
+  const catalogBlockedReason = !mine
+    ? 'Toma la conversación para poder mandar catálogos.'
+    : data.channel === 'whatsapp'
+      ? 'Pasaron más de 24 h: por WhatsApp solo se pueden mandar plantillas. El catálogo se puede mandar cuando el cliente vuelva a escribir.'
+      : 'Pasaron más de 7 días desde el último mensaje del cliente: Meta no deja escribirle hasta que vuelva a escribir.';
 
   return (
     <section
@@ -352,7 +358,7 @@ export function Conversation({
           </motion.div>
         )}
       </AnimatePresence>
-      <AnimatePresence>{shelfOpen && <CatalogShelf onPick={pickCatalog} onClose={() => setShelfOpen(false)} disabled={!canWrite} />}</AnimatePresence>
+      <AnimatePresence>{shelfOpen && <CatalogShelf onPick={pickCatalog} onClose={() => setShelfOpen(false)} blockedReason={canWrite ? null : catalogBlockedReason} />}</AnimatePresence>
       <div className="conv-head">
         <button className="icon-btn back" type="button" onClick={onClose} aria-label="Volver a la bandeja">
           {Icon.back}

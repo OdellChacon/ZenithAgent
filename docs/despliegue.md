@@ -20,9 +20,11 @@ Lo que dice **sin dato** depende de una decisión o de un dato que todavía no t
 ```bash
 git clone https://github.com/OdellChacon/ZenithAgent.git /opt/zenithagent
 cd /opt/zenithagent
+cp .env.db.example .env.db
 cp .env.production.example .env.production
-nano .env.production          # completar todo; ver los comentarios del archivo
-chmod 600 .env.production
+nano .env.db                  # contraseñas de la base (solo letras y números: openssl rand -hex 32)
+nano .env.production          # el resto; DATABASE_URL lleva la APP_DB_PASSWORD de .env.db
+chmod 600 .env.db .env.production
 docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
 ```
 
@@ -40,15 +42,19 @@ alias zc='docker compose -f docker-compose.prod.yml --env-file .env.production'
 
 ```bash
 # 1. El negocio (imprime su tenant-id)
-zc run --rm migrate node --import tsx packages/db/src/cli/tenant-sync.ts --config config/tenants/inversiones-mora-mora.json
+sh deploy/admin.sh tenant-sync --config config/tenants/inversiones-mora-mora.json
 
 # 2. El dueño y los asesores (cada uno imprime una contraseña temporal una sola vez)
-zc run --rm api node --import tsx apps/api/src/cli/create-user.ts --tenant-id <id> --email dueno@negocio.com --name "Nombre" --role owner
-zc run --rm api node --import tsx apps/api/src/cli/create-user.ts --tenant-id <id> --email asesor@negocio.com --name "Nombre"
+sh deploy/admin.sh create-user --tenant-id <id> --email dueno@negocio.com --name "Nombre" --role owner
+sh deploy/admin.sh create-user --tenant-id <id> --email asesor@negocio.com --name "Nombre"
 
 # 3. El catálogo de la tienda
-zc run --rm worker node --import tsx packages/catalog/src/cli/sync-imm.ts --tenant-id <id>
+sh deploy/admin.sh sync-catalog --tenant-id <id>
 ```
+
+Los comandos que necesitan el superusuario de la base (`tenant-sync`, `check-meta`,
+`connect-meta`) reciben la contraseña de `.env.db` solo mientras corren; gateway, worker y API
+nunca la tienen, para que una fuga en la app no dé acceso por encima del aislamiento por negocio.
 
 `tenant-sync` se puede volver a correr cuando cambie `config/tenants/inversiones-mora-mora.json`
 (formas de pago, horario…): actualiza lo que sabe el bot sin tocar chats ni contactos.
@@ -62,7 +68,7 @@ zc run --rm worker node --import tsx packages/catalog/src/cli/sync-imm.ts --tena
    - Instagram: `https://<DOMAIN>/webhooks/meta/instagram`
 2. WhatsApp: el dueño entra al panel → sección WhatsApp → **Conectar WhatsApp**.
 3. Messenger e Instagram: con el token de la página,
-   `zc run --rm -e META_PAGE_ACCESS_TOKEN=<token> -e MIGRATION_DATABASE_URL=postgres://postgres:<POSTGRES_PASSWORD>@postgres:5432/zenith api node --import tsx apps/api/src/cli/connect-meta.ts --tenant inversiones-mora-mora --page-id <id> --instagram`
+   `META_PAGE_ACCESS_TOKEN=<token> sh deploy/admin.sh connect-meta --tenant inversiones-mora-mora --page-id <id> --instagram`
 4. Revisión completa antes de probar con clientes: ver [prueba-numero-real.md](prueba-numero-real.md).
 
 ## 3. Actualizar a una versión nueva
@@ -85,7 +91,7 @@ Antes de una actualización grande, una copia a mano: `zc exec backup sh -c 'pg_
   (Backblaze B2, Google Drive, otro servidor…) es **sin dato**: decidirlo con Mora Mora. Con el
   destino elegido, un cron en el servidor que suba la carpeta cada día, por ejemplo con rclone:
   `30 4 * * * rclone copy /opt/zenithagent/backups destino:zenith-backups --max-age 48h`.
-- **Guardar fuera del servidor** también `.env.production`, en especial `ENCRYPTION_MASTER_KEY`:
+- **Guardar fuera del servidor** también `.env.production` y `.env.db`, en especial `ENCRYPTION_MASTER_KEY`:
   sin ella, una copia de la base no sirve para recuperar los tokens de los canales.
 - **Restaurar**: `sh deploy/restore.sh backups/zenith-AAAAMMDD-HHMM.dump`. Probarlo cada tanto
   en otra máquina; una copia que nunca se restauró no está probada.
@@ -117,7 +123,7 @@ El worker manda por SMTP los avisos de "cliente espera asesor", "WhatsApp descon
 - Para que no caigan en spam, el dominio del remitente necesita SPF y DKIM configurados según
   las instrucciones del proveedor.
 - Probar antes de confiar en los avisos:
-  `zc run --rm worker node --import tsx apps/worker/src/cli/mail-test.ts --to asesor@negocio.com`
+  `sh deploy/admin.sh mail-test --to asesor@negocio.com`
   (en desarrollo: `npm run mail:test -- --to correo@...`).
 - Quién recibe los avisos: los usuarios del panel con `notify_email` activo (por defecto, todos).
 

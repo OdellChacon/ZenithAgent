@@ -7,9 +7,7 @@
  *    WhatsApp Business y que la plantilla de seguimiento está aprobada.
  *
  *   npm run check:meta -- --url https://bot.ejemplo.com
- *   (en el servidor) docker compose -f docker-compose.prod.yml --env-file .env.production run --rm \
- *       -e MIGRATION_DATABASE_URL=postgres://postgres:<clave>@postgres:5432/zenith api \
- *       node --import tsx apps/api/src/cli/check-meta.ts --url https://bot.ejemplo.com
+ *   (en el servidor) sh deploy/admin.sh check-meta --url https://bot.ejemplo.com
  *
  * Usa MIGRATION_DATABASE_URL (lee las cuentas de todos los negocios). No imprime tokens.
  */

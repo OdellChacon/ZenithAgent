@@ -86,24 +86,28 @@ export async function checkChannelTokens(deps: ChannelHealthDeps): Promise<Healt
     );
     for (const row of accounts) {
       const state = await probe(deps, row);
-      await withTenant(deps.pool, tenantId, async (c) => {
+      // false si la cuenta se volvió a conectar mientras se revisaba: lo revisado ya no aplica.
+      const applied = await withTenant(deps.pool, tenantId, async (c) => {
         if (state === 'invalid') {
-          await c.query(
+          return (await c.query(
             `UPDATE channel_accounts SET credentials_invalid_at = COALESCE(credentials_invalid_at, $2),
                     credentials_error = COALESCE(credentials_error, 'Meta rechazó el token en la revisión diaria'), credentials_checked_at = $2
-              WHERE id = $1`,
-            [row.id, now],
-          );
-        } else if (state === 'ok') {
-          await c.query(
-            `UPDATE channel_accounts SET credentials_invalid_at = NULL, credentials_error = NULL, credentials_checked_at = $2 WHERE id = $1`,
-            [row.id, now],
-          );
-        } else {
-          // Meta no respondió o falló por otra cosa: se vuelve a probar en la próxima pasada.
-          deps.log?.('no se pudo revisar el token de una cuenta', { channelAccountId: row.id });
+              WHERE id = $1 AND credentials_enc = $3`,
+            [row.id, now, row.credentials_enc],
+          )).rowCount === 1;
         }
+        if (state === 'ok') {
+          return (await c.query(
+            `UPDATE channel_accounts SET credentials_invalid_at = NULL, credentials_error = NULL, credentials_checked_at = $2
+              WHERE id = $1 AND credentials_enc = $3`,
+            [row.id, now, row.credentials_enc],
+          )).rowCount === 1;
+        }
+        // Meta no respondió o falló por otra cosa: se vuelve a probar en la próxima pasada.
+        deps.log?.('no se pudo revisar el token de una cuenta', { channelAccountId: row.id });
+        return false;
       });
+      if (!applied) continue;
       if (state === 'invalid' && !row.credentials_invalid_at) findings.push({ tenantId, channelAccountId: row.id, state: 'invalid' });
       if (state === 'ok' && row.credentials_invalid_at) findings.push({ tenantId, channelAccountId: row.id, state: 'recovered' });
       if (
@@ -122,35 +126,61 @@ const CHANNEL_NAMES: Record<string, string> = { whatsapp: 'WhatsApp', messenger:
 const escapeHtml = (s: string) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!);
 
 /**
- * Correo al equipo: el token de una cuenta fue rechazado o está por vencer. Como mucho uno
- * por día y cuenta, aunque fallen muchos envíos seguidos.
+ * Correo al equipo: el token de una cuenta fue rechazado o está por vencer. Como mucho uno por
+ * día, cuenta y tipo de aviso, aunque fallen muchos envíos seguidos; un "sin acceso" sale aunque
+ * ese día ya haya salido un "vence pronto". El aviso se reserva antes de mandarlo (así dos
+ * workers a la vez no mandan dos correos) y, si el correo no sale, se devuelve la reserva para
+ * que el siguiente intento vuelva a avisar.
  */
 export async function notifyCredentials(
   deps: { pool: Pool; mailer: Mailer; panelUrl: string; now?: () => Date },
   tenantId: string,
   channelAccountId: string,
   state: 'invalid' | 'expiring',
-): Promise<'sent' | 'throttled' | 'no_recipients' | 'not_found'> {
+): Promise<'sent' | 'throttled' | 'no_recipients'> {
   const now = deps.now?.() ?? new Date();
   const info = await withTenant(deps.pool, tenantId, async (c) => {
-    // Se reserva el aviso antes de mandarlo: dos workers a la vez no mandan dos correos.
-    const { rows } = await c.query<{ tenant: string; name: string; channel: string; token_expires_at: Date | null }>(
-      `UPDATE channel_accounts ca SET credentials_alerted_at = $2
-         FROM tenants t
-        WHERE ca.id = $1 AND t.id = ca.tenant_id AND (ca.credentials_alerted_at IS NULL OR ca.credentials_alerted_at < $3)
-        RETURNING t.name AS tenant, coalesce(ca.display_name, ca.external_account_id) AS name, ca.channel, ca.token_expires_at`,
-      [channelAccountId, now, new Date(now.getTime() - DAY_MS)],
+    const { rows } = await c.query<{
+      tenant: string;
+      name: string;
+      channel: string;
+      token_expires_at: Date | null;
+      prev_at: Date | null;
+      prev_state: string | null;
+    }>(
+      `UPDATE channel_accounts ca SET credentials_alerted_at = $2, credentials_alert_state = $4
+         FROM tenants t,
+              (SELECT id, credentials_alerted_at AS prev_at, credentials_alert_state AS prev_state FROM channel_accounts WHERE id = $1) p
+        WHERE ca.id = $1 AND p.id = ca.id AND t.id = ca.tenant_id
+          AND (ca.credentials_alerted_at IS NULL OR ca.credentials_alerted_at < $3
+               OR ($4 = 'invalid' AND ca.credentials_alert_state IS DISTINCT FROM 'invalid'))
+        RETURNING t.name AS tenant, coalesce(ca.display_name, ca.external_account_id) AS name, ca.channel, ca.token_expires_at,
+                  p.prev_at, p.prev_state`,
+      [channelAccountId, now, new Date(now.getTime() - DAY_MS), state],
     );
     return rows[0];
   });
   if (!info) return 'throttled';
+
+  /** El correo no salió: se libera la reserva (solo si sigue siendo la nuestra). */
+  const release = () =>
+    withTenant(deps.pool, tenantId, (c) =>
+      c.query(
+        `UPDATE channel_accounts SET credentials_alerted_at = $3, credentials_alert_state = $4
+          WHERE id = $1 AND credentials_alerted_at = $2`,
+        [channelAccountId, now, info.prev_at, info.prev_state],
+      ),
+    );
 
   const { rows: recipients } = await deps.pool.query<{ email: string }>(
     `SELECT u.email FROM memberships m JOIN users u ON u.id = m.user_id
       WHERE m.tenant_id = $1 AND m.notify_email AND u.status = 'active'`,
     [tenantId],
   );
-  if (!recipients.length) return 'no_recipients';
+  if (!recipients.length) {
+    await release();
+    return 'no_recipients';
+  }
 
   const channel = CHANNEL_NAMES[info.channel] ?? info.channel;
   const link = new URL('/', deps.panelUrl).toString();
@@ -165,11 +195,16 @@ export async function notifyCredentials(
         'Mientras tanto el bot no puede enviar mensajes en esa cuenta. Hay que volver a conectarla desde el panel.'
       : `El acceso del sistema a ${info.name} (${channel}) vence${when ? ` el ${when}` : ' en menos de una semana'}. ` +
         'Para que el bot no deje de responder, vuelvan a conectar la cuenta desde el panel antes de esa fecha.';
-  await deps.mailer.send({
-    to: recipients.map((r) => r.email),
-    subject,
-    text: `${body}\n\nPanel: ${link}\n`,
-    html: `<p>${escapeHtml(body)}</p><p><a href="${escapeHtml(link)}">Abrir el panel</a></p>`,
-  });
+  try {
+    await deps.mailer.send({
+      to: recipients.map((r) => r.email),
+      subject,
+      text: `${body}\n\nPanel: ${link}\n`,
+      html: `<p>${escapeHtml(body)}</p><p><a href="${escapeHtml(link)}">Abrir el panel</a></p>`,
+    });
+  } catch (err) {
+    await release().catch(() => undefined);
+    throw err;
+  }
   return 'sent';
 }

@@ -64,7 +64,7 @@ try {
     const enc = encryptCredentials(JSON.stringify({ accessToken: token, pageId }), masterKey, account.id);
     await client.query(
       `UPDATE channel_accounts SET credentials_enc = $2, credentials_key_id = $3, credentials_invalid_at = NULL, credentials_error = NULL,
-              credentials_checked_at = now(), credentials_alerted_at = NULL, disconnected_at = NULL, disconnect_reason = NULL
+              credentials_checked_at = now(), credentials_alerted_at = NULL, credentials_alert_state = NULL, disconnected_at = NULL, disconnect_reason = NULL
         WHERE id = $1`,
       [account.id, enc, process.env.ENCRYPTION_MASTER_KEY_ID ?? null],
     );

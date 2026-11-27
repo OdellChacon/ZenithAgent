@@ -20,6 +20,9 @@ const OFFICE_OLE: Record<string, string> = {
   ppt: 'application/vnd.ms-powerpoint',
 };
 
+/** Marcas ("major brand") de la caja ftyp que son video MP4 (H.264/AAC en el caso normal). */
+const MP4_BRANDS: ReadonlySet<string> = new Set(['isom', 'iso2', 'iso4', 'iso5', 'iso6', 'mp41', 'mp42', 'avc1', 'M4V ', 'MSNV', 'dash']);
+
 /** Nombre seguro para guardar y mostrar: sin rutas ni caracteres de control. */
 export function cleanFilename(name: string, fallback: string): string {
   const base = (name.split(/[\\/]/).pop() ?? '').replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 200);
@@ -40,8 +43,11 @@ export function sniffFile(data: Buffer, filename: string): { mimeType: string; f
   else if (starts(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)) [mimeType, defaultExt] = ['image/png', 'png'];
   else if (starts(0x25, 0x50, 0x44, 0x46, 0x2d)) [mimeType, defaultExt] = ['application/pdf', 'pdf'];
   else if (head.subarray(4, 8).toString('latin1') === 'ftyp') {
+    // La caja "ftyp" la usan también .mov (qt), HEIC/HEIF y M4A: solo las marcas de MP4 y 3GP
+    // son videos que WhatsApp, Messenger e Instagram aceptan.
     const brand = head.subarray(8, 12).toString('latin1');
-    [mimeType, defaultExt] = brand.startsWith('3g') ? ['video/3gpp', '3gp'] : ['video/mp4', 'mp4'];
+    if (/^3g[p2]/.test(brand)) [mimeType, defaultExt] = ['video/3gpp', '3gp'];
+    else if (MP4_BRANDS.has(brand)) [mimeType, defaultExt] = ['video/mp4', 'mp4'];
   } else if (starts(0x50, 0x4b, 0x03, 0x04) && OFFICE_ZIP[ext]) mimeType = OFFICE_ZIP[ext]!;
   else if (starts(0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1) && OFFICE_OLE[ext]) mimeType = OFFICE_OLE[ext]!;
   else if (ext === 'txt' && !data.subarray(0, 4096).includes(0)) mimeType = 'text/plain';

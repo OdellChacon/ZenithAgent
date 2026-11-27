@@ -14,8 +14,7 @@ se le manda.
 ## 0. Revisión previa (5 minutos)
 
 ```bash
-zc run --rm -e MIGRATION_DATABASE_URL=postgres://postgres:<POSTGRES_PASSWORD>@postgres:5432/zenith api \
-  node --import tsx apps/api/src/cli/check-meta.ts --url https://<DOMAIN>
+sh deploy/admin.sh check-meta --url https://<DOMAIN>
 ```
 
 Tiene que terminar en "Todo en orden". Revisa `/healthz`, que Meta pueda validar los tres

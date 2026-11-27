@@ -4,8 +4,7 @@
  * depender de los avisos.
  *
  *   npm run mail:test -- --to asesor@negocio.com
- *   (en el servidor) docker compose -f docker-compose.prod.yml --env-file .env.production run --rm worker \
- *       node --import tsx apps/worker/src/cli/mail-test.ts --to asesor@negocio.com
+ *   (en el servidor) sh deploy/admin.sh mail-test --to asesor@negocio.com
  */
 import { parseArgs } from 'node:util';
 import { z } from 'zod';

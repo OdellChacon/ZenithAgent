@@ -198,14 +198,27 @@ async function forgetMedia(deps: OutboundDeps, tenantId: string, channelAccountI
   );
 }
 
-/** Meta rechazó el token: la cuenta queda marcada para que el panel y el correo avisen. */
-async function markCredentialsInvalid(deps: OutboundDeps, tenantId: string, channelAccountId: string, message: string) {
-  await withTenant(deps.pool, tenantId, (client) =>
+/**
+ * Meta rechazó el token: la cuenta queda marcada para que el panel y el correo avisen. Solo si
+ * sigue guardado el mismo token con que se intentó: si alguien volvió a conectar la cuenta
+ * mientras este envío estaba en curso, el error es del token viejo y no hay que marcar el nuevo.
+ * Devuelve si la marcó.
+ */
+async function markCredentialsInvalid(
+  deps: OutboundDeps,
+  tenantId: string,
+  channelAccountId: string,
+  usedCredentials: Buffer,
+  message: string,
+): Promise<boolean> {
+  const { rowCount } = await withTenant(deps.pool, tenantId, (client) =>
     client.query(
-      `UPDATE channel_accounts SET credentials_invalid_at = COALESCE(credentials_invalid_at, now()), credentials_error = $2 WHERE id = $1`,
-      [channelAccountId, message.slice(0, 500)],
+      `UPDATE channel_accounts SET credentials_invalid_at = COALESCE(credentials_invalid_at, now()), credentials_error = $2
+        WHERE id = $1 AND credentials_enc = $3`,
+      [channelAccountId, message.slice(0, 500), usedCredentials],
     ),
   );
+  return Boolean(rowCount);
 }
 
 /**
@@ -329,7 +342,16 @@ export async function processOutboundMessage(
   }
 
   const authFailed = async (message: string): Promise<OutboundOutcome> => {
-    await markCredentialsInvalid(deps, job.tenantId, claimed.channel_account_id, message);
+    const marked = await markCredentialsInvalid(deps, job.tenantId, claimed.channel_account_id, claimed.credentials_enc!, message);
+    if (!marked) {
+      // La cuenta se volvió a conectar mientras tanto: se reintenta con el token nuevo.
+      if (claimed.attempts < maxAttempts) {
+        await finish('queued', { error: `token reemplazado durante el envío: ${message}` });
+        throw new RetryableSendError(message);
+      }
+      await finish('failed', { error: `token rechazado por Meta: ${message}` });
+      return { result: 'failed', reason: 'send_failed' };
+    }
     await finish('failed', { error: `token rechazado por Meta: ${message}` });
     return { result: 'failed', reason: 'auth_failed', channelAccountId: claimed.channel_account_id };
   };

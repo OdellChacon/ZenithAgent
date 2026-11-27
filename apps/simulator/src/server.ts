@@ -1,6 +1,9 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import Fastify, { type FastifyInstance } from 'fastify';
 import multipart from '@fastify/multipart';
 import { z } from 'zod';
@@ -24,6 +27,11 @@ export interface SimulatorDeps {
   pageId?: string;
   instagramId?: string;
   fetch?: typeof fetch;
+  /**
+   * Archivo donde se recuerdan los clientes de Messenger e Instagram entre reinicios (con
+   * tsx watch el simulador se reinicia a cada cambio). null: solo en memoria (pruebas).
+   */
+  metaUsersFile?: string | null;
   /** Retardo de los estados simulados; 0 en pruebas. */
   statusDelayMs?: number;
   /**
@@ -199,7 +207,26 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
   const pageId = deps.pageId ?? SIM_PAGE_ID;
   const instagramId = deps.instagramId ?? SIM_INSTAGRAM_ID;
   /** Clientes de Messenger e Instagram (PSID o IGSID → canal y nombre), para estados y perfil. */
+  const metaUsersFile = deps.metaUsersFile === undefined ? path.join(tmpdir(), 'zenith-simulador-clientes-meta.json') : deps.metaUsersFile;
   const metaUsers = new Map<string, { channel: 'messenger' | 'instagram'; name: string }>();
+  if (metaUsersFile) {
+    try {
+      for (const [id, u] of Object.entries(JSON.parse(readFileSync(metaUsersFile, 'utf8')) as Record<string, { channel: 'messenger' | 'instagram'; name: string }>)) {
+        metaUsers.set(id, u);
+      }
+    } catch {
+      /* primera vez o archivo dañado: se empieza vacío */
+    }
+  }
+  const rememberMetaUser = (id: string, u: { channel: 'messenger' | 'instagram'; name: string }) => {
+    metaUsers.set(id, u);
+    if (!metaUsersFile) return;
+    try {
+      writeFileSync(metaUsersFile, JSON.stringify(Object.fromEntries(metaUsers)));
+    } catch {
+      /* si no se puede guardar, sigue en memoria */
+    }
+  };
   const uploads = new Map<string, { mime: string; name: string }>();
   /** Mensajes que mandó cada cliente (wamid → número), para aceptar el "leído" como Meta. */
   const inbound = new Map<string, string>();
@@ -345,7 +372,7 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     let status: number;
     try {
       if (channel !== 'whatsapp') {
-        metaUsers.set(from, { channel, name });
+        rememberMetaUser(from, { channel, name });
         const event = 'postback' in content ? { sender: { id: from }, ...content } : { sender: { id: from }, message: { mid: id, ...content } };
         status = await postWebhook(metaEnvelope(channel, event), channel);
       } else {

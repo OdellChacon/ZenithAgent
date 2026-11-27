@@ -9,6 +9,9 @@
 # Restaurar: ver deploy/restore.sh.
 set -u
 
+# La contraseña llega en POSTGRES_PASSWORD (archivo .env.db).
+export PGPASSWORD="${PGPASSWORD:-${POSTGRES_PASSWORD:-}}"
+
 HOUR="${BACKUP_HOUR:-3}"
 KEEP="${BACKUP_KEEP_DAYS:-14}"
 DIR=/backups

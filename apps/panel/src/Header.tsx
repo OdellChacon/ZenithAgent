@@ -36,10 +36,24 @@ const ROLE_LABELS: Record<Me['role'], string> = { owner: 'Propietario', admin: '
 
 const spring = { type: 'spring', stiffness: 520, damping: 38 } as const;
 
-function NavLink({ id, active, onNavigate, children }: { id: Section; active: boolean; onNavigate: (s: Section) => void; children: ReactNode }) {
+function NavLink({
+  id,
+  active,
+  onNavigate,
+  title,
+  children,
+}: {
+  id: Section;
+  active: boolean;
+  onNavigate: (s: Section) => void;
+  /** Nombre completo: se ve como ayuda cuando la barra solo muestra el ícono. */
+  title?: string;
+  children: ReactNode;
+}) {
   return (
     <a
       href={SECTION_PATHS[id]}
+      title={title}
       className={`section-link ${active ? 'on' : ''}`}
       aria-current={active ? 'page' : undefined}
       onClick={(e) => {
@@ -197,9 +211,9 @@ export function Header({
         ))}
         <span className="nav-sep" aria-hidden="true" />
         {CHANNELS.map((s) => (
-          <NavLink key={s.id} id={s.id} active={section === s.id} onNavigate={onNavigate}>
+          <NavLink key={s.id} id={s.id} active={section === s.id} onNavigate={onNavigate} title={s.soon ? `${s.label} (pronto)` : s.label}>
             <ChannelBadge channel={s.channel} />
-            {s.label}
+            <span className="nav-label">{s.label}</span>
             {s.soon && <span className="soon-dot" title="En construcción">Pronto</span>}
           </NavLink>
         ))}

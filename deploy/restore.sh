@@ -19,4 +19,4 @@ read -r ok
 $COMPOSE stop gateway worker api
 $COMPOSE exec -T postgres pg_restore -U postgres -d zenith --clean --if-exists --no-owner --role=postgres < "$FILE"
 $COMPOSE up -d gateway worker api
-echo "Restaurado. Revisa https://\$DOMAIN/healthz"
+echo "Restaurado. Revisa /healthz en el dominio del bot."

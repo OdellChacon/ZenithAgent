@@ -244,6 +244,45 @@ describe.skipIf(!hasDb)('envíos por canal, archivos del asesor y token de Meta'
       expect(await notifyCredentials(notifyDeps, t.tenantId, messengerId, 'expiring')).toBe('throttled');
       expect(sent).toHaveLength(1);
       expect(sent[0]!.subject).toContain('Messenger');
+
+      // Un "sin acceso" no espera al día siguiente por un "vence pronto" ya avisado hoy.
+      expect(await notifyCredentials(notifyDeps, t.tenantId, messengerId, 'invalid')).toBe('sent');
+      expect(await notifyCredentials(notifyDeps, t.tenantId, messengerId, 'invalid')).toBe('throttled');
+      expect(sent.at(-1)!.subject).toContain('sin acceso');
     });
+
+    it('si el correo no sale, el aviso no se da por hecho y el siguiente intento vuelve a avisar', async () => {
+      const failing = { send: async () => Promise.reject(new Error('SMTP caído')) };
+      const deps = (mailer: Parameters<typeof notifyCredentials>[0]['mailer']) => ({ pool: app, mailer, panelUrl: 'http://panel.test' });
+      await expect(notifyCredentials(deps(failing), t.tenantId, instagramId, 'invalid')).rejects.toThrow('SMTP caído');
+      expect((await owner.query('SELECT credentials_alerted_at FROM channel_accounts WHERE id = $1', [instagramId])).rows[0].credentials_alerted_at).toBeNull();
+
+      // Sin nadie que reciba avisos tampoco se consume.
+      await owner.query('UPDATE memberships SET notify_email = false WHERE tenant_id = $1', [t.tenantId]);
+      const sent: unknown[] = [];
+      const ok = { send: async (m: unknown) => void sent.push(m) };
+      expect(await notifyCredentials(deps(ok), t.tenantId, instagramId, 'invalid')).toBe('no_recipients');
+      await owner.query('UPDATE memberships SET notify_email = true WHERE tenant_id = $1', [t.tenantId]);
+      expect(await notifyCredentials(deps(ok), t.tenantId, instagramId, 'invalid')).toBe('sent');
+      expect(sent).toHaveLength(1);
+    });
+  });
+
+  it('si la cuenta se reconecta mientras un envío falla con el token viejo, no se marca el token nuevo', async () => {
+    const p = await pending(t.channelAccountId, 'whatsapp', '584141110020', { kind: 'text', text: 'Hola', author: 'agent' });
+    const fresh = encryptCredentials(JSON.stringify({ accessToken: 'WA-TOKEN-NUEVO' }), masterKey, t.channelAccountId);
+    // Meta rechaza el token viejo; justo en ese momento el dueño vuelve a conectar el número.
+    const g = graph(() => ({ status: 401, body: { error: { code: 190, message: 'expired' } } }));
+    const reconnecting: typeof fetch = async (input, init) => {
+      await owner.query('UPDATE channel_accounts SET credentials_enc = $2 WHERE id = $1', [t.channelAccountId, fresh]);
+      return g.fetchFn(input, init);
+    };
+    await expect(processOutboundMessage(deps(reconnecting), { tenantId: t.tenantId, outboundMessageId: p.out })).rejects.toThrow();
+    const acc = (await owner.query('SELECT credentials_invalid_at FROM channel_accounts WHERE id = $1', [t.channelAccountId])).rows[0];
+    expect(acc.credentials_invalid_at).toBeNull();
+    // Queda en cola y el reintento sale con el token nuevo.
+    expect((await owner.query('SELECT status FROM outbound_messages WHERE id = $1', [p.out])).rows[0].status).toBe('queued');
+    const ok = graph(() => ({ body: { messages: [{ id: 'wamid.NUEVO' }] } }));
+    expect(await processOutboundMessage(deps(ok.fetchFn), { tenantId: t.tenantId, outboundMessageId: p.out })).toEqual({ result: 'sent', externalMessageId: 'wamid.NUEVO' });
   });
 });

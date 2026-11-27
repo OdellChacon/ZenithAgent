@@ -260,7 +260,17 @@ export function Catalogs({ tick }: { tick: number }) {
  * Estante de catálogos dentro de una conversación. Cada catálogo se arrastra al chat (o se
  * toca "Adjuntar") y queda listo en la caja de respuesta para mandarlo con un texto opcional.
  */
-export function CatalogShelf({ onPick, onClose, disabled }: { onPick: (c: Catalog) => void; onClose: () => void; disabled: boolean }) {
+export function CatalogShelf({
+  onPick,
+  onClose,
+  blockedReason,
+}: {
+  onPick: (c: Catalog) => void;
+  onClose: () => void;
+  /** Por qué no se puede mandar nada ahora (sin tomar la conversación, ventana cerrada…); null si se puede. */
+  blockedReason: string | null;
+}) {
+  const disabled = blockedReason !== null;
   const [items, setItems] = useState<Catalog[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState('');
@@ -294,7 +304,7 @@ export function CatalogShelf({ onPick, onClose, disabled }: { onPick: (c: Catalo
           {Icon.close}
         </button>
       </div>
-      <p className="muted small">{disabled ? 'Toma la conversación para poder mandar catálogos.' : 'Arrastra un catálogo al chat o toca Adjuntar.'}</p>
+      <p className="muted small">{blockedReason ?? 'Arrastra un catálogo al chat o toca Adjuntar.'}</p>
       {items && items.length > 4 && <input className="search" value={q} onChange={(e) => setQ(e.target.value)} placeholder="Buscar catálogo" aria-label="Buscar catálogo" />}
       {error && <p className="error small">{error}</p>}
       {!items && !error && <p className="muted small">Cargando…</p>}

@@ -1284,7 +1284,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         await c.query(
           `UPDATE channel_accounts SET credentials_enc = $2, credentials_key_id = $3, disconnected_at = NULL, disconnect_reason = NULL,
                   token_expires_at = $4, credentials_invalid_at = NULL, credentials_error = NULL,
-                  credentials_checked_at = now(), credentials_alerted_at = NULL
+                  credentials_checked_at = now(), credentials_alerted_at = NULL, credentials_alert_state = NULL
             WHERE id = $1`,
           [id, enc, s.masterKeyId ?? null, tokenExpiresAt],
         );

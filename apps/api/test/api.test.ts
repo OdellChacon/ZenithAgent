@@ -4,6 +4,7 @@ import type pg from 'pg';
 import type { PanelEvent } from '@zenith/core';
 import type { Pool } from '@zenith/db';
 import { buildApi } from '../src/server.js';
+import { sniffFile } from '../src/files.js';
 import { decryptCredentials, encryptCredentials, hashPassword, verifyPassword } from '@zenith/core';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 
@@ -18,6 +19,18 @@ describe('contraseñas', () => {
 
   it('exige un largo mínimo', async () => {
     await expect(hashPassword('corta')).rejects.toThrow('al menos');
+  });
+});
+
+describe('tipo real de los archivos', () => {
+  const box = (brand: string) => Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from(`ftyp${brand}`, 'latin1'), Buffer.alloc(16)]);
+  it('acepta MP4 y 3GP, y rechaza .mov del iPhone, HEIC y M4A aunque tengan la misma caja ftyp', () => {
+    expect(sniffFile(box('isom'), 'video.mp4')?.mimeType).toBe('video/mp4');
+    expect(sniffFile(box('mp42'), 'video.mp4')?.mimeType).toBe('video/mp4');
+    expect(sniffFile(box('3gp4'), 'video.3gp')?.mimeType).toBe('video/3gpp');
+    expect(sniffFile(box('qt  '), 'IMG_0001.MOV')).toBeNull();
+    expect(sniffFile(box('heic'), 'IMG_0002.HEIC')).toBeNull();
+    expect(sniffFile(box('M4A '), 'nota.m4a')).toBeNull();
   });
 });
 

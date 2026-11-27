@@ -4,15 +4,18 @@
 #
 # Solo Caddy publica puertos (80 y 443, con https automático). Postgres y Redis quedan en la
 # red interna; la API y el gateway solo se alcanzan a través de Caddy.
+#
+# Dos archivos de configuración:
+# - .env.production: lo que usa la app (gateway, worker, API). Su DATABASE_URL entra con el rol
+#   zenith_runtime, que no es dueño de las tablas y queda sujeto al aislamiento por negocio (RLS).
+# - .env.db: la contraseña del superusuario de Postgres. Solo la reciben postgres, migrate y
+#   backup: si se filtrara el entorno de la app, no daría acceso como superusuario.
 
 x-app: &app
   build: .
   image: zenithagent:latest
   restart: unless-stopped
   env_file: .env.production
-  environment:
-    DATABASE_URL: postgres://zenith_runtime:${APP_DB_PASSWORD}@postgres:5432/zenith
-    REDIS_URL: redis://redis:6379
   depends_on:
     postgres: { condition: service_healthy }
     redis: { condition: service_healthy }
@@ -25,11 +28,10 @@ services:
   postgres:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    env_file: .env.db
     environment:
       POSTGRES_DB: zenith
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env.production}
-      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Define APP_DB_PASSWORD en .env.production}
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
@@ -53,13 +55,13 @@ services:
       retries: 30
 
   # Aplica las migraciones pendientes y termina. Los demás servicios esperan a que salga bien.
+  # with-owner-db.sh arma MIGRATION_DATABASE_URL con la contraseña de .env.db.
   migrate:
     build: .
     image: zenithagent:latest
     restart: "no"
-    environment:
-      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zenith
-    command: ["node", "--import", "tsx", "packages/db/src/cli/migrate.ts"]
+    env_file: .env.db
+    command: ["sh", "deploy/with-owner-db.sh", "node", "--import", "tsx", "packages/db/src/cli/migrate.ts"]
     depends_on:
       postgres: { condition: service_healthy }
 
@@ -67,7 +69,6 @@ services:
     <<: *app
     command: ["node", "--import", "tsx", "apps/gateway/src/index.ts"]
     environment:
-      DATABASE_URL: postgres://zenith_runtime:${APP_DB_PASSWORD}@postgres:5432/zenith
       REDIS_URL: redis://redis:6379
       GATEWAY_PORT: "3000"
     healthcheck:
@@ -79,12 +80,13 @@ services:
   worker:
     <<: *app
     command: ["node", "--import", "tsx", "apps/worker/src/index.ts"]
+    environment:
+      REDIS_URL: redis://redis:6379
 
   api:
     <<: *app
     command: ["node", "--import", "tsx", "apps/api/src/index.ts"]
     environment:
-      DATABASE_URL: postgres://zenith_runtime:${APP_DB_PASSWORD}@postgres:5432/zenith
       REDIS_URL: redis://redis:6379
       API_HOST: 0.0.0.0
       API_PORT: "3100"
@@ -118,10 +120,10 @@ services:
   backup:
     image: pgvector/pgvector:pg16
     restart: unless-stopped
+    env_file: .env.db
     environment:
       PGHOST: postgres
       PGUSER: postgres
-      PGPASSWORD: ${POSTGRES_PASSWORD}
       PGDATABASE: zenith
       BACKUP_HOUR: ${BACKUP_HOUR:-3}
       BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}

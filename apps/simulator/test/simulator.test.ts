@@ -20,7 +20,7 @@ function setup(gatewayStatus = 200) {
     sent.push({ url: String(url), body: String(init?.body), signature: (init?.headers as Record<string, string>)['x-hub-signature-256']! });
     return new Response('{}', { status: gatewayStatus });
   });
-  const app = buildSimulator({ gatewayUrl: 'http://localhost:3000', metaAppSecret: SECRET, phoneNumberId: PHONE, fetch: gateway, statusDelayMs: 0 });
+  const app = buildSimulator({ gatewayUrl: 'http://localhost:3000', metaAppSecret: SECRET, phoneNumberId: PHONE, fetch: gateway, statusDelayMs: 0, metaUsersFile: null });
   return { app, sent, gateway };
 }
 
