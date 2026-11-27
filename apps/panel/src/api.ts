@@ -133,6 +133,20 @@ export interface ChannelStatus {
   connectedAt: string;
 }
 
+export interface Catalog {
+  id: string;
+  title: string;
+  description: string | null;
+  mediaType: 'image' | 'video' | 'document';
+  mimeType: string;
+  filename: string;
+  bytes: number;
+  /** Para abrirlo o verlo en el navegador. */
+  url: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -163,6 +177,33 @@ async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: str
   return data as T;
 }
 
+/** POST con archivo (multipart). El navegador pone el límite del cuerpo; no se manda Content-Type a mano. */
+async function upload<T>(path: string, form: FormData): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/v1${path}`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { Accept: 'application/json', 'x-zenith-csrf': '1' },
+      body: form,
+    });
+  } catch {
+    throw new ApiError(0, 'network', 'No hay conexión con el servidor');
+  }
+  const data = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
+  if (!res.ok) throw new ApiError(res.status, data?.error?.code ?? 'error', data?.error?.message ?? `Error ${res.status}`);
+  return data as T;
+}
+
+/** "2,4 MB", "350 KB". */
+export function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toLocaleString('es-VE', { maximumFractionDigits: 1 })} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+/** Tipo de dato del arrastre de un catálogo hacia un chat. */
+export const CATALOG_DRAG_TYPE = 'application/x-zenith-catalog';
+
 export const api = {
   me: () => request<Me>('GET', '/auth/me'),
   login: (email: string, password: string) => request<{ ok: true }>('POST', '/auth/login', { email, password }),
@@ -175,27 +216,31 @@ export const api = {
     request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/templates`, t),
   send: (id: string, text: string, clientId: string) =>
     request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/messages`, { text, clientId }),
-  sendFile: async (id: string, file: File, caption: string, clientId: string) => {
+  sendFile: (id: string, file: File, caption: string, clientId: string) => {
     const form = new FormData();
     // Los datos van antes del archivo: así la API los lee sin guardar el archivo en memoria dos veces.
     if (caption.trim()) form.append('caption', caption.trim());
     form.append('clientId', clientId);
     form.append('file', file, file.name);
-    let res: Response;
-    try {
-      res = await fetch(`/api/v1/conversations/${encodeURIComponent(id)}/files`, {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { Accept: 'application/json', 'x-zenith-csrf': '1' },
-        body: form,
-      });
-    } catch {
-      throw new ApiError(0, 'network', 'No hay conexión con el servidor');
-    }
-    const data = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
-    if (!res.ok) throw new ApiError(res.status, data?.error?.code ?? 'error', data?.error?.message ?? `Error ${res.status}`);
-    return data as { ok: true };
+    return upload<{ ok: true }>(`/conversations/${encodeURIComponent(id)}/files`, form);
   },
+  catalogs: () => request<{ items: Catalog[]; canManage: boolean }>('GET', '/catalogs'),
+  uploadCatalog: (file: File, title: string, description: string) => {
+    const form = new FormData();
+    if (title.trim()) form.append('title', title.trim());
+    if (description.trim()) form.append('description', description.trim());
+    form.append('file', file, file.name);
+    return upload<{ ok: true; item: Catalog }>('/catalogs', form);
+  },
+  updateCatalog: (id: string, patch: { title?: string; description?: string | null }) =>
+    request<{ ok: true; item: Catalog }>('PATCH', `/catalogs/${encodeURIComponent(id)}`, patch),
+  deleteCatalog: (id: string) => request<{ ok: true }>('DELETE', `/catalogs/${encodeURIComponent(id)}`),
+  shareCatalog: (conversationId: string, catalogId: string, caption: string, clientId: string) =>
+    request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(conversationId)}/catalogs`, {
+      catalogId,
+      clientId,
+      ...(caption.trim() ? { caption: caption.trim() } : {}),
+    }),
   finish: (id: string, action: 'release' | 'close') => request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/finish`, { action }),
   contacts: (filters: { q?: string; tag?: string }) => {
     const params = new URLSearchParams();

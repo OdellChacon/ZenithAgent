@@ -184,7 +184,7 @@ const sharedSchema = z
     contact: z.object({ name: z.string().trim().min(1).max(120), phone: z.string().trim().min(6).max(30) }).optional(),
   })
   .refine((v) => Boolean(v.location) !== Boolean(v.contact), 'Manda una ubicación o un contacto');
-const MAX_MEDIA_BYTES = 16 * 1024 * 1024;
+const MAX_MEDIA_BYTES = 25 * 1024 * 1024;
 
 const UI_PATH = new URL('../public/index.html', import.meta.url);
 

@@ -13,6 +13,9 @@ import {
   type NotifyJobData,
   type OutboundJobData,
   type PanelEvent,
+  WORKER_HEARTBEAT_EVERY_MS,
+  WORKER_HEARTBEAT_KEY,
+  WORKER_HEARTBEAT_STALE_MS,
 } from '@zenith/core';
 import { createPool, reclaimStaleWebhookEvents } from '@zenith/db';
 import { processBrainJob } from './brain-job.js';
@@ -312,7 +315,19 @@ async function healthTick() {
 const healthTimer = setInterval(healthTick, 60 * 60_000);
 void healthTick();
 
+/** Señal de vida para /healthz de la API (y el monitor externo que la consulta). */
+async function heartbeat() {
+  try {
+    await publisher.set(WORKER_HEARTBEAT_KEY, String(Date.now()), 'PX', WORKER_HEARTBEAT_STALE_MS);
+  } catch (err) {
+    log.warn({ err: (err as Error).message }, 'no se pudo escribir la señal de vida del worker');
+  }
+}
+const heartbeatTimer = setInterval(heartbeat, WORKER_HEARTBEAT_EVERY_MS);
+void heartbeat();
+
 const shutdown = async () => {
+  clearInterval(heartbeatTimer);
   clearInterval(sweepTimer);
   clearInterval(followupTimer);
   clearInterval(healthTimer);

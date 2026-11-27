@@ -22,7 +22,7 @@ import {
   WHATSAPP_VIDEO_MIME_TYPES,
 } from '@zenith/channel-whatsapp';
 import { downloadCustomerMedia, META_MAX_IMAGE_BYTES } from '@zenith/channel-meta';
-import { agentFileSpec, sniffFile, AGENT_FILE_MAX_BYTES } from './files.js';
+import { agentFileSpec, sniffFile, AGENT_FILE_MAX_BYTES, CATALOG_MAX_BYTES, catalogSendLimit } from './files.js';
 import { decryptCredentials, disconnectReasonLabel, dummyHash, encryptCredentials, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 
@@ -46,6 +46,8 @@ export interface ApiDeps {
   subscribe(tenantId: string, onEvent: (event: PanelEvent) => void): Promise<() => Promise<void>>;
   /** Cookie Secure: true en producción (https). */
   secureCookies: boolean;
+  /** Para /healthz: revisa base de datos, Redis y que el worker siga vivo. */
+  health?: () => Promise<Record<string, boolean>>;
   /** Acceso a Graph API con el token de cada número (para leer sus plantillas aprobadas). */
   graph?: { graphApiVersion: string; graphBaseUrl?: string; masterKey: Buffer; fetch?: typeof fetch };
   /** Alta de números con el registro insertado de Meta. Sin esto, el panel no ofrece conectar. */
@@ -104,6 +106,22 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     if (req.url.startsWith('/api/v1/auth/login')) return;
     req.user = (await findSession(deps.pool, req.cookies[SESSION_COOKIE])) ?? undefined;
     if (!req.user) return err(reply, 401, 'unauthenticated', 'Inicia sesión');
+  });
+
+  /**
+   * Para el monitor externo (UptimeRobot o similar) y Docker: 200 si todo está bien, 503 si algo
+   * falla. Solo dice qué parte falló, sin detalles internos.
+   */
+  app.get('/healthz', async (_req, reply) => {
+    if (!deps.health) return { ok: true };
+    let checks: Record<string, boolean>;
+    try {
+      checks = await deps.health();
+    } catch {
+      checks = { api: false };
+    }
+    const ok = Object.values(checks).every(Boolean);
+    return reply.code(ok ? 200 : 503).header('cache-control', 'no-store').send({ ok, checks });
   });
 
   const user = (req: FastifyRequest) => req.user!;
@@ -325,6 +343,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const name = typeof a.filename === 'string' ? a.filename : null;
     const mimeType = typeof a.mimeType === 'string' ? a.mimeType : null;
     if (typeof a.fileId === 'string') return { url: `/api/v1/files/${a.fileId}`, name, mimeType, mediaType: type };
+    if (typeof a.catalogId === 'string') return { url: `/api/v1/catalogs/${a.catalogId}/file`, name, mimeType, mediaType: type };
     if ((typeof a.externalMediaId === 'string' && a.externalMediaId) || typeof a.url === 'string') {
       return { url: `/api/v1/messages/${messageId}/media`, name, mimeType, mediaType: typeof a.type === 'string' ? a.type : type };
     }
@@ -688,6 +707,239 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       .send(data);
 
   const INLINE_TYPES = /^(image\/(jpeg|png|webp)|video\/(mp4|3gpp)|audio\/.+)$/;
+
+  // ---------------------------------------------------------------- catálogos
+
+  type CatalogRow = {
+    id: string;
+    title: string;
+    description: string | null;
+    media_type: 'image' | 'video' | 'document';
+    mime_type: string;
+    filename: string;
+    bytes: number;
+    created_at: Date;
+    updated_at: Date;
+  };
+  const CATALOG_COLUMNS = 'id, title, description, media_type, mime_type, filename, bytes, created_at, updated_at';
+  const presentCatalog = (r: CatalogRow) => ({
+    id: r.id,
+    title: r.title,
+    description: r.description,
+    mediaType: r.media_type,
+    mimeType: r.mime_type,
+    filename: r.filename,
+    bytes: r.bytes,
+    url: `/api/v1/catalogs/${r.id}/file`,
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  });
+  const canManageCatalogs = (req: FastifyRequest) => user(req).role !== 'agent';
+
+  app.get('/api/v1/catalogs', async (req) => {
+    const rows = await tenant(req, async (c) =>
+      (await c.query<CatalogRow>(`SELECT ${CATALOG_COLUMNS} FROM catalogs WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 200`)).rows,
+    );
+    return { items: rows.map(presentCatalog), canManage: canManageCatalogs(req) };
+  });
+
+  const catalogTitle = z.string().trim().min(1, 'Ponle un nombre al catálogo').max(120, 'El nombre tiene como máximo 120 caracteres');
+  const catalogDescription = z
+    .string()
+    .trim()
+    .max(300, 'La descripción tiene como máximo 300 caracteres')
+    .transform((d) => d || null);
+
+  /** Sube un catálogo (multipart: title y description antes del archivo). Solo dueño o administrador. */
+  app.post('/api/v1/catalogs', async (req, reply) => {
+    if (!canManageCatalogs(req)) return err(reply, 403, 'forbidden', 'Solo el dueño o un administrador puede subir catálogos');
+    if (!req.isMultipart()) return err(reply, 415, 'unsupported_media_type', 'Se espera un archivo (multipart/form-data)');
+    const fields: Record<string, string> = {};
+    let upload: { data: Buffer; filename: string } | null = null;
+    try {
+      for await (const part of req.parts({ limits: { fileSize: CATALOG_MAX_BYTES } })) {
+        if (part.type === 'file') upload = { data: await part.toBuffer(), filename: part.filename };
+        else if (typeof part.value === 'string') fields[part.fieldname] = part.value;
+      }
+    } catch (e) {
+      if ((e as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') return err(reply, 413, 'file_too_large', 'El catálogo supera los 25 MB');
+      return err(reply, 400, 'invalid_input', 'No se pudo leer el archivo');
+    }
+    if (!upload?.data.length) return err(reply, 400, 'invalid_input', 'Adjunta el archivo del catálogo');
+    const parsed = z
+      .object({ title: catalogTitle.optional(), description: catalogDescription.optional() })
+      .safeParse(fields);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const sniffed = sniffFile(upload.data, upload.filename);
+    if (!sniffed) return err(reply, 415, 'unsupported_file', 'Sube un PDF, una foto (JPG o PNG), un video MP4 o un documento de Office');
+    const mediaType = sniffed.mimeType.startsWith('image/') ? 'image' : sniffed.mimeType.startsWith('video/') ? 'video' : 'document';
+    const title = parsed.data.title ?? sniffed.filename.replace(/\.[^.]+$/, '').slice(0, 120);
+    const u = user(req);
+    const row = await tenant(req, async (c) =>
+      (
+        await c.query<CatalogRow>(
+          `INSERT INTO catalogs (tenant_id, title, description, media_type, mime_type, filename, bytes, sha256, data, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ${CATALOG_COLUMNS}`,
+          [
+            u.tenantId,
+            title,
+            parsed.data.description ?? null,
+            mediaType,
+            sniffed.mimeType,
+            sniffed.filename,
+            upload!.data.length,
+            createHash('sha256').update(upload!.data).digest('hex'),
+            upload!.data,
+            u.userId,
+          ],
+        )
+      ).rows[0]!,
+    );
+    return { ok: true, item: presentCatalog(row) };
+  });
+
+  const catalogPatchSchema = z
+    .object({ title: catalogTitle.optional(), description: catalogDescription.nullable().optional() })
+    .strict()
+    .refine((v) => Object.keys(v).length > 0, 'No hay cambios');
+
+  app.patch<{ Params: { id: string } }>('/api/v1/catalogs/:id', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Catálogo no encontrado');
+    if (!canManageCatalogs(req)) return err(reply, 403, 'forbidden', 'Solo el dueño o un administrador puede editar catálogos');
+    const parsed = catalogPatchSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const v = parsed.data;
+    const row = await tenant(req, async (c) =>
+      (
+        await c.query<CatalogRow>(
+          `UPDATE catalogs SET title = COALESCE($2, title),
+                  description = CASE WHEN $3 THEN $4 ELSE description END, updated_at = now()
+            WHERE id = $1 AND archived_at IS NULL RETURNING ${CATALOG_COLUMNS}`,
+          [req.params.id, v.title ?? null, v.description !== undefined, v.description ?? null],
+        )
+      ).rows[0],
+    );
+    if (!row) return err(reply, 404, 'not_found', 'Catálogo no encontrado');
+    return { ok: true, item: presentCatalog(row) };
+  });
+
+  /** Quita el catálogo de la lista. Se archiva: los chats donde ya se mandó lo siguen mostrando. */
+  app.delete<{ Params: { id: string } }>('/api/v1/catalogs/:id', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Catálogo no encontrado');
+    if (!canManageCatalogs(req)) return err(reply, 403, 'forbidden', 'Solo el dueño o un administrador puede quitar catálogos');
+    const { rowCount } = await tenant(req, (c) => c.query('UPDATE catalogs SET archived_at = now() WHERE id = $1 AND archived_at IS NULL', [req.params.id]));
+    if (!rowCount) return err(reply, 404, 'not_found', 'Catálogo no encontrado');
+    return { ok: true };
+  });
+
+  app.get<{ Params: { id: string } }>('/api/v1/catalogs/:id/file', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Catálogo no encontrado');
+    const file = await tenant(req, async (c) =>
+      (await c.query<{ data: Buffer; mime_type: string; filename: string }>('SELECT data, mime_type, filename FROM catalogs WHERE id = $1', [req.params.id])).rows[0],
+    );
+    if (!file) return err(reply, 404, 'not_found', 'Catálogo no encontrado');
+    // El PDF se abre en el visor del navegador; con "sandbox" Chrome no lo mostraría. El visor
+    // no ejecuta nada en el origen del panel.
+    if (file.mime_type === 'application/pdf') {
+      return reply
+        .header('content-type', 'application/pdf')
+        .header('content-disposition', disposition('inline', file.filename))
+        .header('x-content-type-options', 'nosniff')
+        .header('cache-control', 'private, max-age=3600')
+        .send(file.data);
+    }
+    return sendFile(reply, file.data, file.mime_type, file.filename, INLINE_TYPES.test(file.mime_type));
+  });
+
+  const shareCatalogSchema = z
+    .object({
+      catalogId: z.string().uuid(),
+      caption: z.string().trim().max(1024, 'El texto que acompaña al catálogo tiene como máximo 1024 caracteres').optional(),
+      clientId: z.string().uuid().optional(),
+    })
+    .strict();
+
+  /** El asesor manda un catálogo al cliente (lo arrastró al chat o lo eligió de la lista). */
+  app.post<{ Params: { id: string } }>('/api/v1/conversations/:id/catalogs', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Conversación no encontrada');
+    const parsed = shareCatalogSchema.safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
+    const { catalogId, caption, clientId = randomUUID() } = parsed.data;
+    const u = user(req);
+    const result = await tenant(req, async (c) => {
+      const conv = await loadConversation(c, req.params.id);
+      if (!conv) return { error: 'not_found' as const };
+      if (conv.assigned_user_id !== u.userId) return { error: 'not_assigned' as const };
+      if (!conv.recipient) return { error: 'no_recipient' as const };
+      const window = windowState({ channel: conv.channel, lastInboundAt: conv.last_inbound_at, now: now(), author: 'agent' });
+      if (!agentCanWrite(conv.channel, window)) return { error: 'window_closed' as const, channel: conv.channel };
+      const catalog = (
+        await c.query<{ id: string; title: string; media_type: 'image' | 'video' | 'document'; mime_type: string; filename: string; bytes: number }>(
+          'SELECT id, title, media_type, mime_type, filename, bytes FROM catalogs WHERE id = $1 AND archived_at IS NULL',
+          [catalogId],
+        )
+      ).rows[0];
+      if (!catalog) return { error: 'no_catalog' as const };
+      const limit = catalogSendLimit(conv.channel, catalog.media_type, catalog.mime_type);
+      if (limit === null) return { error: 'channel_unsupported' as const };
+      if (catalog.bytes > limit) return { error: 'too_large' as const, maxBytes: limit };
+
+      const key = outboundIdempotencyKey(conv.id, clientId, `agent-catalog:${u.userId}`);
+      const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+      if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
+
+      const message = await c.query<{ id: string }>(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments, sent_by_user_id)
+         VALUES ($1, $2, 'out', 'agent', $3, $4, $5, $6) RETURNING id`,
+        [
+          u.tenantId,
+          conv.id,
+          catalog.media_type,
+          caption || null,
+          JSON.stringify([{ catalogId: catalog.id, filename: catalog.filename, mimeType: catalog.mime_type, title: catalog.title }]),
+          u.userId,
+        ],
+      );
+      const outbound = await c.query<{ id: string }>(
+        `INSERT INTO outbound_messages (tenant_id, conversation_id, message_id, idempotency_key, channel, payload)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          u.tenantId,
+          conv.id,
+          message.rows[0]!.id,
+          key,
+          conv.channel,
+          JSON.stringify({ kind: 'catalog', catalogId: catalog.id, ...(caption ? { caption } : {}), to: conv.recipient, author: 'agent' }),
+        ],
+      );
+      await c.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conv.id]);
+      return { id: outbound.rows[0]!.id, duplicate: false };
+    });
+
+    if ('error' in result) {
+      switch (result.error) {
+        case 'not_found':
+          return err(reply, 404, 'not_found', 'Conversación no encontrada');
+        case 'not_assigned':
+          return err(reply, 409, 'not_assigned', 'Toma la conversación antes de responder');
+        case 'no_recipient':
+          return err(reply, 409, 'no_recipient', 'No se encontró el destinatario de esta conversación');
+        case 'window_closed':
+          return err(reply, 409, 'window_closed', windowClosedMessage(result.channel));
+        case 'no_catalog':
+          return err(reply, 404, 'no_catalog', 'Ese catálogo ya no está disponible');
+        case 'channel_unsupported':
+          return err(reply, 415, 'unsupported_file', 'Este canal no admite ese tipo de archivo');
+        case 'too_large':
+          return err(reply, 413, 'file_too_large', `Por este canal el catálogo puede pesar hasta ${Math.round(result.maxBytes / 1024 / 1024)} MB`);
+      }
+    }
+    if (!result.duplicate) {
+      await deps.enqueueOutbound(u.tenantId, [result.id]);
+      await deps.publish(u.tenantId, { type: 'message.new', conversationId: req.params.id, direction: 'out', author: 'agent' });
+    }
+    return { ok: true };
+  });
 
   app.get<{ Params: { id: string } }>('/api/v1/files/:id', async (req, reply) => {
     if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Archivo no encontrado');

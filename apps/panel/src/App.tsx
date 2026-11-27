@@ -9,6 +9,7 @@ import { Contacts } from './Contacts';
 import { Header, SECTION_PATHS, type Section } from './Header';
 import { ChannelAlerts } from './ChannelAlerts';
 import { Channels } from './Channels';
+import { Catalogs } from './Catalogs';
 import { ComingSoon } from './ComingSoon';
 import { unlockAudioOnGesture } from './sounds';
 import { MessagesSquare } from 'lucide-react';
@@ -26,6 +27,7 @@ function parsePath(path: string): Route {
   const contact = /^\/contactos(?:\/([0-9a-f-]{36}))?\/?$/i.exec(path);
   if (contact) return { section: 'contacts', id: contact[1] ?? null };
   if (/^\/whatsapp\/?$/i.test(path)) return { section: 'channels', id: null };
+  if (/^\/catalogos\/?$/i.test(path)) return { section: 'catalogs', id: null };
   const soon = /^\/(facebook|instagram|tiktok)\/?$/i.exec(path);
   if (soon) return { section: soon[1]!.toLowerCase() as Section, id: null };
   return { section: 'inbox', id: null };
@@ -125,6 +127,8 @@ export function App() {
         <ComingSoon key={route.section} which={route.section} />
       ) : route.section === 'channels' ? (
         <Channels tick={tick} />
+      ) : route.section === 'catalogs' ? (
+        <Catalogs tick={tick} />
       ) : route.section === 'contacts' ? (
         <Contacts tick={tick} selected={selected} onSelect={(id) => go({ section: 'contacts', id })} onOpenConversation={open} />
       ) : (

@@ -1,0 +1,66 @@
+# Pruebas en cada push y pull request: tipos, pruebas con Postgres y Redis reales, compilación
+# del panel y de la imagen Docker. Nada de esto usa secretos ni llama a Meta o a la IA.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: zenith
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci_postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d zenith" --health-interval 5s --health-timeout 3s --health-retries 20
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      TEST_DATABASE_URL: postgres://zenith_runtime:ci_runtime@localhost:5432/zenith
+      TEST_MIGRATION_DATABASE_URL: postgres://postgres:ci_postgres@localhost:5432/zenith
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      # Los mismos roles que crea docker/postgres/init en local.
+      - name: Roles de la base
+        run: |
+          PGPASSWORD=ci_postgres psql -h localhost -U postgres -d zenith -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE zenith_app NOLOGIN" \
+            -c "CREATE ROLE zenith_runtime LOGIN PASSWORD 'ci_runtime' IN ROLE zenith_app"
+      # Notas de voz y cuadros de video: sus pruebas se saltan sin ffmpeg.
+      - name: ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: npm ci --no-audit --no-fund
+      - run: npm run typecheck
+      - run: npx vitest run
+      - run: npm run build:panel
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Imagen de producción
+        run: docker build -t zenithagent:ci .
+      - name: La imagen arranca y carga el código
+        run: |
+          docker run --rm zenithagent:ci node --import tsx -e "await import('/app/apps/gateway/src/server.ts'); console.log('ok')"
+          docker run --rm zenithagent:ci ffmpeg -version | head -1

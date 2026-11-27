@@ -4,7 +4,7 @@ import { Queue } from 'bullmq';
 import { Redis } from 'ioredis';
 import fastifyStatic from '@fastify/static';
 import { z } from 'zod';
-import { parseMasterKey, QUEUES, tenantEventsChannel, type OutboundJobData, type PanelEvent } from '@zenith/core';
+import { parseMasterKey, QUEUES, tenantEventsChannel, WORKER_HEARTBEAT_KEY, type OutboundJobData, type PanelEvent } from '@zenith/core';
 import { createPool } from '@zenith/db';
 import { buildApi } from './server.js';
 
@@ -13,6 +13,8 @@ const env = z
     DATABASE_URL: z.string().url(),
     REDIS_URL: z.string().url(),
     API_PORT: z.coerce.number().int().min(1).max(65535).default(3100),
+    // 127.0.0.1 en una máquina de desarrollo; 0.0.0.0 dentro de Docker (detrás de Caddy).
+    API_HOST: z.string().default('127.0.0.1'),
     // true cuando el panel se sirve por https (producción).
     COOKIE_SECURE: z.enum(['true', 'false']).default('false'),
     // Conexión de números desde el panel (Embedded Signup). Sin estos datos, el botón no aparece.
@@ -68,6 +70,15 @@ subscriber.on('message', (channel: string, message: string) => {
 const app = buildApi({
   pool,
   secureCookies: env.COOKIE_SECURE === 'true',
+  health: async () => {
+    const [db, cache, worker] = await Promise.all([
+      pool.query('SELECT 1').then(() => true, () => false),
+      redis.ping().then(() => true, () => false),
+      // La señal vence sola a los 2 minutos: si no está, el worker no está corriendo.
+      redis.get(WORKER_HEARTBEAT_KEY).then((v) => v !== null, () => false),
+    ]);
+    return { db, redis: cache, worker };
+  },
   whatsappSignup: signupConfig(),
   ...(env.META_GRAPH_API_VERSION && env.ENCRYPTION_MASTER_KEY
     ? {
@@ -129,5 +140,5 @@ const shutdown = async () => {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 
-await app.listen({ host: '127.0.0.1', port: env.API_PORT });
+await app.listen({ host: env.API_HOST, port: env.API_PORT });
 console.log(`API del panel en http://localhost:${env.API_PORT}`);

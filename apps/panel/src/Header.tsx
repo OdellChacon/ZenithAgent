@@ -7,11 +7,12 @@ import { currentTheme, setTheme, type Theme } from './theme';
 import { Avatar, ChannelBadge, Icon } from './ui';
 import { Brand } from './Brand';
 
-export type Section = 'inbox' | 'contacts' | 'channels' | 'facebook' | 'instagram' | 'tiktok';
+export type Section = 'inbox' | 'contacts' | 'catalogs' | 'channels' | 'facebook' | 'instagram' | 'tiktok';
 
 export const SECTION_PATHS: Record<Section, string> = {
   inbox: '/',
   contacts: '/contactos',
+  catalogs: '/catalogos',
   channels: '/whatsapp',
   facebook: '/facebook',
   instagram: '/instagram',
@@ -21,6 +22,7 @@ export const SECTION_PATHS: Record<Section, string> = {
 const MAIN: { id: Section; label: string; icon: ReactNode }[] = [
   { id: 'inbox', label: 'Conversaciones', icon: Icon.chats },
   { id: 'contacts', label: 'Contactos', icon: Icon.contacts },
+  { id: 'catalogs', label: 'Catálogos', icon: Icon.catalog },
 ];
 
 const CHANNELS: { id: Section; label: string; channel: string; soon?: boolean }[] = [

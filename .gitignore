@@ -4,5 +4,9 @@ coverage/
 .env
 .env.*
 !.env.example
+!.env.production.example
 *.log
 .DS_Store
+
+# Copias de la base en el servidor (docker-compose.prod.yml)
+backups/

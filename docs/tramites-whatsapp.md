@@ -29,10 +29,10 @@ es lo que hay que verificar al hacer el trámite.
 
 | # | Trámite | Detalle | Estado |
 |---|---|---|---|
-| B1 | **Dominio o subdominio** para el panel y el webhook, con **https** | Meta exige https para el webhook y para el dominio del registro insertado **[confirmado]**. Decidir si va en un dominio de Mora Mora o de GrupoZenith. | Pendiente |
-| B2 | **VPS** con Node.js, PostgreSQL, Redis y **ffmpeg** | ffmpeg es necesario para las notas de voz. Mora Mora paga su servidor en InterServer. Tamaño del plan: **[por confirmar]**. | Pendiente |
-| B3 | **Copias de seguridad** de la base de datos y monitoreo | Copia diaria fuera del servidor y aviso si un servicio se cae. | Pendiente |
-| B4 | **Correo saliente (SMTP)** para los avisos a los asesores | Hoy los correos de "cliente espera asesor" y "WhatsApp desconectado" solo quedan en el registro (log). | Pendiente |
+| B1 | **Dominio o subdominio** para el panel y el webhook, con **https** | Meta exige https para el webhook y para el dominio del registro insertado **[confirmado]**. Decidir si va en un dominio de Mora Mora o de GrupoZenith. El certificado lo saca solo Caddy (ver [despliegue.md](despliegue.md)). | Pendiente (el https ya está resuelto en el código) |
+| B2 | **VPS** con Docker | Todo (Node.js, PostgreSQL, Redis, ffmpeg) va dentro de Docker con `docker-compose.prod.yml`; el servidor solo necesita Docker. Mora Mora paga su servidor en InterServer. Tamaño del plan: **[por confirmar]** (para empezar, 2 vCPU y 4 GB). Pasos en [despliegue.md](despliegue.md). | Pendiente (configuración lista) |
+| B3 | **Copias de seguridad** de la base de datos y monitoreo | La copia diaria dentro del servidor y `/healthz` (base, Redis y worker) ya están. Falta decidir **dónde se guardan las copias fuera del servidor** y **qué servicio externo vigila `/healthz`** (ej. UptimeRobot). | Pendiente (falta elegir destino y monitor) |
+| B4 | **Correo saliente (SMTP)** para los avisos a los asesores | Elegir el proveedor y crear la cuenta; configurar SPF y DKIM del dominio remitente; probar con el comando `mail-test` (ver [despliegue.md](despliegue.md), sección Correo). Sin esto, los avisos solo quedan en el log. | Pendiente (falta la cuenta de correo) |
 | B5 | **Gemini de pago** | Con Google AI Pro vienen 10 USD al mes en créditos de Cloud, que sirven para la API de Gemini si se activa la facturación en AI Studio (programa de desarrolladores y prepago de 5 USD) **[confirmado]**. En la capa de pago, Google no usa los datos **[confirmado]**. Poner la clave del proyecto con facturación en `GEMINI_API_KEY`. | Pendiente |
 
 ## C. Inversiones Mora Mora
@@ -53,5 +53,5 @@ es lo que hay que verificar al hacer el trámite.
 
 | # | Trámite | Detalle | Estado |
 |---|---|---|---|
-| D1 | Conectar un número real y probar todo | Mensajes, fotos, videos, documentos, notas de voz, ubicación, mensajes editados y borrados, pase a asesor, archivos que manda el asesor desde el panel, asesor que contesta desde el teléfono, historial, plantilla de seguimiento y aviso de desconexión. En Messenger e Instagram: mensajes, fotos, respuesta del asesor después de 24 h (Human Agent) y textos largos en Instagram (se parten en mensajes de 1000 bytes). | Pendiente |
+| D1 | Conectar un número real y probar todo (guion en [prueba-numero-real.md](prueba-numero-real.md); antes, la revisión `check-meta`) | Mensajes, fotos, videos, documentos, notas de voz, ubicación, mensajes editados y borrados, pase a asesor, archivos que manda el asesor desde el panel, asesor que contesta desde el teléfono, historial, plantilla de seguimiento y aviso de desconexión. En Messenger e Instagram: mensajes, fotos, respuesta del asesor después de 24 h (Human Agent) y textos largos en Instagram (se parten en mensajes de 1000 bytes). | Pendiente |
 | D2 | Revisar costos del primer mes | Mensajes de plantilla (Meta) e IA (Gemini). | Pendiente |

@@ -26,13 +26,18 @@
     "dev:panel": "npm run dev -w @zenith/panel",
     "build:panel": "npm run build -w @zenith/panel",
     "user:create": "tsx --env-file=.env apps/api/src/cli/create-user.ts",
-    "channel:connect-meta": "tsx --env-file=.env apps/api/src/cli/connect-meta.ts"
+    "channel:connect-meta": "tsx --env-file=.env apps/api/src/cli/connect-meta.ts",
+    "tenant:sync": "tsx --env-file=.env packages/db/src/cli/tenant-sync.ts",
+    "mail:test": "tsx --env-file=.env apps/worker/src/cli/mail-test.ts",
+    "check:meta": "tsx --env-file=.env apps/api/src/cli/check-meta.ts"
+  },
+  "dependencies": {
+    "tsx": "^4.23.15"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
     "@types/nodemailer": "^8.0.2",
     "@types/pg": "^8.23.1",
-    "tsx": "^4.23.15",
     "typescript": "^5.9.3",
     "vitest": "^4.1.12"
   }

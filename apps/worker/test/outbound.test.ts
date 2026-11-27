@@ -165,6 +165,46 @@ describe.skipIf(!hasDb)('envíos por canal, archivos del asesor y token de Meta'
     expect(g.calls[2]!.body).toMatchObject({ message: { text: 'Así queda instalado' } });
   });
 
+  it('un catálogo se sube a WhatsApp una sola vez y después se reutiliza su id', async () => {
+    const catalogId = (
+      await owner.query<{ id: string }>(
+        `INSERT INTO catalogs (tenant_id, title, media_type, mime_type, filename, bytes, sha256, data)
+         VALUES ($1, 'Porcelanatos', 'document', 'application/pdf', 'porcelanatos.pdf', 9, 'sha-1', $2) RETURNING id`,
+        [t.tenantId, Buffer.from('%PDF-1.4 ')],
+      )
+    ).rows[0]!.id;
+    const g = graph((url) => (url.endsWith('/media') ? { body: { id: 'MEDIA-CAT' } } : { body: { messages: [{ id: `wamid.C${Math.random()}` }] } }));
+    const first = await pending(t.channelAccountId, 'whatsapp', '584141110010', { kind: 'catalog', catalogId, caption: 'Le paso el catálogo', author: 'agent' });
+    expect(await processOutboundMessage(deps(g.fetchFn), { tenantId: t.tenantId, outboundMessageId: first.out })).toMatchObject({ result: 'sent' });
+    expect(g.calls[1]!.body).toMatchObject({ type: 'document', document: { id: 'MEDIA-CAT', filename: 'porcelanatos.pdf', caption: 'Le paso el catálogo' } });
+
+    const second = await pending(t.channelAccountId, 'whatsapp', '584141110011', { kind: 'catalog', catalogId, author: 'agent' });
+    expect(await processOutboundMessage(deps(g.fetchFn), { tenantId: t.tenantId, outboundMessageId: second.out })).toMatchObject({ result: 'sent' });
+    expect(g.calls.filter((c) => c.url.endsWith('/media'))).toHaveLength(1);
+    expect(g.calls.at(-1)!.body).toMatchObject({ document: { id: 'MEDIA-CAT' } });
+
+    // Si el archivo del catálogo cambia, se vuelve a subir.
+    await owner.query(`UPDATE catalogs SET sha256 = 'sha-2' WHERE id = $1`, [catalogId]);
+    const third = await pending(t.channelAccountId, 'whatsapp', '584141110012', { kind: 'catalog', catalogId, author: 'agent' });
+    await processOutboundMessage(deps(g.fetchFn), { tenantId: t.tenantId, outboundMessageId: third.out });
+    expect(g.calls.filter((c) => c.url.endsWith('/media'))).toHaveLength(2);
+  });
+
+  it('Messenger: el catálogo va como archivo por la página', async () => {
+    const catalogId = (
+      await owner.query<{ id: string }>(
+        `INSERT INTO catalogs (tenant_id, title, media_type, mime_type, filename, bytes, sha256, data)
+         VALUES ($1, 'Baños', 'document', 'application/pdf', 'banos.pdf', 9, 'sha-b', $2) RETURNING id`,
+        [t.tenantId, Buffer.from('%PDF-1.4 ')],
+      )
+    ).rows[0]!.id;
+    const p = await pending(messengerId, 'messenger', '24680010', { kind: 'catalog', catalogId, author: 'agent' });
+    const g = graph((url) => (url.endsWith('/message_attachments') ? { body: { attachment_id: 'att_cat' } } : { body: { message_id: 'm_cat' } }));
+    expect(await processOutboundMessage(deps(g.fetchFn), { tenantId: t.tenantId, outboundMessageId: p.out })).toMatchObject({ result: 'sent' });
+    expect(JSON.parse(String((g.calls[0]!.body as FormData).get('message')))).toEqual({ attachment: { type: 'file', payload: { is_reusable: true } } });
+    expect(g.calls[1]!.body).toMatchObject({ message: { attachment: { type: 'file', payload: { attachment_id: 'att_cat' } } } });
+  });
+
   describe('revisión diaria del token', () => {
     const health = (fetchFn: typeof fetch, now = new Date()) => ({ pool: app, masterKey, graphApiVersion: 'v27.0', fetch: fetchFn, now: () => now });
     const tenantFindings = (all: Awaited<ReturnType<typeof checkChannelTokens>>) => all.filter((f) => f.tenantId === t.tenantId);

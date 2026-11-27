@@ -21,6 +21,31 @@ describe('contraseñas', () => {
   });
 });
 
+describe('/healthz para el monitoreo', () => {
+  const build = (health?: () => Promise<Record<string, boolean>>) =>
+    buildApi({
+      pool: {} as never,
+      secureCookies: false,
+      enqueueOutbound: async () => undefined,
+      publish: async () => undefined,
+      subscribe: async () => async () => undefined,
+      ...(health ? { health } : {}),
+    });
+
+  it('responde 200 si todo está bien y 503 diciendo qué falla, sin pedir sesión', async () => {
+    const ok = await build(async () => ({ db: true, redis: true, worker: true })).inject({ method: 'GET', url: '/healthz' });
+    expect(ok.statusCode).toBe(200);
+    expect(ok.json()).toEqual({ ok: true, checks: { db: true, redis: true, worker: true } });
+    const down = await build(async () => ({ db: true, redis: true, worker: false })).inject({ method: 'GET', url: '/healthz' });
+    expect(down.statusCode).toBe(503);
+    expect(down.json()).toEqual({ ok: false, checks: { db: true, redis: true, worker: false } });
+    const broken = await build(async () => {
+      throw new Error('x');
+    }).inject({ method: 'GET', url: '/healthz' });
+    expect(broken.statusCode).toBe(503);
+  });
+});
+
 describe.skipIf(!hasDb)('API del panel', () => {
   let owner: pg.Pool;
   let pool: Pool;
@@ -699,6 +724,89 @@ describe.skipIf(!hasDb)('API del panel', () => {
       expect(wa.token.invalid).toMatchObject({ error: 'expired' });
       expect(wa.token.expiresAt).toBeNull();
       await owner.query(`UPDATE channel_accounts SET credentials_invalid_at = NULL, credentials_error = NULL WHERE id = $1`, [t.channelAccountId]);
+    });
+  });
+
+  describe('catálogos', () => {
+    const PDF = Buffer.from('%PDF-1.4\ncatálogo de prueba\n');
+    function form(fields: Record<string, string>, file: { name: string; type: string; data: Buffer }) {
+      const boundary = `----cat${run}`;
+      const parts: Buffer[] = [];
+      for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.type}\r\n\r\n`));
+      parts.push(file.data, Buffer.from(`\r\n--${boundary}--\r\n`));
+      return { payload: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
+    }
+    const uploadCatalog = (cookie: string, fields: Record<string, string>, file = { name: 'Porcelanatos 2026.pdf', type: 'application/pdf', data: PDF }) => {
+      const body = form(fields, file);
+      return app.inject({ method: 'POST', url: '/api/v1/catalogs', headers: { ...headers(cookie), 'content-type': body.contentType }, payload: body.payload });
+    };
+
+    it('el administrador sube, edita y archiva catálogos; el asesor solo los ve y otro negocio no', async () => {
+      const admin = await login(users.admin.email);
+      const ana = await login(users.ana.email);
+      expect((await uploadCatalog(ana.cookie, { title: 'No' })).statusCode).toBe(403);
+
+      const up = await uploadCatalog(admin.cookie, { title: 'Porcelanatos madera', description: 'Precios de noviembre' });
+      expect(up.statusCode).toBe(200);
+      const item = up.json().item;
+      expect(item).toMatchObject({ title: 'Porcelanatos madera', description: 'Precios de noviembre', mediaType: 'document', mimeType: 'application/pdf', filename: 'Porcelanatos 2026.pdf' });
+
+      const list = (await app.inject({ method: 'GET', url: '/api/v1/catalogs', headers: headers(ana.cookie) })).json();
+      expect(list.canManage).toBe(false);
+      expect(list.items.map((c: { id: string }) => c.id)).toContain(item.id);
+
+      const file = await app.inject({ method: 'GET', url: item.url, headers: headers(ana.cookie) });
+      expect(file.statusCode).toBe(200);
+      expect(file.headers['content-type']).toBe('application/pdf');
+      expect(file.headers['content-disposition']).toContain('inline;');
+      expect(file.rawPayload.equals(PDF)).toBe(true);
+
+      const ajeno = await login(users.ajeno.email);
+      expect((await app.inject({ method: 'GET', url: item.url, headers: headers(ajeno.cookie) })).statusCode).toBe(404);
+      expect((await app.inject({ method: 'GET', url: '/api/v1/catalogs', headers: headers(ajeno.cookie) })).json().items).toEqual([]);
+
+      const renamed = await app.inject({ method: 'PATCH', url: `/api/v1/catalogs/${item.id}`, headers: headers(admin.cookie), payload: { title: 'Madera 2026', description: null } });
+      expect(renamed.json().item).toMatchObject({ title: 'Madera 2026', description: null });
+      expect((await app.inject({ method: 'PATCH', url: `/api/v1/catalogs/${item.id}`, headers: headers(ana.cookie), payload: { title: 'x' } })).statusCode).toBe(403);
+
+      // Un archivo que no es lo que dice no se acepta.
+      expect((await uploadCatalog(admin.cookie, {}, { name: 'catalogo.pdf', type: 'application/pdf', data: Buffer.from('MZ ejecutable') })).statusCode).toBe(415);
+
+      expect((await app.inject({ method: 'DELETE', url: `/api/v1/catalogs/${item.id}`, headers: headers(admin.cookie) })).statusCode).toBe(200);
+      const after = (await app.inject({ method: 'GET', url: '/api/v1/catalogs', headers: headers(admin.cookie) })).json();
+      expect(after.items.map((c: { id: string }) => c.id)).not.toContain(item.id);
+      // Archivado: sigue abriéndose desde los chats donde ya se mandó.
+      expect((await app.inject({ method: 'GET', url: item.url, headers: headers(ana.cookie) })).statusCode).toBe(200);
+    });
+
+    it('el asesor manda un catálogo al chat: queda en la conversación y en cola para enviarse', async () => {
+      const admin = await login(users.admin.email);
+      const item = (await uploadCatalog(admin.cookie, { title: 'Grifería' })).json().item;
+      const id = await seedConversation(t.tenantId, t.channelAccountId);
+      const ana = await login(users.ana.email);
+      const share = (cookie: string, body: object) =>
+        app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/catalogs`, headers: headers(cookie), payload: body });
+
+      expect((await share(ana.cookie, { catalogId: item.id })).statusCode).toBe(409); // sin tomar la conversación
+      await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(ana.cookie) });
+      const before = enqueued.length;
+      const res = await share(ana.cookie, { catalogId: item.id, caption: 'Aquí tiene el catálogo de grifería', clientId: randomUUID() });
+      expect(res.statusCode).toBe(200);
+      expect(enqueued.length).toBe(before + 1);
+      const out = (await owner.query('SELECT payload FROM outbound_messages WHERE id = $1', [enqueued.at(-1)!.ids[0]])).rows[0].payload;
+      expect(out).toMatchObject({ kind: 'catalog', catalogId: item.id, caption: 'Aquí tiene el catálogo de grifería', author: 'agent' });
+
+      const detail = (await app.inject({ method: 'GET', url: `/api/v1/conversations/${id}`, headers: headers(ana.cookie) })).json();
+      expect(detail.messages.at(-1)).toMatchObject({
+        type: 'document',
+        body: 'Aquí tiene el catálogo de grifería',
+        file: { url: item.url, name: 'Porcelanatos 2026.pdf', mediaType: 'document' },
+      });
+
+      // Un catálogo archivado ya no se puede mandar.
+      await app.inject({ method: 'DELETE', url: `/api/v1/catalogs/${item.id}`, headers: headers(admin.cookie) });
+      expect((await share(ana.cookie, { catalogId: item.id })).statusCode).toBe(404);
     });
   });
 });

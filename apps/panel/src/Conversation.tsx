@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react';
+import { Fragment, useEffect, useRef, useState, type DragEvent, type FormEvent, type KeyboardEvent } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { api, ApiError, CHANNEL_LABELS, REASON_LABELS, type ConversationDetail, type Me, type Message } from './api';
+import { api, ApiError, CATALOG_DRAG_TYPE, CHANNEL_LABELS, REASON_LABELS, type Catalog, type ConversationDetail, type Me, type Message } from './api';
+import { CatalogShelf } from './Catalogs';
 import { clock, remaining } from './time';
 import { TagEditor } from './tags';
 import { TemplateComposer } from './TemplateComposer';
@@ -179,6 +180,10 @@ export function Conversation({
   const [notice, setNotice] = useState<string | null>(null);
   const [text, setText] = useState('');
   const [file, setFile] = useState<File | null>(null);
+  // Catálogo listo para mandar (arrastrado desde el estante). Va en lugar de un archivo.
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [shelfOpen, setShelfOpen] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [, setNow] = useState(Date.now());
@@ -247,15 +252,57 @@ export function Conversation({
   const send = async (e?: FormEvent) => {
     e?.preventDefault();
     const body = text.trim();
-    if ((!body && !file) || !canWrite) return;
+    if ((!body && !file && !catalog) || !canWrite) return;
     const clientId = crypto.randomUUID();
     await act(async () => {
-      if (file) await api.sendFile(id, file, body, clientId);
+      if (catalog) await api.shareCatalog(id, catalog.id, body, clientId);
+      else if (file) await api.sendFile(id, file, body, clientId);
       else await api.send(id, body, clientId);
       setText('');
       setFile(null);
+      setCatalog(null);
       playSound('sent');
     });
+  };
+
+  const pickCatalog = (c: Catalog) => {
+    if (!canWrite) {
+      setNotice(mine ? 'No se puede escribirle a este cliente ahora.' : 'Toma la conversación para mandar catálogos.');
+      return;
+    }
+    setNotice(null);
+    setFile(null);
+    setCatalog(c);
+  };
+
+  // Arrastrar al chat: un catálogo del estante o un archivo de la computadora.
+  const accepts = (e: DragEvent) => e.dataTransfer.types.includes(CATALOG_DRAG_TYPE) || e.dataTransfer.types.includes('Files');
+  const onDragOver = (e: DragEvent) => {
+    if (!accepts(e) || needsTemplate || composerHint) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!dragOver) setDragOver(true);
+  };
+  const onDragLeave = (e: DragEvent) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDragOver(false);
+  };
+  const onDrop = (e: DragEvent) => {
+    if (!accepts(e)) return;
+    e.preventDefault();
+    setDragOver(false);
+    const raw = e.dataTransfer.getData(CATALOG_DRAG_TYPE);
+    if (raw) {
+      try {
+        pickCatalog(JSON.parse(raw) as Catalog);
+      } catch {
+        /* arrastre de otra pestaña con datos raros: se ignora */
+      }
+      return;
+    }
+    if (e.dataTransfer.files[0]) {
+      setCatalog(null);
+      pickFile(e.dataTransfer.files[0]);
+    }
   };
 
   const pickFile = (f: File | undefined) => {
@@ -266,6 +313,7 @@ export function Conversation({
       return;
     }
     setNotice(null);
+    setCatalog(null);
     setFile(f);
   };
 
@@ -290,7 +338,21 @@ export function Conversation({
   const channelName = CHANNEL_LABELS[data.channel] ?? data.channel;
 
   return (
-    <section className="conversation" aria-label={`Conversación con ${data.contact.name}`}>
+    <section
+      className={`conversation ${dragOver ? 'drag-over' : ''}`}
+      aria-label={`Conversación con ${data.contact.name}`}
+      onDragOver={onDragOver}
+      onDragLeave={onDragLeave}
+      onDrop={onDrop}
+    >
+      <AnimatePresence>
+        {dragOver && (
+          <motion.div className="drop-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} aria-hidden="true">
+            <span>{Icon.catalog} Suelta aquí para mandarlo a {data.contact.name}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>{shelfOpen && <CatalogShelf onPick={pickCatalog} onClose={() => setShelfOpen(false)} disabled={!canWrite} />}</AnimatePresence>
       <div className="conv-head">
         <button className="icon-btn back" type="button" onClick={onClose} aria-label="Volver a la bandeja">
           {Icon.back}
@@ -307,6 +369,15 @@ export function Conversation({
         </div>
         <span className={`chip ${status.tone}`}>{status.label}</span>
         <div className="conv-actions">
+          <button
+            className={`btn ghost ${shelfOpen ? 'on' : ''}`}
+            type="button"
+            onClick={() => setShelfOpen(!shelfOpen)}
+            aria-pressed={shelfOpen}
+            title="Catálogos para mandar al cliente"
+          >
+            {Icon.catalog} Catálogos
+          </button>
           {!mine && data.status !== 'closed' && (me.role !== 'agent' || !otherAgent) && (
             <button className="btn primary" type="button" disabled={busy} onClick={() => act(() => api.take(id), 'Tomaste la conversación. El bot no responderá mientras la atiendes.')}>
               Tomar conversación
@@ -424,12 +495,23 @@ export function Conversation({
                   </button>
                 </span>
               )}
+              {catalog && (
+                <span className="chip attach-chip catalog">
+                  {Icon.catalog}
+                  <span className="name">Catálogo: {catalog.title}</span>
+                  <button type="button" onClick={() => setCatalog(null)} aria-label="Quitar el catálogo">
+                    {Icon.close}
+                  </button>
+                </span>
+              )}
               <textarea
                 value={text}
                 onChange={(e) => setText(e.target.value)}
                 onKeyDown={onKey}
-                placeholder={file ? 'Texto que acompaña al archivo (opcional)' : 'Escribe tu respuesta… (Enter envía, Shift+Enter nueva línea)'}
-                maxLength={file ? 1024 : 4096}
+                placeholder={
+                  catalog ? 'Texto que acompaña al catálogo (opcional)' : file ? 'Texto que acompaña al archivo (opcional)' : 'Escribe tu respuesta… (Enter envía, Shift+Enter nueva línea)'
+                }
+                maxLength={file || catalog ? 1024 : 4096}
                 rows={2}
                 aria-label="Respuesta al cliente"
               />
@@ -437,9 +519,9 @@ export function Conversation({
             <motion.button
               className="btn primary"
               type="submit"
-              disabled={busy || (!text.trim() && !file) || !canWrite}
+              disabled={busy || (!text.trim() && !file && !catalog) || !canWrite}
               whileTap={{ scale: 0.92 }}
-              animate={{ opacity: text.trim() || file ? 1 : 0.55 }}
+              animate={{ opacity: text.trim() || file || catalog ? 1 : 0.55 }}
             >
               Enviar {Icon.send}
             </motion.button>

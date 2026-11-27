@@ -1,0 +1,140 @@
+# Producción en un solo servidor (VPS). Ver docs/despliegue.md.
+#
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Solo Caddy publica puertos (80 y 443, con https automático). Postgres y Redis quedan en la
+# red interna; la API y el gateway solo se alcanzan a través de Caddy.
+
+x-app: &app
+  build: .
+  image: zenithagent:latest
+  restart: unless-stopped
+  env_file: .env.production
+  environment:
+    DATABASE_URL: postgres://zenith_runtime:${APP_DB_PASSWORD}@postgres:5432/zenith
+    REDIS_URL: redis://redis:6379
+  depends_on:
+    postgres: { condition: service_healthy }
+    redis: { condition: service_healthy }
+    migrate: { condition: service_completed_successfully }
+  logging:
+    driver: json-file
+    options: { max-size: 20m, max-file: "5" }
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zenith
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env.production}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Define APP_DB_PASSWORD en .env.production}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d zenith"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # Las colas viven en Redis: se guardan en disco para no perder envíos si se reinicia.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 30
+
+  # Aplica las migraciones pendientes y termina. Los demás servicios esperan a que salga bien.
+  migrate:
+    build: .
+    image: zenithagent:latest
+    restart: "no"
+    environment:
+      MIGRATION_DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@postgres:5432/zenith
+    command: ["node", "--import", "tsx", "packages/db/src/cli/migrate.ts"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  gateway:
+    <<: *app
+    command: ["node", "--import", "tsx", "apps/gateway/src/index.ts"]
+    environment:
+      DATABASE_URL: postgres://zenith_runtime:${APP_DB_PASSWORD}@postgres:5432/zenith
+      REDIS_URL: redis://redis:6379
+      GATEWAY_PORT: "3000"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    <<: *app
+    command: ["node", "--import", "tsx", "apps/worker/src/index.ts"]
+
+  api:
+    <<: *app
+    command: ["node", "--import", "tsx", "apps/api/src/index.ts"]
+    environment:
+      DATABASE_URL: postgres://zenith_runtime:${APP_DB_PASSWORD}@postgres:5432/zenith
+      REDIS_URL: redis://redis:6379
+      API_HOST: 0.0.0.0
+      API_PORT: "3100"
+      COOKIE_SECURE: "true"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # https automático (Let's Encrypt) para el panel y los webhooks de Meta.
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?Define DOMAIN en .env.production (ej. bot.ejemplo.com)}
+      ACME_EMAIL: ${ACME_EMAIL:?Define ACME_EMAIL en .env.production}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddydata:/data
+      - caddyconfig:/config
+    depends_on:
+      - api
+      - gateway
+
+  # Copia diaria de la base en ./backups (se guardan BACKUP_KEEP_DAYS días). Sacarlas del servidor
+  # es aparte: ver docs/despliegue.md.
+  backup:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: zenith
+      BACKUP_HOUR: ${BACKUP_HOUR:-3}
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      TZ: ${TZ:-America/Caracas}
+    entrypoint: ["/bin/sh", "/deploy/backup.sh"]
+    volumes:
+      - ./deploy:/deploy:ro
+      - ./backups:/backups
+    depends_on:
+      postgres: { condition: service_healthy }
+
+volumes:
+  pgdata:
+  redisdata:
+  caddydata:
+  caddyconfig:

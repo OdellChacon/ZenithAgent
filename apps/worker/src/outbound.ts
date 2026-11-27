@@ -36,7 +36,9 @@ export type OutboundPayload =
   | { kind: 'image'; productImageId: string; caption?: string; to: string; author: Author }
   | { kind: 'template'; name: string; language: string; bodyParams: string[]; to: string; author: Author }
   /** Archivo que subió un asesor desde el panel (message_files). */
-  | { kind: 'file'; fileId: string; caption?: string; to: string; author: Author };
+  | { kind: 'file'; fileId: string; caption?: string; to: string; author: Author }
+  /** Catálogo de productos que el asesor arrastró al chat (catalogs). */
+  | { kind: 'catalog'; catalogId: string; caption?: string; to: string; author: Author };
 
 interface Claimed {
   id: string;
@@ -146,6 +148,48 @@ async function resolveProductImage(
     ),
   );
   return { ok: true, mediaId: upload.id, cached: false };
+}
+
+/**
+ * Id del catálogo en el canal: el guardado si sigue vigente y el archivo no cambió, o lo sube.
+ * Un catálogo se manda muchas veces; subir el PDF una sola vez ahorra tiempo y datos.
+ */
+async function resolveCatalog(
+  deps: OutboundDeps,
+  tenantId: string,
+  channelAccountId: string,
+  catalogId: string,
+  sender: ChannelSender,
+): Promise<(MediaLookup & { ok: true; mediaType: 'image' | 'video' | 'document'; filename: string }) | Exclude<MediaLookup, { ok: true }>> {
+  const found = await withTenant(deps.pool, tenantId, async (client) => {
+    const catalog = await client.query<{ data: Buffer; mime_type: string; media_type: 'image' | 'video' | 'document'; filename: string; sha256: string }>(
+      'SELECT data, mime_type, media_type, filename, sha256 FROM catalogs WHERE id = $1',
+      [catalogId],
+    );
+    const cached = await client.query<{ external_media_id: string; sha256: string }>(
+      `SELECT external_media_id, sha256 FROM catalog_media
+        WHERE channel_account_id = $1 AND catalog_id = $2 AND uploaded_at > now() - make_interval(days => $3)`,
+      [channelAccountId, catalogId, MEDIA_REUSE_DAYS],
+    );
+    return { catalog: catalog.rows[0], cached: cached.rows[0] };
+  });
+  const c = found.catalog;
+  if (!c) return { ok: false, retryable: false, message: 'el catálogo ya no existe' };
+  if (found.cached && found.cached.sha256 === c.sha256) {
+    return { ok: true, mediaId: found.cached.external_media_id, cached: true, mediaType: c.media_type, filename: c.filename };
+  }
+  const upload = await sender.upload(c.data, c.mime_type, c.media_type, c.filename);
+  if (!upload.ok) return { ok: false, retryable: upload.retryable, ...(upload.authError ? { authError: true as const } : {}), message: `subida del catálogo: ${upload.message}` };
+  await withTenant(deps.pool, tenantId, (client) =>
+    client.query(
+      `INSERT INTO catalog_media (tenant_id, channel_account_id, catalog_id, sha256, external_media_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (channel_account_id, catalog_id) DO UPDATE SET
+         sha256 = EXCLUDED.sha256, external_media_id = EXCLUDED.external_media_id, uploaded_at = now()`,
+      [tenantId, channelAccountId, catalogId, c.sha256, upload.id],
+    ),
+  );
+  return { ok: true, mediaId: upload.id, cached: false, mediaType: c.media_type, filename: c.filename };
 }
 
 async function forgetMedia(deps: OutboundDeps, tenantId: string, channelAccountId: string, productImageId: string) {
@@ -309,6 +353,33 @@ export async function processOutboundMessage(
         await forgetMedia(deps, job.tenantId, claimed.channel_account_id, payload.productImageId);
         if (claimed.attempts < maxAttempts) {
           await finish('queued', { error: `id de foto vencido: ${res.message}` });
+          throw new RetryableSendError(res.message);
+        }
+      }
+    } else if (payload.kind === 'catalog') {
+      const media = await resolveCatalog(deps, job.tenantId, claimed.channel_account_id, payload.catalogId, sender);
+      if (!media.ok) {
+        if (media.authError) return await authFailed(media.message);
+        if (media.retryable && claimed.attempts < maxAttempts) {
+          await finish('queued', { error: media.message });
+          throw new RetryableSendError(media.message);
+        }
+        await finish('failed', { error: media.message });
+        return { result: 'failed', reason: 'media_upload_failed' };
+      }
+      res = await sender.media(payload.to, {
+        mediaType: media.mediaType,
+        id: media.mediaId,
+        filename: media.filename,
+        ...(payload.caption ? { caption: payload.caption } : {}),
+      });
+      // Un id guardado que Meta ya no reconoce se olvida y se reintenta subiendo de nuevo.
+      if (!res.ok && !res.authError && media.cached) {
+        await withTenant(deps.pool, job.tenantId, (client) =>
+          client.query('DELETE FROM catalog_media WHERE channel_account_id = $1 AND catalog_id = $2', [claimed.channel_account_id, payload.catalogId]),
+        );
+        if (claimed.attempts < maxAttempts) {
+          await finish('queued', { error: `id del catálogo vencido: ${res.message}` });
           throw new RetryableSendError(res.message);
         }
       }

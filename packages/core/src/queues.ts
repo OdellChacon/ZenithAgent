@@ -36,6 +36,14 @@ export interface OutboundJobData {
  */
 export const BRAIN_DEBOUNCE_MS = 3000;
 
+/**
+ * Señal de vida del worker: lo escribe en Redis cada 30 s con vencimiento de 2 minutos. La API
+ * la revisa en /healthz para que un monitor externo sepa si el worker se cayó.
+ */
+export const WORKER_HEARTBEAT_KEY = 'zenith:worker:heartbeat';
+export const WORKER_HEARTBEAT_EVERY_MS = 30_000;
+export const WORKER_HEARTBEAT_STALE_MS = 120_000;
+
 /** Máximo de intentos de procesar un evento antes de marcarlo como fallido. */
 export const INBOUND_MAX_ATTEMPTS = 5;
 

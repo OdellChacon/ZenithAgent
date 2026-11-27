@@ -2,7 +2,7 @@
 
 Bot conversacional con IA, omnicanal (WhatsApp, Instagram, Facebook Messenger y TikTok en fase 2) y multi-tenant, desarrollado por GrupoZenith. Primer cliente: Inversiones Mora Mora.
 
-La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bot-omnicanal.md). Los trámites que faltan para poner WhatsApp en producción están en [`docs/tramites-whatsapp.md`](docs/tramites-whatsapp.md).
+La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bot-omnicanal.md). Los trámites que faltan para poner WhatsApp en producción están en [`docs/tramites-whatsapp.md`](docs/tramites-whatsapp.md). El despliegue en el servidor está en [`docs/despliegue.md`](docs/despliegue.md) y el guion de la primera prueba con un número real, en [`docs/prueba-numero-real.md`](docs/prueba-numero-real.md).
 
 ## Estado (F1 en curso)
 
@@ -35,6 +35,8 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 | Videos y documentos del cliente: el asesor los abre en el panel; el bot mira un cuadro del video y las imágenes mandadas como documento | Hecho (los PDF y Word el bot no los lee: ofrece que un asesor los revise) |
 | Mensajes editados o borrados por el cliente o por el asesor desde la app | Hecho |
 | Aviso si Meta rechaza el token de una cuenta o está por vencer: revisión diaria, franja en el panel y correo | Hecho |
+| Catálogos de productos en el panel: el administrador los sube y los asesores los arrastran a un chat para mandarlos | Hecho |
+| Despliegue con Docker: https automático (Caddy), copias diarias de la base, `/healthz` para el monitoreo y CI en GitHub | Hecho (falta el servidor, el dominio y elegir dónde guardar las copias fuera del servidor) |
 | Messenger e Instagram: mensajes, fotos, audios, respuestas del bot y asesor hasta 7 días (etiqueta Human Agent) | Hecho (se conectan con `npm run channel:connect-meta`; falta la app de Meta con los permisos de páginas e Instagram) |
 
 ## Estructura

@@ -4,7 +4,7 @@
  */
 import type { CSSProperties, ReactNode } from 'react';
 import {
-  ArrowLeft, Bell, Check, CheckCheck, ChevronDown, CircleAlert, Clock3, FileText, LogOut, MessagesSquare, Moon, Paperclip, Search, X,
+  ArrowLeft, Bell, BookOpen, Check, CheckCheck, ChevronDown, CircleAlert, Clock3, FileText, Film, LogOut, MessagesSquare, Moon, Paperclip, Search, Upload, X,
   SendHorizontal, Sun, Tags, Users, Volume2, VolumeX, type LucideIcon,
 } from 'lucide-react';
 import { siFacebook, siInstagram, siMessenger, siTiktok, siWhatsapp, type SimpleIcon } from 'simple-icons';
@@ -82,6 +82,9 @@ export const Icon = {
   clip: icon(Paperclip),
   file: icon(FileText),
   close: icon(X),
+  catalog: icon(BookOpen),
+  video: icon(Film),
+  upload: icon(Upload),
 };
 
 /** Estado de entrega estilo WhatsApp: reloj, un check, doble check (azul si se leyó) o alerta. */

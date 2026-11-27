@@ -1,0 +1,35 @@
+# https automático con Let's Encrypt para el dominio del bot (DOMAIN en .env.production).
+# - /webhooks/*  → gateway (Meta manda aquí los mensajes de WhatsApp, Messenger e Instagram)
+# - todo lo demás → API, que sirve el panel y /api/v1 (incluidos los eventos en vivo por SSE)
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	@webhooks path /webhooks/*
+	handle @webhooks {
+		reverse_proxy gateway:3000
+	}
+
+	handle {
+		# flush_interval -1: los eventos en vivo del panel (SSE) salen en el momento.
+		reverse_proxy api:3100 {
+			flush_interval -1
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+		-Server
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
