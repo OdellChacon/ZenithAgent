@@ -260,7 +260,8 @@
     <div class="note">
       Se muestra lo que vería el cliente: el bot marca sus mensajes como leídos (doble check azul) y muestra "escribiendo…" mientras responde.
       Cuando el bot decide que hace falta un asesor, el pase aparece en el panel de asesores y se atiende desde ahí.
-      Por dentro el canal siempre es WhatsApp: Instagram y Messenger solo cambian la apariencia hasta que existan sus conectores.
+      Cada apariencia usa su canal de verdad: WhatsApp por la Cloud API e Instagram y Messenger por la Send API de la página, cada uno con su webhook.
+      Para Instagram y Messenger hay que haber corrido el seed con la página simulada.
     </div>
   </section>
 
@@ -491,6 +492,12 @@
           // Foto con pie: en WhatsApp va dentro de la burbuja; en Instagram y Messenger, suelta.
           const caption = g.text ? `<div class="caption">${formatText(g.text, s === 'wa')}${stamp}</div>` : stamp ? `<div class="caption only-stamp">${stamp}</div>` : '';
           html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><img src="${escape(g.image)}" alt="${escape(g.text || (side === 'out' ? 'Foto enviada' : 'Foto del producto'))}" loading="lazy">${caption}</div></div>`;
+        } else if (g.file) {
+          // Video o documento que mandó un asesor desde el panel.
+          const media = g.file.kind === 'video'
+            ? `<video src="${escape(g.file.url)}" controls preload="metadata" style="max-width:240px;border-radius:10px;display:block"></video>`
+            : `<a href="${escape(g.file.url)}" target="_blank" rel="noopener" style="display:inline-block;padding:6px 0;font-weight:600">📄 ${escape(g.file.name)}</a>`;
+          html += `<div class="line ${side}">${slot}<div class="${cls}"${style}>${media}${g.text ? `<div>${formatText(g.text, s === 'wa')}</div>` : ''}${stamp}</div></div>`;
         } else if (g.buttons && g.buttons.length && side === 'in') {
           // Solo se puede tocar un botón una vez; después quedan como recuerdo.
           const quick = g.buttons.map((b) => `<button type="button" data-quick="${escape(b)}"${g.answered ? ' disabled' : ''} data-for="${escape(g.id)}">${escape(b)}</button>`).join('');
@@ -537,6 +544,9 @@
     $('conn').textContent = pending ? 'El bot está procesando el mensaje…' : connected ? 'Conectado al simulador' : 'Sin conexión, reintentando…';
   }
 
+  /** Canal real de cada apariencia. */
+  const channel = () => ({ wa: 'whatsapp', ig: 'instagram', ms: 'messenger' })[state.skin] || 'whatsapp';
+
   function connect() {
     if (source) source.close();
     source = new EventSource('/api/stream?to=' + encodeURIComponent(state.number));
@@ -550,9 +560,11 @@
     source.onmessage = (e) => {
       try {
         const m = JSON.parse(e.data);
+        // Un mensaje de otro canal (el mismo número en otra apariencia) no se mezcla en este chat.
+        if (m.channel && m.channel !== channel()) return;
         // Al responder el bot, los mensajes anteriores del cliente ya llegaron.
         state.messages.forEach((x) => { if (x.kind === 'customer' && x.status === 'sent') x.status = 'delivered'; });
-        state.messages.push({ id: m.id, kind: 'bot', text: m.text, at: m.at, ...(m.image ? { image: m.image } : {}), ...(m.buttons ? { buttons: m.buttons } : {}) });
+        state.messages.push({ id: m.id, kind: 'bot', text: m.text, at: m.at, ...(m.image ? { image: m.image } : {}), ...(m.file ? { file: m.file } : {}), ...(m.buttons ? { buttons: m.buttons } : {}) });
         save(); setBusy(-pending); renderChat();
       } catch { /* evento malformado: se ignora */ }
     };
@@ -594,7 +606,7 @@
     const msg = { id: 'c' + Date.now(), kind: 'customer', text, at: new Date().toISOString(), status: 'sending' };
     void deliver(msg, () => fetch('/api/send', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text }),
+      body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text, channel: channel() }),
     }));
   });
 
@@ -608,7 +620,7 @@
     const msg = { id: 'c' + Date.now(), kind: 'customer', text, at: new Date().toISOString(), status: 'sending' };
     void deliver(msg, () => fetch('/api/send', {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text, button: true }),
+      body: JSON.stringify({ from: state.number, name: state.name || 'Cliente de prueba', text, button: true, channel: channel() }),
     }));
   });
 
@@ -641,6 +653,7 @@
     const form = new FormData();
     form.append('from', state.number);
     form.append('name', state.name || 'Cliente de prueba');
+    form.append('channel', channel());
     if (caption) form.append('caption', caption);
     form.append('file', blob, 'foto.jpg');
     void deliver(msg, () => fetch('/api/send-image', { method: 'POST', body: form }));
@@ -713,6 +726,7 @@
     const form = new FormData();
     form.append('from', state.number);
     form.append('name', state.name || 'Cliente de prueba');
+    form.append('channel', channel());
     form.append('file', blob, blob.type.includes('ogg') ? 'nota.ogg' : 'nota.webm');
     void deliver(msg, () => fetch('/api/send-audio', { method: 'POST', body: form }));
   }

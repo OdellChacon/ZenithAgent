@@ -2,6 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   parseWhatsAppWebhook,
   sendWhatsAppImage,
+  sendWhatsAppMedia,
+  whatsappMediaTypeFor,
+  exchangeSignupCode,
   sendWhatsAppText,
   uploadWhatsAppMedia,
   signMetaPayload,
@@ -116,18 +119,48 @@ describe('parseWhatsAppWebhook', () => {
     ]);
   });
 
-  it('no trata como mensaje nuevo una edición, un borrado ni una copia sin destinatario', () => {
+  it('traduce la edición y el borrado desde la app como cambios al mensaje original, no como mensajes nuevos', () => {
     const events = parseWhatsAppWebhook(
       echoWebhook([
         { from: '584140000000', to: '584141112233', id: 'wamid.E4', timestamp: '1763632903', type: 'revoke', revoke: { original_message_id: 'wamid.E1' } },
-        { from: '584140000000', to: '584141112233', id: 'wamid.E5', timestamp: '1763632904', type: 'edit', edit: { original_message_id: 'wamid.E1' } },
+        {
+          from: '584140000000',
+          to: '584141112233',
+          id: 'wamid.E5',
+          timestamp: '1763632904',
+          type: 'edit',
+          edit: { original_message_id: 'wamid.E2', message: { type: 'text', text: { body: 'Son 12 cajas, no 10' } } },
+        },
         { from: '584140000000', to_user_id: 'VE.123', id: 'wamid.E6', timestamp: '1763632905', type: 'text', text: { body: 'Hola' } },
       ]),
     );
-    expect(events.map((e) => [e.kind, e.unsupportedType])).toEqual([
-      ['unsupported', 'echo_revoke'],
-      ['unsupported', 'echo_edit'],
+    expect(events.map((e) => [e.kind, e.edit ?? e.unsupportedType])).toEqual([
+      ['edit', { originalExternalMessageId: 'wamid.E1', action: 'revoke', byBusiness: true }],
+      ['edit', { originalExternalMessageId: 'wamid.E2', action: 'edit', byBusiness: true, text: 'Son 12 cajas, no 10' }],
       ['unsupported', 'echo_sin_destinatario'],
+    ]);
+    expect(events[0]!.externalEventId).toBe('echo:wamid.E4:revoke');
+  });
+
+  it('traduce la edición (con pie de foto) y el borrado que hace el cliente', () => {
+    const payload = textWebhook();
+    (payload.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] }).messages = [
+      { from: '584141112233', id: 'wamid.C2', timestamp: '1763632900', type: 'edit', edit: { original_message_id: 'wamid.C1', message: { image: { caption: 'Esta es la cocina' } } } },
+      { from: '584141112233', id: 'wamid.C3', timestamp: '1763632901', type: 'revoke', revoke: { original_message_id: 'wamid.C0' } },
+    ];
+    expect(parseWhatsAppWebhook(payload).map((e) => [e.kind, e.edit])).toEqual([
+      ['edit', { originalExternalMessageId: 'wamid.C1', action: 'edit', byBusiness: false, text: 'Esta es la cocina' }],
+      ['edit', { originalExternalMessageId: 'wamid.C0', action: 'revoke', byBusiness: false }],
+    ]);
+  });
+
+  it('guarda el nombre de los documentos', () => {
+    const payload = textWebhook();
+    (payload.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] }).messages = [
+      { from: '584141112233', id: 'wamid.D1', timestamp: '1763632900', type: 'document', document: { id: 'MEDIA9', mime_type: 'application/pdf', filename: 'plano-cocina.pdf' } },
+    ];
+    expect(parseWhatsAppWebhook(payload)[0]!.media).toEqual([
+      { type: 'document', externalMediaId: 'MEDIA9', mimeType: 'application/pdf', filename: 'plano-cocina.pdf' },
     ]);
   });
 });
@@ -315,6 +348,42 @@ describe('sendWhatsAppText', () => {
     expect(await sendWhatsAppText({ ...base, fetch: fetchMock }, '584141112233', 'x')).toMatchObject({ ok: false, retryable: true, httpStatus: null });
   });
 
+  it('marca el token vencido o revocado (190 o 401) y no lo reintenta', async () => {
+    const expired = await sendWhatsAppText({ ...base, fetch: reply(400, { error: { code: 190, message: 'expired' } }) }, '584141112233', 'x');
+    expect(expired).toMatchObject({ ok: false, retryable: false, authError: true, errorCode: 190 });
+    const unauthorized = await sendWhatsAppText({ ...base, fetch: reply(401, {}) }, '584141112233', 'x');
+    expect(unauthorized).toMatchObject({ ok: false, retryable: false, authError: true });
+  });
+
+  it('no reintenta el 131048 (número restringido por spam): no es un límite de tasa', async () => {
+    const res = await sendWhatsAppText({ ...base, fetch: reply(400, { error: { code: 131048, message: 'spam' } }) }, '584141112233', 'x');
+    expect(res).toMatchObject({ ok: false, retryable: false, errorCode: 131048 });
+    expect(res).not.toHaveProperty('authError');
+  });
+
+  it('manda un documento con su nombre y un video con pie', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({ messages: [{ id: 'wamid.DOC' }] }), { status: 200 }));
+    await sendWhatsAppMedia({ ...base, fetch: fetchMock }, '584141112233', { type: 'document', mediaId: 'M1', filename: 'cotizacion.pdf', caption: 'Su cotización' });
+    await sendWhatsAppMedia({ ...base, fetch: fetchMock }, '584141112233', { type: 'video', mediaId: 'M2', caption: 'Así queda', filename: 'no-va.mp4' });
+    expect(JSON.parse(String(fetchMock.mock.calls[0]![1]?.body))).toMatchObject({
+      type: 'document',
+      document: { id: 'M1', filename: 'cotizacion.pdf', caption: 'Su cotización' },
+    });
+    // El nombre de archivo solo va en documentos.
+    expect(JSON.parse(String(fetchMock.mock.calls[1]![1]?.body)).video).toEqual({ id: 'M2', caption: 'Así queda' });
+  });
+
+  it('sube videos y documentos según los límites de Meta y rechaza lo que WhatsApp no admite', async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockImplementation(async () => new Response(JSON.stringify({ id: 'media-1' }), { status: 200 }));
+    expect(await uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.alloc(6 * 1024 * 1024), 'video/mp4', 'v.mp4')).toEqual({ ok: true, mediaId: 'media-1' });
+    expect(await uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.from('%PDF-1.4'), 'application/pdf', 'p.pdf')).toEqual({ ok: true, mediaId: 'media-1' });
+    await expect(uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.alloc(16 * 1024 * 1024 + 1), 'video/mp4', 'v.mp4')).rejects.toThrow('16 MB');
+    await expect(uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.from('x'), 'application/zip', 'a.zip')).rejects.toThrow('no admite');
+    expect(whatsappMediaTypeFor('image/png')).toBe('image');
+    expect(whatsappMediaTypeFor('application/vnd.openxmlformats-officedocument.wordprocessingml.document')).toBe('document');
+    expect(whatsappMediaTypeFor('image/gif')).toBeNull();
+  });
+
   it('sube una foto como multipart y devuelve su id', async () => {
     const fetchMock = reply(200, { id: 'media-77' });
     const res = await uploadWhatsAppMedia({ ...base, fetch: fetchMock }, Buffer.from([1, 2, 3]), 'image/jpeg', 'foto.jpg');
@@ -373,5 +442,22 @@ describe('plantillas aprobadas', () => {
     ).toEqual({ name: 'x', language: 'es', category: 'UTILITY', body: 'Hola {{1}}', params: 1, header: 'Mora Mora', footer: 'Pie', buttons: [] });
     expect(toApprovedTemplate({ name: 'x', language: 'es', status: 'PENDING', components: [{ type: 'BODY', text: 'a' }] })).toBeNull();
     expect(toApprovedTemplate({ name: 'x', language: 'es', status: 'APPROVED', components: [{ type: 'HEADER', format: 'TEXT', text: 'Hola {{1}}' }, { type: 'BODY', text: 'a' }] })).toBeNull();
+  });
+});
+
+describe('exchangeSignupCode', () => {
+  const graph = (body: unknown) => ({
+    graphApiVersion: 'v21.0',
+    fetch: vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(body), { status: 200 })),
+  });
+
+  it('no pone vencimiento si Meta no lo manda (el token de negocio no vence por defecto)', async () => {
+    expect(await exchangeSignupCode(graph({ access_token: 'T1' }), { appId: 'a', appSecret: 's', code: 'c' })).toEqual({ accessToken: 'T1', expiresAt: null });
+  });
+
+  it('calcula el vencimiento cuando la configuración pidió 60 días', async () => {
+    const now = new Date('2026-11-27T00:00:00Z');
+    const res = await exchangeSignupCode(graph({ access_token: 'T2', expires_in: 60 * 86400 }), { appId: 'a', appSecret: 's', code: 'c', now });
+    expect(res.expiresAt?.toISOString()).toBe('2027-01-26T00:00:00.000Z');
   });
 });

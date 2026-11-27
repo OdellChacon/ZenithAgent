@@ -42,6 +42,9 @@ describe.skipIf(!hasDb)('API del panel', () => {
     const body = init?.body ? ` ${String(init.body)}` : '';
     graphCalls.push(`${init?.method ?? 'GET'} ${url.pathname}${url.search}${body}`);
     const json = (status: number, data: unknown) => new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json' } });
+    // Archivo del cliente: primero la url (Graph API) y después los bytes (CDN de Meta).
+    if (url.pathname.endsWith('/MEDIA-FOTO')) return json(200, { url: 'https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1', mime_type: 'image/jpeg' });
+    if (url.hostname === 'lookaside.fbsbx.com') return new Response(Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]), { status: 200, headers: { 'content-type': 'image/jpeg' } });
     if (url.pathname.endsWith('/oauth/access_token')) {
       return url.searchParams.get('code') === 'codigo-bueno'
         ? json(200, { access_token: 'TOKEN-NEGOCIO', token_type: 'bearer' })
@@ -556,6 +559,146 @@ describe.skipIf(!hasDb)('API del panel', () => {
       expect(taken.statusCode).toBe(409);
       const row = (await owner.query('SELECT tenant_id, waba_id FROM channel_accounts WHERE external_account_id = $1', [other.phoneNumberId])).rows[0];
       expect(row).toEqual({ tenant_id: other.tenantId, waba_id: null });
+    });
+  });
+
+  describe('archivos y canales de Meta', () => {
+    /** Cuerpo multipart como lo manda el navegador: los datos y después el archivo. */
+    function multipart(fields: Record<string, string>, file: { name: string; type: string; data: Buffer }) {
+      const boundary = `----zenith${run}`;
+      const parts: Buffer[] = [];
+      for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+      parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.type}\r\n\r\n`));
+      parts.push(file.data, Buffer.from(`\r\n--${boundary}--\r\n`));
+      return { payload: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
+    }
+
+    async function upload(cookie: string, id: string, file: { name: string; type: string; data: Buffer }, caption?: string) {
+      const body = multipart({ ...(caption ? { caption } : {}), clientId: randomUUID() }, file);
+      return app.inject({
+        method: 'POST',
+        url: `/api/v1/conversations/${id}/files`,
+        headers: { ...headers(cookie), 'content-type': body.contentType },
+        payload: body.payload,
+      });
+    }
+
+    const PDF = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n');
+
+    it('el asesor manda un PDF: queda guardado, en cola para enviar y se puede abrir solo desde su negocio', async () => {
+      const id = await seedConversation(t.tenantId, t.channelAccountId);
+      const ana = await login(users.ana.email);
+      await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(ana.cookie) });
+      const before = enqueued.length;
+      const res = await upload(ana.cookie, id, { name: 'cotización junio.pdf', type: 'application/pdf', data: PDF }, 'Su cotización');
+      expect(res.statusCode).toBe(200);
+      expect(enqueued.length).toBe(before + 1);
+      const out = (await owner.query('SELECT payload FROM outbound_messages WHERE id = $1', [enqueued.at(-1)!.ids[0]])).rows[0].payload;
+      expect(out).toMatchObject({ kind: 'file', caption: 'Su cotización', author: 'agent' });
+
+      const detail = (await app.inject({ method: 'GET', url: `/api/v1/conversations/${id}`, headers: headers(ana.cookie) })).json();
+      const msg = detail.messages.at(-1);
+      expect(msg).toMatchObject({ type: 'document', body: 'Su cotización', file: { name: 'cotización junio.pdf', mimeType: 'application/pdf', mediaType: 'document' } });
+      expect(msg.file.url).toBe(`/api/v1/files/${out.fileId}`);
+
+      const file = await app.inject({ method: 'GET', url: msg.file.url, headers: headers(ana.cookie) });
+      expect(file.statusCode).toBe(200);
+      expect(file.rawPayload.equals(PDF)).toBe(true);
+      expect(file.headers['content-type']).toBe('application/pdf');
+      expect(file.headers['content-disposition']).toContain('attachment;');
+      expect(file.headers['content-disposition']).toContain(`filename*=UTF-8''${encodeURIComponent('cotización junio.pdf')}`);
+      expect(file.headers['x-content-type-options']).toBe('nosniff');
+      expect(file.headers['content-security-policy']).toContain('sandbox');
+
+      const ajeno = await login(users.ajeno.email);
+      expect((await app.inject({ method: 'GET', url: msg.file.url, headers: headers(ajeno.cookie) })).statusCode).toBe(404);
+    });
+
+    it('revisa el tipo real del archivo y lo que admite el canal', async () => {
+      const id = await seedConversation(t.tenantId, t.channelAccountId);
+      const ana = await login(users.ana.email);
+      await app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/take`, headers: headers(ana.cookie) });
+      // Un ejecutable con nombre de PDF no pasa.
+      const fake = await upload(ana.cookie, id, { name: 'factura.pdf', type: 'application/pdf', data: Buffer.from('MZ\x90\x00binario') });
+      expect(fake.statusCode).toBe(415);
+      // Una foto de más de 5 MB no entra en WhatsApp.
+      const big = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(5 * 1024 * 1024)]);
+      const tooBig = await upload(ana.cookie, id, { name: 'foto.jpg', type: 'image/jpeg', data: big });
+      expect(tooBig.statusCode).toBe(413);
+      // Sin tomar la conversación no se puede mandar.
+      const beto = await login(users.beto.email);
+      expect((await upload(beto.cookie, id, { name: 'p.pdf', type: 'application/pdf', data: PDF })).statusCode).toBe(409);
+    });
+
+    it('muestra la foto que mandó el cliente pidiéndosela a Meta en el momento', async () => {
+      const id = await seedConversation(t.tenantId, t.channelAccountId);
+      await owner.query('UPDATE channel_accounts SET credentials_enc = $2 WHERE id = $1', [
+        t.channelAccountId,
+        encryptCredentials(JSON.stringify({ accessToken: 'TOKEN-WA' }), masterKey, t.channelAccountId),
+      ]);
+      const msgId = (
+        await owner.query<{ id: string }>(
+          `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, attachments) VALUES ($1, $2, 'in', 'customer', 'image', $3) RETURNING id`,
+          [t.tenantId, id, JSON.stringify([{ type: 'image', externalMediaId: 'MEDIA-FOTO', mimeType: 'image/jpeg' }])],
+        )
+      ).rows[0]!.id;
+      const ana = await login(users.ana.email);
+      const detail = (await app.inject({ method: 'GET', url: `/api/v1/conversations/${id}`, headers: headers(ana.cookie) })).json();
+      const msg = detail.messages.find((m: { id: string }) => m.id === msgId);
+      expect(msg.file).toEqual({ url: `/api/v1/messages/${msgId}/media`, name: null, mimeType: 'image/jpeg', mediaType: 'image' });
+      const media = await app.inject({ method: 'GET', url: msg.file.url, headers: headers(ana.cookie) });
+      expect(media.statusCode).toBe(200);
+      expect(media.headers['content-type']).toBe('image/jpeg');
+      expect(media.headers['content-disposition']).toBe('inline');
+      expect(media.rawPayload.length).toBe(7);
+
+      // Un mensaje borrado ya no se entrega.
+      await owner.query('UPDATE messages SET deleted_at = now() WHERE id = $1', [msgId]);
+      expect((await app.inject({ method: 'GET', url: msg.file.url, headers: headers(ana.cookie) })).statusCode).toBe(404);
+    });
+
+    it('en Messenger el asesor puede responder hasta 7 días (Human Agent), no después', async () => {
+      const pageId = String(Date.now());
+      const account = (
+        await owner.query<{ id: string }>(`INSERT INTO channel_accounts (tenant_id, channel, external_account_id) VALUES ($1, 'messenger', $2) RETURNING id`, [t.tenantId, pageId])
+      ).rows[0]!.id;
+      const conversationAt = async (hours: number) => {
+        const contact = (await owner.query<{ id: string }>(`INSERT INTO contacts (tenant_id, name) VALUES ($1, 'Cliente Messenger') RETURNING id`, [t.tenantId])).rows[0]!.id;
+        await owner.query(`INSERT INTO contact_identities (tenant_id, contact_id, channel, external_user_id) VALUES ($1, $2, 'messenger', $3)`, [
+          t.tenantId,
+          contact,
+          String(Math.floor(Math.random() * 1e12)),
+        ]);
+        return (
+          await owner.query<{ id: string }>(
+            `INSERT INTO conversations (tenant_id, contact_id, channel_account_id, mode, last_inbound_at) VALUES ($1, $2, $3, 'human', $4) RETURNING id`,
+            [t.tenantId, contact, account, new Date(Date.now() - hours * 3_600_000)],
+          )
+        ).rows[0]!.id;
+      };
+      const ana = await login(users.ana.email);
+      const threeDays = await conversationAt(72);
+      await app.inject({ method: 'POST', url: `/api/v1/conversations/${threeDays}/take`, headers: headers(ana.cookie) });
+      const detail = (await app.inject({ method: 'GET', url: `/api/v1/conversations/${threeDays}`, headers: headers(ana.cookie) })).json();
+      expect(detail.window.state).toBe('HUMAN_AGENT_ONLY');
+      expect((await app.inject({ method: 'POST', url: `/api/v1/conversations/${threeDays}/messages`, headers: headers(ana.cookie), payload: { text: 'Le escribo yo' } })).statusCode).toBe(200);
+      expect((await upload(ana.cookie, threeDays, { name: 'p.pdf', type: 'application/pdf', data: PDF })).statusCode).toBe(200);
+
+      const eightDays = await conversationAt(24 * 8);
+      await app.inject({ method: 'POST', url: `/api/v1/conversations/${eightDays}/take`, headers: headers(ana.cookie) });
+      const late = await app.inject({ method: 'POST', url: `/api/v1/conversations/${eightDays}/messages`, headers: headers(ana.cookie), payload: { text: 'Hola' } });
+      expect(late.statusCode).toBe(409);
+      expect(late.json().error.message).toContain('7 días');
+    });
+
+    it('el estado de los canales dice si Meta rechazó el token o cuándo vence', async () => {
+      await owner.query(`UPDATE channel_accounts SET credentials_invalid_at = now(), credentials_error = 'expired', token_expires_at = NULL WHERE id = $1`, [t.channelAccountId]);
+      const admin = await login(users.admin.email);
+      const list = (await app.inject({ method: 'GET', url: '/api/v1/channels', headers: headers(admin.cookie) })).json();
+      const wa = list.items.find((c: { id: string }) => c.id === t.channelAccountId);
+      expect(wa.token.invalid).toMatchObject({ error: 'expired' });
+      expect(wa.token.expiresAt).toBeNull();
+      await owner.query(`UPDATE channel_accounts SET credentials_invalid_at = NULL, credentials_error = NULL WHERE id = $1`, [t.channelAccountId]);
     });
   });
 });

@@ -25,7 +25,8 @@
     "dev:api": "tsx watch --env-file=.env apps/api/src/index.ts",
     "dev:panel": "npm run dev -w @zenith/panel",
     "build:panel": "npm run build -w @zenith/panel",
-    "user:create": "tsx --env-file=.env apps/api/src/cli/create-user.ts"
+    "user:create": "tsx --env-file=.env apps/api/src/cli/create-user.ts",
+    "channel:connect-meta": "tsx --env-file=.env apps/api/src/cli/connect-meta.ts"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

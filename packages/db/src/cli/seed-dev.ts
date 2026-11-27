@@ -62,6 +62,33 @@ try {
     ]);
   }
 
+  // Página de Facebook (Messenger) e Instagram de desarrollo: con el simulador, sus ids por
+  // defecto son los de SIM_PAGE_ID y SIM_INSTAGRAM_ID. Usan el mismo token de prueba.
+  const devPageId = process.env.DEV_MESSENGER_PAGE_ID?.trim();
+  const devInstagramId = process.env.DEV_INSTAGRAM_ID?.trim();
+  if (devPageId && accessToken) {
+    const masterKey = parseMasterKey(process.env.ENCRYPTION_MASTER_KEY);
+    for (const [channel, externalId, name] of [
+      ['messenger', devPageId, 'Messenger IMM (desarrollo)'],
+      ...(devInstagramId ? [['instagram', devInstagramId, 'Instagram IMM (desarrollo)']] : []),
+    ] as const) {
+      const row = await client.query<{ id: string }>(
+        `INSERT INTO channel_accounts (tenant_id, channel, external_account_id, display_name)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (channel, external_account_id) DO UPDATE SET display_name = EXCLUDED.display_name
+         RETURNING id`,
+        [tenantId, channel, externalId, name],
+      );
+      const id = row.rows[0]!.id;
+      await client.query('UPDATE channel_accounts SET credentials_enc = $2, credentials_key_id = $3 WHERE id = $1', [
+        id,
+        encryptCredentials(JSON.stringify({ accessToken, pageId: devPageId }), masterKey, id),
+        process.env.ENCRYPTION_MASTER_KEY_ID ?? null,
+      ]);
+      console.log(`${name}: ${externalId}`);
+    }
+  }
+
   // Usuario del panel para desarrollo (correo y contraseña en .env, nunca en el repo).
   const panelEmail = process.env.DEV_PANEL_EMAIL?.trim().toLowerCase();
   const panelPassword = process.env.DEV_PANEL_PASSWORD;

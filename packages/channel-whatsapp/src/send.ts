@@ -3,15 +3,52 @@
  * - Mensajes: POST https://graph.facebook.com/{version}/{phone_number_id}/messages
  * - Archivos:  POST https://graph.facebook.com/{version}/{phone_number_id}/media (multipart)
  *
- * Imágenes: JPEG o PNG de hasta 5 MB; los ids de archivos subidos duran 30 días (Meta).
- * Por verificar en la documentación vigente de Meta antes de producción:
- * - largo máximo del texto (se asume 4096 caracteres) y del pie de foto (se asume 1024);
- * - códigos de error de límite de tasa (se asumen 4, 80007, 130429 y 131056).
+ * Límites confirmados en la documentación de Meta (revisada el 27/11/2026):
+ * - texto: 4096 caracteres; pie de foto, video o documento: 1024 caracteres;
+ * - imagen JPEG o PNG hasta 5 MB; video MP4 o 3GP (H.264 + AAC) hasta 16 MB; documento
+ *   (PDF, TXT, Word, Excel, PowerPoint) hasta 100 MB. Los ids de archivos subidos duran 30 días;
+ * - límite de tasa, se puede reintentar: 4 (app), 80007 (cuenta), 130429 (caudal) y 131056
+ *   (demasiados mensajes al mismo cliente). El 131048 (número restringido por spam) no se
+ *   reintenta: es una restricción de calidad, no de tasa;
+ * - token vencido o revocado: 190 (y 0 cuando Meta no puede autenticar). Hay que volver a
+ *   conectar el número: reintentar no sirve.
  */
 export const WHATSAPP_MAX_TEXT_LENGTH = 4096;
 export const WHATSAPP_MAX_CAPTION_LENGTH = 1024;
 export const WHATSAPP_MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+export const WHATSAPP_MAX_VIDEO_BYTES = 16 * 1024 * 1024;
+export const WHATSAPP_MAX_DOCUMENT_BYTES = 100 * 1024 * 1024;
 const RATE_LIMIT_CODES = new Set([4, 80007, 130429, 131056]);
+/** Token vencido, revocado o que Meta no puede autenticar. */
+export const META_AUTH_ERROR_CODES: ReadonlySet<number> = new Set([0, 190]);
+
+/** Tipos de archivo que se pueden mandar y su tamaño máximo según Meta. */
+export const WHATSAPP_UPLOAD_TYPES = {
+  image: { maxBytes: WHATSAPP_MAX_IMAGE_BYTES, mimeTypes: new Set(['image/jpeg', 'image/png']) },
+  video: { maxBytes: WHATSAPP_MAX_VIDEO_BYTES, mimeTypes: new Set(['video/mp4', 'video/3gpp']) },
+  document: {
+    maxBytes: WHATSAPP_MAX_DOCUMENT_BYTES,
+    mimeTypes: new Set([
+      'application/pdf',
+      'text/plain',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'application/vnd.ms-powerpoint',
+      'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    ]),
+  },
+} as const;
+export type WhatsAppUploadType = keyof typeof WHATSAPP_UPLOAD_TYPES;
+
+/** Qué tipo de mensaje corresponde a un archivo, o null si WhatsApp no lo admite. */
+export function whatsappMediaTypeFor(mimeType: string): WhatsAppUploadType | null {
+  for (const type of Object.keys(WHATSAPP_UPLOAD_TYPES) as WhatsAppUploadType[]) {
+    if ((WHATSAPP_UPLOAD_TYPES[type].mimeTypes as ReadonlySet<string>).has(mimeType)) return type;
+  }
+  return null;
+}
 const GRAPH_VERSION_RE = /^v\d+\.\d+$/;
 
 export interface WhatsAppSendConfig {
@@ -26,13 +63,12 @@ export interface WhatsAppSendConfig {
 
 const DEFAULT_GRAPH_BASE_URL = 'https://graph.facebook.com';
 
-export type SendResult =
-  | { ok: true; externalMessageId: string }
-  | { ok: false; retryable: boolean; httpStatus: number | null; errorCode?: number; message: string };
+/** `authError`: el token venció o fue revocado; hay que volver a conectar la cuenta. */
+export type SendFailure = { ok: false; retryable: boolean; httpStatus: number | null; errorCode?: number; authError?: true; message: string };
 
-export type UploadResult =
-  | { ok: true; mediaId: string }
-  | { ok: false; retryable: boolean; httpStatus: number | null; errorCode?: number; message: string };
+export type SendResult = { ok: true; externalMessageId: string } | SendFailure;
+
+export type UploadResult = { ok: true; mediaId: string } | SendFailure;
 
 export class WhatsAppSendError extends Error {
   override name = 'WhatsAppSendError';
@@ -55,7 +91,7 @@ async function graphCall(
   config: WhatsAppSendConfig,
   url: string,
   init: { body: string | FormData; json: boolean },
-): Promise<{ ok: true; data: GraphReply } | { ok: false; retryable: boolean; httpStatus: number | null; errorCode?: number; message: string }> {
+): Promise<{ ok: true; data: GraphReply } | SendFailure> {
   const doFetch = config.fetch ?? fetch;
   let res: Response;
   try {
@@ -72,12 +108,14 @@ async function graphCall(
   const data = (await res.json().catch(() => null)) as GraphReply;
   if (res.ok) return { ok: true, data };
   const errorCode = data?.error?.code;
-  const retryable = res.status === 429 || res.status >= 500 || (errorCode !== undefined && RATE_LIMIT_CODES.has(errorCode));
+  const authError = res.status === 401 || (errorCode !== undefined && META_AUTH_ERROR_CODES.has(errorCode));
+  const retryable = !authError && (res.status === 429 || res.status >= 500 || (errorCode !== undefined && RATE_LIMIT_CODES.has(errorCode)));
   return {
     ok: false,
     retryable,
     httpStatus: res.status,
     ...(errorCode !== undefined ? { errorCode } : {}),
+    ...(authError ? { authError: true as const } : {}),
     message: data?.error?.message ?? `Respuesta inesperada de Meta (HTTP ${res.status})`,
   };
 }
@@ -132,22 +170,33 @@ export async function markWhatsAppRead(
 
 /** Envía una imagen ya subida (mediaId) con un pie de foto opcional. */
 export async function sendWhatsAppImage(config: WhatsAppSendConfig, to: string, mediaId: string, caption?: string): Promise<SendResult> {
-  checkRecipient(to);
-  if (!mediaId) throw new WhatsAppSendError('Falta el id de la imagen');
-  const text = caption?.trim();
-  if (text && text.length > WHATSAPP_MAX_CAPTION_LENGTH) throw new WhatsAppSendError('El pie de foto supera el largo máximo');
-  return sendMessage(config, to, { type: 'image', image: { id: mediaId, ...(text ? { caption: text } : {}) } });
+  return sendWhatsAppMedia(config, to, { type: 'image', mediaId, ...(caption ? { caption } : {}) });
 }
 
-/** Sube una imagen a WhatsApp y devuelve su id (válido 30 días según Meta). */
-export async function uploadWhatsAppMedia(
+/** Envía una foto, un video o un documento ya subido. El documento lleva su nombre de archivo. */
+export async function sendWhatsAppMedia(
   config: WhatsAppSendConfig,
-  data: Buffer,
-  mimeType: 'image/jpeg' | 'image/png',
-  filename: string,
-): Promise<UploadResult> {
-  if (!data.length) throw new WhatsAppSendError('La imagen está vacía');
-  if (data.length > WHATSAPP_MAX_IMAGE_BYTES) throw new WhatsAppSendError('La imagen supera los 5 MB');
+  to: string,
+  media: { type: WhatsAppUploadType; mediaId: string; caption?: string; filename?: string },
+): Promise<SendResult> {
+  checkRecipient(to);
+  if (!media.mediaId) throw new WhatsAppSendError('Falta el id del archivo');
+  const text = media.caption?.trim();
+  if (text && text.length > WHATSAPP_MAX_CAPTION_LENGTH) throw new WhatsAppSendError('El pie de foto supera el largo máximo');
+  const filename = media.type === 'document' ? media.filename?.trim().slice(0, 240) : undefined;
+  return sendMessage(config, to, {
+    type: media.type,
+    [media.type]: { id: media.mediaId, ...(text ? { caption: text } : {}), ...(filename ? { filename } : {}) },
+  });
+}
+
+/** Sube un archivo (foto, video o documento) a WhatsApp y devuelve su id (válido 30 días según Meta). */
+export async function uploadWhatsAppMedia(config: WhatsAppSendConfig, data: Buffer, mimeType: string, filename: string): Promise<UploadResult> {
+  if (!data.length) throw new WhatsAppSendError('El archivo está vacío');
+  const type = whatsappMediaTypeFor(mimeType);
+  if (!type) throw new WhatsAppSendError(`WhatsApp no admite archivos ${mimeType}`);
+  const limit = WHATSAPP_UPLOAD_TYPES[type].maxBytes;
+  if (data.length > limit) throw new WhatsAppSendError(`El archivo supera los ${Math.round(limit / 1024 / 1024)} MB`);
   const form = new FormData();
   form.append('messaging_product', 'whatsapp');
   form.append('type', mimeType);

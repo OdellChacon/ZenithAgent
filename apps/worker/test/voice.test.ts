@@ -24,3 +24,21 @@ describe('sin ffmpeg', () => {
     expect(await toModelAudio(Buffer.from('x'), 'ffmpeg-que-no-existe-zenith')).toBeNull();
   });
 });
+
+describe.skipIf(!hasFfmpeg)('cuadro de un video (ffmpeg)', () => {
+  it('saca una imagen JPEG de un MP4 y no deja archivos temporales', async () => {
+    const { videoFrame } = await import('../src/customer-images.js');
+    const tmp = (await import('node:os')).tmpdir();
+    const { readdir } = await import('node:fs/promises');
+    const made = spawnSync(
+      'ffmpeg',
+      ['-hide_banner', '-loglevel', 'error', '-f', 'lavfi', '-i', 'testsrc=size=320x240:rate=10', '-t', '1', '-pix_fmt', 'yuv420p', '-f', 'mp4', '-movflags', 'frag_keyframe+empty_moov', 'pipe:1'],
+      { windowsHide: true, maxBuffer: 10 * 1024 * 1024 },
+    );
+    expect(made.status).toBe(0);
+    const frame = await videoFrame(made.stdout as Buffer);
+    expect(frame?.subarray(0, 3).equals(Buffer.from([0xff, 0xd8, 0xff]))).toBe(true);
+    expect((await readdir(tmp)).some((f) => f.startsWith('zenith-video-'))).toBe(false);
+    expect(await videoFrame(Buffer.from('no es un video'))).toBeNull();
+  });
+});

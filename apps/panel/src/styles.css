@@ -412,6 +412,19 @@ a { color: var(--accent); }
 .msg figure { margin: 0; }
 .msg img { display: block; max-width: 260px; width: 100%; border-radius: 11px; }
 .msg figcaption { font-size: 13px; margin-top: 5px; }
+.msg video { display: block; max-width: 300px; width: 100%; border-radius: 11px; background: #000; }
+.msg audio { display: block; max-width: 260px; width: 100%; margin-top: 6px; }
+.msg .deleted { font-style: italic; }
+.file-link { display: inline-flex; gap: 8px; align-items: center; padding: 9px 12px; border-radius: 11px; background: var(--accent-soft); color: var(--accent); text-decoration: none; font-weight: 600; font-size: 13.5px; max-width: 260px; }
+.file-link svg { width: 18px; height: 18px; flex: none; }
+.file-link span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.composer .attach { align-self: flex-end; margin-bottom: 4px; }
+.composer .attach svg { width: 18px; height: 18px; }
+.composer-body { flex: 1; display: grid; gap: 6px; min-width: 0; }
+.attach-chip { display: inline-flex; align-items: center; gap: 6px; justify-self: start; max-width: 100%; margin: 6px 0 0 6px; }
+.attach-chip svg { width: 14px; height: 14px; flex: none; }
+.attach-chip .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-chip button { border: 0; background: none; padding: 0; cursor: pointer; color: inherit; display: inline-flex; }
 
 .notice { margin: 0 18px; padding: 9px 13px; border-radius: 11px; background: var(--warn-soft); color: var(--warn); font-size: 13.5px; }
 .composer {

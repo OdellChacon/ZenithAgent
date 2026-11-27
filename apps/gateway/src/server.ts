@@ -2,6 +2,14 @@ import Fastify, { type FastifyInstance, type FastifyServerOptions } from 'fastif
 import { timingSafeEqual } from 'node:crypto';
 import type { ParsedEvent } from '@zenith/core';
 import { parseWhatsAppWebhook, verifyMetaSignature, WhatsAppPayloadError } from '@zenith/channel-whatsapp';
+import { MetaPayloadError, parseMetaMessagingWebhook } from '@zenith/channel-meta';
+
+/** Cada producto de Meta tiene su URL de webhook; Messenger e Instagram comparten el formato. */
+const PARSERS = {
+  whatsapp: { label: 'WhatsApp', parse: parseWhatsAppWebhook },
+  messenger: { label: 'Messenger', parse: parseMetaMessagingWebhook },
+  instagram: { label: 'Instagram', parse: parseMetaMessagingWebhook },
+} as const;
 
 export interface GatewayDeps {
   metaAppSecret: string;
@@ -45,8 +53,8 @@ export function buildGateway(deps: GatewayDeps, opts: FastifyServerOptions = {})
     }
   });
 
-  // Handshake de suscripción de Meta.
-  app.get<{ Querystring: Record<string, string | undefined> }>('/webhooks/meta', async (req, reply) => {
+  // Handshake de suscripción de Meta: llega por GET a la misma URL configurada como callback.
+  const handshake = async (req: { query: Record<string, string | undefined> }, reply: import('fastify').FastifyReply) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
@@ -54,9 +62,16 @@ export function buildGateway(deps: GatewayDeps, opts: FastifyServerOptions = {})
       return reply.type('text/plain').send(challenge);
     }
     return reply.code(403).send({ error: { code: 'verification_failed', message: 'Token de verificación inválido' } });
+  };
+  app.get<{ Querystring: Record<string, string | undefined> }>('/webhooks/meta', handshake);
+  app.get<{ Querystring: Record<string, string | undefined>; Params: { channel: string } }>('/webhooks/meta/:channel', async (req, reply) => {
+    if (!(req.params.channel in PARSERS)) return reply.code(404).send({ error: { code: 'not_found', message: 'Canal desconocido' } });
+    return handshake(req, reply);
   });
 
-  app.post('/webhooks/meta/whatsapp', async (req, reply) => {
+  app.post<{ Params: { channel: string } }>('/webhooks/meta/:channel', async (req, reply) => {
+    const parser = PARSERS[req.params.channel as keyof typeof PARSERS];
+    if (!parser) return reply.code(404).send({ error: { code: 'not_found', message: 'Canal desconocido' } });
     const raw = req.body;
     if (!Buffer.isBuffer(raw)) {
       return reply.code(415).send({ error: { code: 'unsupported_media_type', message: 'Se espera application/json' } });
@@ -64,7 +79,7 @@ export function buildGateway(deps: GatewayDeps, opts: FastifyServerOptions = {})
 
     const signature = req.headers['x-hub-signature-256'];
     if (!verifyMetaSignature(raw, typeof signature === 'string' ? signature : undefined, deps.metaAppSecret)) {
-      req.log.warn('Webhook de WhatsApp con firma inválida');
+      req.log.warn(`Webhook de ${parser.label} con firma inválida`);
       return reply.code(401).send({ error: { code: 'invalid_signature', message: 'Firma inválida' } });
     }
 
@@ -72,10 +87,14 @@ export function buildGateway(deps: GatewayDeps, opts: FastifyServerOptions = {})
     let events: ParsedEvent[];
     try {
       payload = JSON.parse(raw.toString('utf8'));
-      events = parseWhatsAppWebhook(payload);
+      events = parser.parse(payload);
+      // Un webhook de Messenger mandado a la URL de Instagram (o al revés) se rechaza.
+      if (req.params.channel !== 'whatsapp' && events.some((e) => e.channel !== req.params.channel)) {
+        throw new MetaPayloadError('El webhook no corresponde a este canal');
+      }
     } catch (err) {
-      if (err instanceof SyntaxError || err instanceof WhatsAppPayloadError) {
-        req.log.warn({ err: err.message }, 'Webhook de WhatsApp con cuerpo inválido');
+      if (err instanceof SyntaxError || err instanceof WhatsAppPayloadError || err instanceof MetaPayloadError) {
+        req.log.warn({ err: err.message }, `Webhook de ${parser.label} con cuerpo inválido`);
         return reply.code(400).send({ error: { code: 'invalid_payload', message: 'Cuerpo inválido' } });
       }
       throw err;
@@ -96,7 +115,7 @@ export function buildGateway(deps: GatewayDeps, opts: FastifyServerOptions = {})
       }
     }
 
-    req.log.info({ events: events.length, stored }, 'Webhook de WhatsApp recibido');
+    req.log.info({ events: events.length, stored }, `Webhook de ${parser.label} recibido`);
     return reply.code(200).send({ ok: true });
   });
 

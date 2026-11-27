@@ -722,3 +722,29 @@ describe('promesas de asesor sin derivar', () => {
     ]) expect(promisesHandoff(t), t).toBe(false);
   });
 });
+
+describe('videos y documentos del cliente', () => {
+  const img = { mediaType: 'image/jpeg' as const, base64: 'AAAA' };
+
+  it('el modelo ve un cuadro del video y la imagen mandada como documento', () => {
+    const history = [
+      { id: 'v1', direction: 'in' as const, author: 'customer' as const, type: 'video', body: 'Así está el piso' },
+      { id: 'd1', direction: 'in' as const, author: 'customer' as const, type: 'document', body: null },
+    ];
+    expect(pendingCustomerImages(history).map((m) => m.id)).toEqual(['v1', 'd1']);
+    const [turn] = toModelMessages(history, new Map([['v1', img], ['d1', img]]));
+    const blocks = turn!.content as { type: string; text?: string }[];
+    expect(blocks.filter((b) => b.type === 'image')).toHaveLength(2);
+    expect(blocks.map((b) => b.text).filter(Boolean)).toEqual([
+      '[El cliente envió un video; esta es una imagen tomada del video:]',
+      'Así está el piso',
+      '[El cliente envió esta imagen como documento:]',
+    ]);
+  });
+
+  it('un PDF que no se puede mirar llega como nota con el nombre del archivo', () => {
+    const [turn] = toModelMessages([{ id: 'd2', direction: 'in', author: 'customer', type: 'document', body: null, fileName: 'lista-materiales.pdf' }]);
+    expect(turn!.content).toContain('(archivo: lista-materiales.pdf)]');
+    expect(turn!.content).toContain('ofrécele que un asesor lo revise');
+  });
+});

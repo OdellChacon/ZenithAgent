@@ -31,6 +31,11 @@ La especificación técnica está en [`docs/spec-bot-omnicanal.md`](docs/spec-bo
 | Nombres de la agenda del teléfono (contactos de la app WhatsApp Business) | Hecho (falta conectar números reales con Meta) |
 | Notas de voz: se transcriben y el bot responde a lo que dijo el cliente | Hecho (el servidor necesita ffmpeg) |
 | Ubicaciones y tarjetas de contacto del cliente | Hecho |
+| El asesor manda fotos, videos y documentos desde el panel (se revisa el tipo real y lo que admite cada canal) | Hecho |
+| Videos y documentos del cliente: el asesor los abre en el panel; el bot mira un cuadro del video y las imágenes mandadas como documento | Hecho (los PDF y Word el bot no los lee: ofrece que un asesor los revise) |
+| Mensajes editados o borrados por el cliente o por el asesor desde la app | Hecho |
+| Aviso si Meta rechaza el token de una cuenta o está por vencer: revisión diaria, franja en el panel y correo | Hecho |
+| Messenger e Instagram: mensajes, fotos, audios, respuestas del bot y asesor hasta 7 días (etiqueta Human Agent) | Hecho (se conectan con `npm run channel:connect-meta`; falta la app de Meta con los permisos de páginas e Instagram) |
 
 ## Estructura
 
@@ -47,6 +52,7 @@ packages/
   core/           Tipos, reglas de ventana, cifrado de credenciales, colas
   db/             Pool con RLS por tenant, migraciones SQL, acceso a eventos
   channel-whatsapp/  Adaptador de WhatsApp Cloud API
+  channel-meta/   Adaptador de Messenger e Instagram (Send API de la página) y descarga de archivos de cualquier canal
   catalog/        Importa el catálogo (tienda de Mora Mora) a la tabla products
 ```
 
@@ -68,7 +74,13 @@ npm run dev:worker            # en otra
 
 ### Simulador de chat (sin número real)
 
-Una página con un teléfono que se ve como WhatsApp, Instagram o Messenger. Lo que escribes pasa por el sistema real (gateway, colas, worker, BD) y el simulador hace de Meta: recibe la respuesta del bot y manda los estados "entregado" y "leído".
+Una página con un teléfono que se ve como WhatsApp, Instagram o Messenger. Lo que escribes pasa por el sistema real (gateway, colas, worker, BD) y el simulador hace de Meta: recibe la respuesta del bot y manda los estados "entregado" y "leído". Cada apariencia usa su canal de verdad: WhatsApp por la Cloud API e Instagram y Messenger por la Send API de la página, cada uno con su webhook.
+
+Para Instagram y Messenger, conecta una vez la página simulada (con el simulador levantado):
+
+```bash
+META_PAGE_ACCESS_TOKEN=sim npm run channel:connect-meta -- --tenant inversiones-mora-mora --page-id 100000000000777 --instagram
+```
 
 ```bash
 # en .env: META_GRAPH_BASE_URL=http://localhost:4010

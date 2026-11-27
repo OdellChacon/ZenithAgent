@@ -21,7 +21,12 @@ export function ChannelAlerts({ tick }: { tick: number }) {
 
   const down = items.filter((c) => c.disconnected);
   const importing = items.filter((c) => c.history?.status === 'importing');
-  if (!down.length && !importing.length) return null;
+  const noAccess = items.filter((c) => !c.disconnected && c.token?.invalid);
+  const WEEK = 7 * 24 * 3_600_000;
+  const expiring = items.filter(
+    (c) => !c.token?.invalid && c.token?.expiresAt && new Date(c.token.expiresAt).getTime() - Date.now() < WEEK,
+  );
+  if (!down.length && !importing.length && !noAccess.length && !expiring.length) return null;
 
   return (
     <div className="channel-alerts">
@@ -29,6 +34,19 @@ export function ChannelAlerts({ tick }: { tick: number }) {
         <div key={c.id} className="channel-alert down" role="alert">
           <b>{c.name} está desconectado de WhatsApp.</b> {c.disconnected!.label} El bot no recibe ni contesta mensajes en este número
           hasta que se vuelva a conectar; mientras tanto, atiendan desde el teléfono.
+        </div>
+      ))}
+      {noAccess.map((c) => (
+        <div key={c.id} className="channel-alert down" role="alert">
+          <b>{c.name}: Meta rechazó el acceso del sistema.</b> El permiso venció o alguien quitó la app de la cuenta. El bot no puede
+          enviar mensajes ahí hasta que un administrador vuelva a conectarla.
+        </div>
+      ))}
+      {expiring.map((c) => (
+        <div key={c.id} className="channel-alert">
+          El acceso a {c.name} vence el{' '}
+          {new Date(c.token.expiresAt!).toLocaleDateString('es-VE', { day: 'numeric', month: 'long' })}. Vuelvan a conectarla antes para que
+          el bot no deje de responder.
         </div>
       ))}
       {importing.map((c) => (

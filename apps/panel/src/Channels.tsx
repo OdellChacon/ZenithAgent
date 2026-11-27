@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { api, type ChannelStatus } from './api';
+import { api, CHANNEL_LABELS, type ChannelStatus } from './api';
 import { runEmbeddedSignup, type SignupConfig } from './signup';
 
 /** Id de cuenta ficticio para el simulador local (no hay cuenta de Meta real). */
@@ -16,10 +16,21 @@ function ChannelCard({ c }: { c: ChannelStatus }) {
     <li className="card channel-card">
       <div className="item-top">
         <b>{c.name}</b>
-        <span className="muted small">Conectado el {new Date(c.connectedAt).toLocaleDateString('es-VE')}</span>
+        <span className="muted small">
+          {CHANNEL_LABELS[c.channel] ?? c.channel} · conectado el {new Date(c.connectedAt).toLocaleDateString('es-VE')}
+        </span>
       </div>
       <div className="chips">
-        {c.disconnected ? <span className="chip hot">Desconectado</span> : <span className="chip ok">Activo</span>}
+        {c.disconnected ? (
+          <span className="chip hot">Desconectado</span>
+        ) : c.token?.invalid ? (
+          <span className="chip hot">Sin acceso a Meta</span>
+        ) : (
+          <span className="chip ok">Activo</span>
+        )}
+        {c.token?.expiresAt && !c.token.invalid && (
+          <span className="chip warn-chip">Acceso vence el {new Date(c.token.expiresAt).toLocaleDateString('es-VE')}</span>
+        )}
         {c.coexistence && <span className="chip">También en la app del teléfono</span>}
         {c.history && (
           <span className="chip muted-chip">
@@ -29,6 +40,12 @@ function ChannelCard({ c }: { c: ChannelStatus }) {
         )}
       </div>
       {c.disconnected && <p className="notice">{c.disconnected.label} Vuelve a conectarlo con el botón de abajo.</p>}
+      {!c.disconnected && c.token?.invalid && (
+        <p className="notice">
+          Meta rechazó el acceso del sistema (venció o alguien quitó la app de la cuenta). El bot no puede enviar mensajes aquí hasta volver a
+          conectar {c.channel === 'whatsapp' ? 'el número con el botón de abajo' : 'la página'}.
+        </p>
+      )}
     </li>
   );
 }
@@ -73,10 +90,10 @@ export function Channels({ tick }: { tick: number }) {
 
   return (
     <section className="channels-page">
-      <h2>Números de WhatsApp</h2>
+      <h2>Canales conectados</h2>
       {error && <p className="error">{error}</p>}
       {items === null && !error && <p className="muted">Cargando…</p>}
-      {items?.length === 0 && <p className="muted">Todavía no hay números conectados.</p>}
+      {items?.length === 0 && <p className="muted">Todavía no hay canales conectados.</p>}
       <ul className="channel-list">
         {items?.map((c) => (
           <ChannelCard key={c.id} c={c} />

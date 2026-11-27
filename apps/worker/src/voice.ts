@@ -1,8 +1,11 @@
 import { spawn } from 'node:child_process';
-import { decryptCredentials } from '@zenith/core';
-import { downloadWhatsAppMedia, WHATSAPP_AUDIO_MIME_TYPES, WHATSAPP_MAX_AUDIO_BYTES } from '@zenith/channel-whatsapp';
+import { WHATSAPP_AUDIO_MIME_TYPES, WHATSAPP_MAX_AUDIO_BYTES } from '@zenith/channel-whatsapp';
+import { downloadCustomerMedia } from '@zenith/channel-meta';
 import { transcribeVoiceNote, type HistoryMessage, type LlmClient, type ModelAudio } from '@zenith/brain';
-import type { ChannelAccountCreds, CustomerMediaDeps } from './customer-images.js';
+import { mediaAccess, type ChannelAccountCreds, type CustomerMediaDeps } from './customer-images.js';
+
+/** Audios de WhatsApp, más los que llegan de Messenger e Instagram (mp4/aac, wav). */
+const VOICE_MIME_TYPES: ReadonlySet<string> = new Set([...WHATSAPP_AUDIO_MIME_TYPES, 'audio/x-m4a', 'audio/wav', 'audio/x-wav', 'video/mp4']);
 
 /** Transcripción de notas de voz. Sin esto, el bot le pide al cliente que escriba. */
 export interface VoiceDeps {
@@ -68,34 +71,21 @@ export async function transcribeVoiceNotes(
   media: CustomerMediaDeps,
   voice: VoiceDeps,
   account: ChannelAccountCreds,
-  pending: (HistoryMessage & { id: string; externalMediaId: string | null })[],
+  pending: (HistoryMessage & { id: string; externalMediaId: string | null; mediaUrl?: string | null })[],
 ): Promise<Map<string, string>> {
   const out = new Map<string, string>();
-  if (!pending.length || account.channel !== 'whatsapp' || !account.credentialsEnc) return out;
-  let accessToken: string;
-  try {
-    const creds = JSON.parse(decryptCredentials(account.credentialsEnc, media.masterKey, account.channelAccountId)) as { accessToken?: string };
-    if (!creds.accessToken) return out;
-    accessToken = creds.accessToken;
-  } catch {
-    media.log?.('no se pudieron leer las credenciales para bajar audios', { channelAccountId: account.channelAccountId });
-    return out;
-  }
+  if (!pending.length) return out;
+  const access = mediaAccess(media, account);
+  if (!access) return out;
 
   for (const m of pending) {
-    if (!m.externalMediaId) continue;
-    const file = await downloadWhatsAppMedia(
-      {
-        graphApiVersion: media.graphApiVersion,
-        accessToken,
-        maxBytes: WHATSAPP_MAX_AUDIO_BYTES,
-        allowedMimeTypes: WHATSAPP_AUDIO_MIME_TYPES,
-        timeoutMs: 20_000,
-        ...(media.graphBaseUrl ? { graphBaseUrl: media.graphBaseUrl } : {}),
-        ...(media.fetch ? { fetch: media.fetch } : {}),
-      },
-      m.externalMediaId,
-    ).catch((err: Error) => ({ ok: false as const, message: err.message }));
+    if (!m.externalMediaId && !m.mediaUrl) continue;
+    const file = await downloadCustomerMedia(
+      access,
+      { externalMediaId: m.externalMediaId ?? '', ...(m.mediaUrl ? { url: m.mediaUrl } : {}) },
+      // Messenger e Instagram mandan los audios como mp4/aac o similares; se aceptan los mismos.
+      { maxBytes: WHATSAPP_MAX_AUDIO_BYTES, allowedMimeTypes: VOICE_MIME_TYPES, timeoutMs: 20_000 },
+    );
     if (!file.ok) {
       media.log?.('no se pudo bajar una nota de voz', { messageId: m.id, error: file.message });
       continue;

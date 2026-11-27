@@ -62,6 +62,10 @@ export interface Message {
   sentBy: string | null;
   delivery: string | null;
   imageId: string | null;
+  /** Archivo del mensaje (del asesor o del cliente): se abre desde `url`. */
+  file: { url: string; name: string | null; mimeType: string | null; mediaType: string } | null;
+  editedAt: string | null;
+  deletedAt: string | null;
   /** Mensaje de seguimiento automático: 1 = del bot, 2 = plantilla. */
   followup: 1 | 2 | null;
   at: string;
@@ -124,6 +128,8 @@ export interface ChannelStatus {
   history: { status: 'importing' | 'done' | 'declined'; progress: number } | null;
   /** El número sigue en la app WhatsApp Business del teléfono. */
   coexistence: boolean;
+  /** Acceso a Meta: `invalid` si Meta rechazó el token; `expiresAt` si vence. */
+  token: { invalid: { at: string; error: string | null } | null; expiresAt: string | null };
   connectedAt: string;
 }
 
@@ -169,6 +175,27 @@ export const api = {
     request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/templates`, t),
   send: (id: string, text: string, clientId: string) =>
     request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/messages`, { text, clientId }),
+  sendFile: async (id: string, file: File, caption: string, clientId: string) => {
+    const form = new FormData();
+    // Los datos van antes del archivo: así la API los lee sin guardar el archivo en memoria dos veces.
+    if (caption.trim()) form.append('caption', caption.trim());
+    form.append('clientId', clientId);
+    form.append('file', file, file.name);
+    let res: Response;
+    try {
+      res = await fetch(`/api/v1/conversations/${encodeURIComponent(id)}/files`, {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json', 'x-zenith-csrf': '1' },
+        body: form,
+      });
+    } catch {
+      throw new ApiError(0, 'network', 'No hay conexión con el servidor');
+    }
+    const data = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
+    if (!res.ok) throw new ApiError(res.status, data?.error?.code ?? 'error', data?.error?.message ?? `Error ${res.status}`);
+    return data as { ok: true };
+  },
   finish: (id: string, action: 'release' | 'close') => request<{ ok: true }>('POST', `/conversations/${encodeURIComponent(id)}/finish`, { action }),
   contacts: (filters: { q?: string; tag?: string }) => {
     const params = new URLSearchParams();

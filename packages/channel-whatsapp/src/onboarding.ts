@@ -77,11 +77,20 @@ function requireId(step: WhatsAppOnboardingError['step'], value: string, name: s
   if (!ID_RE.test(value)) throw new WhatsAppOnboardingError(step, `${name} inválido`);
 }
 
+export interface SignupToken {
+  accessToken: string;
+  /**
+   * Cuándo vence. Según Meta, el token de integración de negocio no vence salvo que la
+   * configuración del registro pida 60 días; en ese caso llega `expires_in` (segundos).
+   */
+  expiresAt: Date | null;
+}
+
 /** Canjea el código del registro por el token de negocio del cliente. */
 export async function exchangeSignupCode(
   config: GraphConfig,
-  opts: { appId: string; appSecret: string; code: string },
-): Promise<string> {
+  opts: { appId: string; appSecret: string; code: string; now?: Date },
+): Promise<SignupToken> {
   if (!opts.appId || !opts.appSecret) throw new WhatsAppOnboardingError('code', 'Faltan META_APP_ID o META_APP_SECRET');
   const data = await call(
     config,
@@ -90,7 +99,14 @@ export async function exchangeSignupCode(
     { method: 'GET' },
   );
   if (typeof data.access_token !== 'string' || !data.access_token) throw new WhatsAppOnboardingError('code', 'Meta no devolvió el token');
-  return data.access_token;
+  const seconds = typeof data.expires_in === 'number' ? data.expires_in : Number(data.expires_in);
+  const expiresAt = Number.isFinite(seconds) && seconds > 0 ? new Date((opts.now ?? new Date()).getTime() + seconds * 1000) : null;
+  return { accessToken: data.access_token, expiresAt };
+}
+
+/** ¿El error de Meta dice que el token venció o fue revocado? */
+export function isMetaAuthError(err: unknown): boolean {
+  return err instanceof WhatsAppOnboardingError && err.errorCode !== undefined && (err.errorCode === 0 || err.errorCode === 190);
 }
 
 export interface PhoneInfo {

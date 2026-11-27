@@ -8,6 +8,8 @@ export interface HistoryMessage {
   author: 'customer' | 'bot' | 'agent' | 'system';
   type: string;
   body: string | null;
+  /** Nombre del documento que mandó el cliente, si lo trae. */
+  fileName?: string | null;
 }
 
 /** Foto del cliente lista para el modelo (JPEG en base64). */
@@ -20,12 +22,19 @@ const MEDIA_LABEL: Record<string, string> = {
   image:
     '[El cliente envió una foto hace rato, que ya no tienes a la vista. Si la necesitas, pídale con naturalidad que se la vuelva a mandar.]',
   audio: '[El cliente envió una nota de voz que no se pudo transcribir. Pídale con amabilidad que la repita o que la escriba.]',
-  video: '[El cliente envió un video que no puedes ver.]',
-  document: '[El cliente envió un documento que no puedes abrir.]',
+  video:
+    '[El cliente envió un video que no se pudo ver. Si parece importante, pídale con naturalidad que cuente qué muestra o que mande una foto.]',
+  document:
+    '[El cliente envió un documento que no puedes abrir. Si parece una lista de materiales, un plano o una cotización, ofrécele que un asesor lo revise.]',
   sticker: '[El cliente envió un sticker.]',
 };
 
 const IMAGE_INTRO = '[El cliente envió esta foto:]';
+const VIDEO_INTRO = '[El cliente envió un video; esta es una imagen tomada del video:]';
+const DOCUMENT_IMAGE_INTRO = '[El cliente envió esta imagen como documento:]';
+
+/** Tipos de mensaje del cliente que el modelo puede ver como imagen (el video, por un cuadro). */
+export const VISUAL_TYPES: ReadonlySet<string> = new Set(['image', 'video', 'document']);
 
 /** Cómo ve el modelo una foto que ya le mandó el negocio al cliente. */
 export const PHOTO_SENT_PREFIX = '[Foto enviada al cliente: ';
@@ -84,12 +93,14 @@ export function toModelMessages(
     if (described) {
       blocks.push({ type: 'text', text: described });
     } else if (m.direction === 'in' && m.type !== 'text') {
-      const image = m.type === 'image' && m.id ? images?.get(m.id) : undefined;
+      const image = VISUAL_TYPES.has(m.type) && m.id ? images?.get(m.id) : undefined;
       if (image) {
-        blocks.push({ type: 'text', text: IMAGE_INTRO });
+        blocks.push({ type: 'text', text: m.type === 'video' ? VIDEO_INTRO : m.type === 'document' ? DOCUMENT_IMAGE_INTRO : IMAGE_INTRO });
         blocks.push({ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.base64 } });
       } else {
-        blocks.push({ type: 'text', text: MEDIA_LABEL[m.type] ?? '[Mensaje no compatible]' });
+        const label = MEDIA_LABEL[m.type] ?? '[Mensaje no compatible]';
+        const name = m.type === 'document' && m.fileName?.trim() ? ` (archivo: ${m.fileName.trim().slice(0, 120)})` : '';
+        blocks.push({ type: 'text', text: name ? label.replace(/\]$/, `${name}]`) : label });
       }
     }
     if (m.direction === 'out' && m.type === 'image') {
@@ -133,12 +144,12 @@ export function pendingCustomerImages(history: HistoryMessage[], max = 3, lookba
   for (; i >= 0; i--) {
     const m = history[i]!;
     if (m.direction === 'out' && m.author !== 'system') break;
-    if (m.direction === 'in' && m.type === 'image' && m.id) out.unshift(m);
+    if (m.direction === 'in' && VISUAL_TYPES.has(m.type) && m.id) out.unshift(m);
   }
   if (out.length < max) {
     for (let j = i; j >= Math.max(0, history.length - lookback); j--) {
       const m = history[j]!;
-      if (m.direction === 'in' && m.type === 'image' && m.id) {
+      if (m.direction === 'in' && VISUAL_TYPES.has(m.type) && m.id) {
         out.unshift(m);
         break;
       }

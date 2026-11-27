@@ -31,16 +31,57 @@ const DELIVERY_LABELS: Record<string, string> = {
 /** Coordenadas al final del texto de una ubicación: "… (7.76690, -72.22500)". */
 const COORDS = /\((-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)\)$|^(-?\d+(?:\.\d+)?), (-?\d+(?:\.\d+)?)$/;
 
+/** Lo que acepta el botón de adjuntar; la API revisa el tipo real y lo que admite cada canal. */
+const ATTACH_ACCEPT = 'image/jpeg,image/png,video/mp4,video/3gpp,application/pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt';
+const ATTACH_MAX_BYTES = 16 * 1024 * 1024;
+
+/** Foto, video, audio o documento de un mensaje. Los del cliente se piden a Meta al abrirlos. */
+function FileView({ f, caption }: { f: NonNullable<Message['file']>; caption: string | null }) {
+  const [broken, setBroken] = useState(false);
+  const text = caption?.trim() || null;
+  if (broken) return <p className="muted">[El archivo ya no está disponible en Meta]{text ? ` ${text}` : ''}</p>;
+  if (f.mediaType === 'image' || f.mediaType === 'sticker') {
+    return (
+      <figure>
+        <img src={f.url} alt={text ?? 'Foto'} loading="lazy" onError={() => setBroken(true)} />
+        {text && <figcaption>{text}</figcaption>}
+      </figure>
+    );
+  }
+  if (f.mediaType === 'video') {
+    return (
+      <figure>
+        <video src={f.url} controls preload="metadata" onError={() => setBroken(true)} />
+        {text && <figcaption>{text}</figcaption>}
+      </figure>
+    );
+  }
+  return (
+    <figure>
+      <a className="file-link" href={f.url} target="_blank" rel="noopener noreferrer">
+        {Icon.file}
+        <span>{f.name ?? 'Documento'}</span>
+      </a>
+      {text && <figcaption>{text}</figcaption>}
+    </figure>
+  );
+}
+
 /** Lo que manda el cliente que no es texto: nota de voz transcrita, ubicación, contactos, archivos. */
 function CustomerMedia({ m }: { m: Message }) {
   const body = m.body?.trim() ?? '';
   if (m.type === 'audio') {
-    return body ? (
-      <p>
-        <span className="muted">[Nota de voz, transcrita]</span> {body}
-      </p>
-    ) : (
-      <p className="muted">[Nota de voz del cliente: no se pudo transcribir]</p>
+    return (
+      <>
+        {body ? (
+          <p>
+            <span className="muted">[Nota de voz, transcrita]</span> {body}
+          </p>
+        ) : (
+          <p className="muted">[Nota de voz del cliente: no se pudo transcribir]</p>
+        )}
+        {m.file && <audio src={m.file.url} controls preload="none" />}
+      </>
     );
   }
   if (m.type === 'location') {
@@ -92,11 +133,15 @@ function Bubble({ m, fresh }: { m: Message; fresh: boolean }) {
       transition={{ type: 'spring', stiffness: 520, damping: 32 }}
     >
       {who && <span className="who">{who}</span>}
-      {m.type === 'image' && m.imageId ? (
+      {m.deletedAt ? (
+        <p className="muted deleted">{m.direction === 'in' ? 'El cliente eliminó este mensaje' : 'Mensaje eliminado'}</p>
+      ) : m.type === 'image' && m.imageId ? (
         <figure>
           <img src={`/api/v1/product-images/${m.imageId}`} alt={m.body ?? 'Foto del producto'} loading="lazy" />
           {m.body && <figcaption>{m.body}</figcaption>}
         </figure>
+      ) : m.file && m.type !== 'audio' ? (
+        <FileView f={m.file} caption={m.body} />
       ) : m.type !== 'text' && m.author === 'agent' && !m.sentBy ? (
         <p className="muted">[{m.type === 'image' ? 'Foto' : m.type === 'audio' ? 'Nota de voz' : m.type === 'video' ? 'Video' : 'Archivo'} enviado desde el teléfono]{m.body ? ` ${m.body}` : ''}</p>
       ) : m.direction === 'in' && m.type !== 'text' ? (
@@ -105,6 +150,7 @@ function Bubble({ m, fresh }: { m: Message; fresh: boolean }) {
         <p>{m.body}</p>
       )}
       <span className="meta" title={m.direction === 'out' && m.delivery ? (DELIVERY_LABELS[m.delivery] ?? m.delivery) : undefined}>
+        {m.editedAt && !m.deletedAt && <span>editado ·</span>}
         {clock(m.at)}
         {m.direction === 'out' && m.delivery && <Ticks state={m.delivery} />}
         {m.direction === 'out' && (m.delivery === 'failed' || m.delivery === 'blocked_window') && <span>{DELIVERY_LABELS[m.delivery]}</span>}
@@ -132,6 +178,8 @@ export function Conversation({
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [text, setText] = useState('');
+  const [file, setFile] = useState<File | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [, setNow] = useState(Date.now());
   const listRef = useRef<HTMLDivElement>(null);
@@ -178,7 +226,9 @@ export function Conversation({
   const mine = data.assignedTo?.id === me.id;
   const otherAgent = data.assignedTo && !mine;
   const windowLeft = remaining(data.window.expiresAt);
-  const canWrite = mine && data.window.state === 'FREE';
+  const metaChannel = data.channel === 'messenger' || data.channel === 'instagram';
+  // Messenger e Instagram: entre 24 h y 7 días solo responde una persona (etiqueta Human Agent).
+  const canWrite = mine && (data.window.state === 'FREE' || (metaChannel && data.window.state === 'HUMAN_AGENT_ONLY'));
 
   const act = async (fn: () => Promise<unknown>, done?: string) => {
     setBusy(true);
@@ -197,13 +247,26 @@ export function Conversation({
   const send = async (e?: FormEvent) => {
     e?.preventDefault();
     const body = text.trim();
-    if (!body || !canWrite) return;
+    if ((!body && !file) || !canWrite) return;
     const clientId = crypto.randomUUID();
     await act(async () => {
-      await api.send(id, body, clientId);
+      if (file) await api.sendFile(id, file, body, clientId);
+      else await api.send(id, body, clientId);
       setText('');
+      setFile(null);
       playSound('sent');
     });
+  };
+
+  const pickFile = (f: File | undefined) => {
+    if (fileRef.current) fileRef.current.value = '';
+    if (!f) return;
+    if (f.size > ATTACH_MAX_BYTES) {
+      setNotice('El archivo pesa más de 16 MB. Comprímelo o mándalo por otro medio.');
+      return;
+    }
+    setNotice(null);
+    setFile(f);
   };
 
   const onKey = (e: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -221,8 +284,10 @@ export function Conversation({
 
   let composerHint: string | null = null;
   if (!mine) composerHint = otherAgent ? `Esta conversación la atiende ${data.assignedTo!.name}.` : 'Toma la conversación para responder.';
-  // Ventana cerrada: el asesor escribe con una plantilla aprobada (TemplateComposer).
-  const needsTemplate = mine && data.window.state !== 'FREE';
+  else if (metaChannel && !canWrite) composerHint = 'Pasaron más de 7 días desde el último mensaje del cliente: Meta no deja escribirle hasta que vuelva a escribir.';
+  // Ventana cerrada en WhatsApp: el asesor escribe con una plantilla aprobada (TemplateComposer).
+  const needsTemplate = mine && data.channel === 'whatsapp' && data.window.state !== 'FREE';
+  const channelName = CHANNEL_LABELS[data.channel] ?? data.channel;
 
   return (
     <section className="conversation" aria-label={`Conversación con ${data.contact.name}`}>
@@ -282,13 +347,15 @@ export function Conversation({
       <div className="window-line">
         {data.window.state === 'FREE' && windowLeft ? (
           <>
-            <span>Ventana de WhatsApp abierta: quedan <b>{windowLeft}</b> para responder con texto libre.</span>
+            <span>Ventana de {channelName} abierta: quedan <b>{windowLeft}</b> para responder con texto libre.</span>
             <span className="window-bar" aria-hidden="true">
               <i style={{ width: `${Math.max(2, Math.min(100, ((new Date(data.window.expiresAt!).getTime() - Date.now()) / WINDOW_MS) * 100))}%` }} />
             </span>
           </>
+        ) : data.window.state === 'HUMAN_AGENT_ONLY' ? (
+          <span className="warn">Pasaron 24 h: el bot ya no puede escribir, pero tú sí puedes responder hasta 7 días después del último mensaje del cliente.</span>
         ) : (
-          <span className="warn">Ventana de 24 h cerrada.</span>
+          <span className="warn">Ventana de {metaChannel ? '7 días' : '24 h'} cerrada.</span>
         )}
       </div>
 
@@ -336,21 +403,43 @@ export function Conversation({
           <p className="muted small hint">{composerHint}</p>
         ) : (
           <>
-            <textarea
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              onKeyDown={onKey}
-              placeholder="Escribe tu respuesta… (Enter envía, Shift+Enter nueva línea)"
-              maxLength={4096}
-              rows={2}
-              aria-label="Respuesta al cliente"
-            />
+            <input ref={fileRef} type="file" accept={ATTACH_ACCEPT} hidden onChange={(e) => pickFile(e.target.files?.[0])} />
+            <button
+              className="icon-btn attach"
+              type="button"
+              disabled={busy || !canWrite}
+              onClick={() => fileRef.current?.click()}
+              aria-label="Adjuntar foto, video o documento"
+              title="Adjuntar foto, video o documento"
+            >
+              {Icon.clip}
+            </button>
+            <div className="composer-body">
+              {file && (
+                <span className="chip attach-chip">
+                  {Icon.file}
+                  <span className="name">{file.name}</span>
+                  <button type="button" onClick={() => setFile(null)} aria-label="Quitar el archivo">
+                    {Icon.close}
+                  </button>
+                </span>
+              )}
+              <textarea
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={onKey}
+                placeholder={file ? 'Texto que acompaña al archivo (opcional)' : 'Escribe tu respuesta… (Enter envía, Shift+Enter nueva línea)'}
+                maxLength={file ? 1024 : 4096}
+                rows={2}
+                aria-label="Respuesta al cliente"
+              />
+            </div>
             <motion.button
               className="btn primary"
               type="submit"
-              disabled={busy || !text.trim() || !canWrite}
+              disabled={busy || (!text.trim() && !file) || !canWrite}
               whileTap={{ scale: 0.92 }}
-              animate={{ opacity: text.trim() ? 1 : 0.55 }}
+              animate={{ opacity: text.trim() || file ? 1 : 0.55 }}
             >
               Enviar {Icon.send}
             </motion.button>

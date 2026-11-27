@@ -8,7 +8,8 @@ import {
   subscribeAppToWaba,
   verifyMetaSignature,
 } from '@zenith/channel-whatsapp';
-import { buildSimulator } from '../src/server.js';
+import { parseMetaMessagingWebhook } from '@zenith/channel-meta';
+import { buildSimulator, SIM_INSTAGRAM_ID, SIM_PAGE_ID } from '../src/server.js';
 
 const SECRET = 'secreto-simulador';
 const PHONE = '100000000000001';
@@ -245,7 +246,8 @@ describe('simulador: conexión del número (registro insertado)', () => {
       return new Response(res.body, { status: res.statusCode, headers: { 'content-type': 'application/json' } });
     };
     const graph = { graphApiVersion: 'v27.0', graphBaseUrl: 'http://localhost:4010', fetch: viaSim };
-    const token = await exchangeSignupCode(graph, { appId: 'simulador', appSecret: 's', code: 'simulador' });
+    const { accessToken: token, expiresAt } = await exchangeSignupCode(graph, { appId: 'simulador', appSecret: 's', code: 'simulador' });
+    expect(expiresAt).toBeNull();
     expect(token).toMatch(/^SIM-TOKEN-/);
     expect(await getPhoneInfo(graph, token, PHONE)).toMatchObject({ isOnBizApp: true, verifiedName: 'Simulador IMM' });
     await subscribeAppToWaba(graph, token, '100000000000999');
@@ -283,5 +285,83 @@ describe('simulador: leído y escribiendo', () => {
     const bad = await read('wamid.NO-EXISTE');
     expect(bad.statusCode).toBe(400);
     expect(bad.json().error.code).toBe(131009);
+  });
+});
+
+describe('simulador: Messenger e Instagram', () => {
+  it('el cliente de Messenger escribe: el webhook va firmado a la URL de Messenger con la forma de Meta', async () => {
+    const { app, sent } = setup();
+    const res = await app.inject({ method: 'POST', url: '/api/send', payload: { from: '24680135791', name: 'Laura Pérez', text: 'Hola', channel: 'messenger' } });
+    expect(res.statusCode).toBe(200);
+    expect(sent[0]!.url).toBe('http://localhost:3000/webhooks/meta/messenger');
+    expect(verifyMetaSignature(Buffer.from(sent[0]!.body), sent[0]!.signature, SECRET)).toBe(true);
+    const [event] = parseMetaMessagingWebhook(JSON.parse(sent[0]!.body));
+    expect(event).toMatchObject({ channel: 'messenger', channelExternalAccountId: SIM_PAGE_ID, kind: 'message', from: { externalUserId: '24680135791' }, text: 'Hola' });
+  });
+
+  it('la foto del cliente de Instagram llega como url que el worker puede bajar', async () => {
+    const { app, sent } = setup();
+    const boundary = '----sim';
+    const body = Buffer.concat([
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="from"\r\n\r\n17840000001\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="name"\r\n\r\nLaura\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="channel"\r\n\r\ninstagram\r\n`),
+      Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="f.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`),
+      Buffer.from([0xff, 0xd8, 0xff, 0xe0]),
+      Buffer.from(`\r\n--${boundary}--\r\n`),
+    ]);
+    const res = await app.inject({ method: 'POST', url: '/api/send-image', headers: { 'content-type': `multipart/form-data; boundary=${boundary}`, host: 'localhost:4010' }, payload: body });
+    expect(res.statusCode).toBe(200);
+    expect(sent[0]!.url).toBe('http://localhost:3000/webhooks/meta/instagram');
+    const [event] = parseMetaMessagingWebhook(JSON.parse(sent[0]!.body));
+    expect(event!.media![0]).toMatchObject({ type: 'image' });
+    const url = new URL(event!.media![0]!.url!);
+    expect(url.origin).toBe('http://localhost:4010');
+    expect((await app.inject({ method: 'GET', url: url.pathname })).headers['content-type']).toBe('image/jpeg');
+  });
+
+  it('la página responde por la Send API: texto, Human Agent, "escribiendo…", entregas y perfil', async () => {
+    const { app, sent } = setup();
+    await app.inject({ method: 'POST', url: '/api/send', payload: { from: '24680135792', name: 'Laura Pérez', text: 'Hola', channel: 'messenger' } });
+    const page = (payload: object) => app.inject({ method: 'POST', url: `/v27.0/${SIM_PAGE_ID}/messages`, headers: { authorization: 'Bearer t' }, payload });
+
+    expect((await page({ recipient: { id: '24680135792' }, sender_action: 'typing_on' })).statusCode).toBe(200);
+    const res = await page({ recipient: { id: '24680135792' }, messaging_type: 'RESPONSE', message: { text: 'Buenas' } });
+    expect(res.statusCode).toBe(200);
+    expect(app.botMessages.at(-1)).toMatchObject({ to: '24680135792', text: 'Buenas', channel: 'messenger' });
+    await vi.waitFor(() => expect(sent).toHaveLength(2));
+    expect(parseMetaMessagingWebhook(JSON.parse(sent[1]!.body))[0]).toMatchObject({ kind: 'status', status: { externalMessageId: res.json().message_id, state: 'delivered' } });
+
+    expect((await page({ recipient: { id: '24680135792' }, messaging_type: 'MESSAGE_TAG', tag: 'HUMAN_AGENT', message: { text: 'Le escribo yo' } })).statusCode).toBe(200);
+    expect((await page({ recipient: { id: '24680135792' }, messaging_type: 'MESSAGE_TAG', tag: 'ACCOUNT_UPDATE', message: { text: 'x' } })).statusCode).toBe(400);
+    expect((await page({ recipient: { id: '999' }, message: { text: 'x' } })).statusCode).toBe(400);
+
+    const profile = await app.inject({ method: 'GET', url: '/v27.0/24680135792?fields=first_name,last_name', headers: { authorization: 'Bearer t' } });
+    expect(profile.json()).toMatchObject({ first_name: 'Laura', last_name: 'Pérez' });
+    const info = await app.inject({ method: 'GET', url: `/v27.0/${SIM_PAGE_ID}?fields=name`, headers: { authorization: 'Bearer t' } });
+    expect(info.json()).toMatchObject({ name: 'Simulador IMM', instagram_business_account: { id: SIM_INSTAGRAM_ID } });
+  });
+
+  it('WhatsApp recibe documentos y videos del asesor', async () => {
+    const { app } = setup();
+    const boundary = '----up';
+    const upload = await app.inject({
+      method: 'POST',
+      url: `/v21.0/${PHONE}/media`,
+      headers: { authorization: 'Bearer t', 'content-type': `multipart/form-data; boundary=${boundary}` },
+      payload: Buffer.concat([
+        Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="cotizacion.pdf"\r\nContent-Type: application/pdf\r\n\r\n%PDF-1.4`),
+        Buffer.from(`\r\n--${boundary}--\r\n`),
+      ]),
+    });
+    expect(upload.statusCode).toBe(200);
+    const res = await app.inject({
+      method: 'POST',
+      url: `/v21.0/${PHONE}/messages`,
+      headers: { authorization: 'Bearer t' },
+      payload: { messaging_product: 'whatsapp', to: '584141234567', type: 'document', document: { id: upload.json().id, filename: 'cotizacion.pdf', caption: 'Su cotización' } },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(app.botMessages.at(-1)).toMatchObject({ text: 'Su cotización', file: { name: 'cotizacion.pdf', kind: 'document' } });
   });
 });

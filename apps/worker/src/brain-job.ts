@@ -1,5 +1,6 @@
 import { decryptCredentials, outboundIdempotencyKey, type BrainJobData, type Channel } from '@zenith/core';
 import { markWhatsAppRead } from '@zenith/channel-whatsapp';
+import { getMetaProfile, sendMetaSenderAction } from '@zenith/channel-meta';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 import {
   buildSystemPrompt,
@@ -77,7 +78,8 @@ interface Snapshot {
   /** phone_number_id del canal y wamid del mensaje que dispara el turno (para "leído"). */
   externalAccountId: string;
   triggerExternalId: string | null;
-  history: (HistoryMessage & { external_media_id: string | null })[];
+  contactId: string;
+  history: (HistoryMessage & { external_media_id: string | null; media_url: string | null; mime_type: string | null })[];
 }
 
 const REPLY_STEP = 'reply';
@@ -111,8 +113,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       credentials_enc: Buffer | null;
       recipient: string | null;
       customer_name: string | null;
+      contact_id: string;
     }>(
-      `SELECT c.mode, c.status, ca.channel, ca.id AS channel_account_id, ca.external_account_id, ca.credentials_enc,
+      `SELECT c.mode, c.status, ca.channel, ca.id AS channel_account_id, ca.external_account_id, ca.credentials_enc, c.contact_id,
               (SELECT ct.name FROM contacts ct WHERE ct.id = c.contact_id) AS customer_name,
               (SELECT ci.external_user_id FROM contact_identities ci
                 WHERE ci.contact_id = c.contact_id AND ci.channel = ca.channel LIMIT 1) AS recipient
@@ -133,10 +136,13 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     const tenant = await client.query<{ settings: unknown; timezone: string }>('SELECT settings, timezone FROM tenants WHERE id = $1', [
       job.tenantId,
     ]);
-    const history = await client.query<HistoryMessage & { external_media_id: string | null }>(
-      `SELECT id, direction, author, type, body, external_media_id FROM (
-         SELECT id, direction, author, type, body, seq, attachments->0->>'externalMediaId' AS external_media_id FROM messages
-          WHERE conversation_id = $1 ORDER BY seq DESC LIMIT $2) recent
+    const history = await client.query<Snapshot['history'][number]>(
+      `SELECT id, direction, author, type, body, external_media_id, media_url, mime_type, file_name AS "fileName" FROM (
+         SELECT id, direction, author, type, body, seq,
+                nullif(attachments->0->>'externalMediaId', '') AS external_media_id, attachments->0->>'url' AS media_url,
+                attachments->0->>'mimeType' AS mime_type, attachments->0->>'filename' AS file_name
+           FROM messages
+          WHERE conversation_id = $1 AND deleted_at IS NULL ORDER BY seq DESC LIMIT $2) recent
         ORDER BY seq`,
       [job.conversationId, deps.historyLimit ?? 30],
     );
@@ -156,6 +162,7 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       settings: tenant.rows[0]?.settings,
       timezone: tenant.rows[0]?.timezone ?? 'UTC',
       customerName: row.customer_name,
+      contactId: row.contact_id,
       history: history.rows,
     };
   });
@@ -171,8 +178,16 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
 
   const started = Date.now();
   // Como una persona que abre el chat: el cliente ve "leído" y "escribiendo…" mientras el bot piensa.
-  if (deps.media && snapshot.channel === 'whatsapp' && snapshot.triggerExternalId) {
+  if (deps.media && snapshot.triggerExternalId) {
     await markReadAndTyping(deps.media, snapshot);
+  }
+  // Messenger e Instagram no mandan el nombre del cliente en el webhook: se pide una vez.
+  if (deps.media && !snapshot.customerName && (snapshot.channel === 'messenger' || snapshot.channel === 'instagram')) {
+    const name = await lookupMetaName(deps.media, snapshot);
+    if (name) {
+      snapshot.customerName = name;
+      await withTenant(pool, job.tenantId, (c) => c.query('UPDATE contacts SET name = $2, updated_at = now() WHERE id = $1 AND name IS NULL', [snapshot.contactId, name]));
+    }
   }
   // Notas de voz pendientes: se transcriben y el texto queda guardado en el mensaje, así lo
   // ven el modelo, el panel y los turnos siguientes sin volver a escucharlas.
@@ -181,6 +196,7 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       ...m,
       id: m.id!,
       externalMediaId: (m as Snapshot['history'][number]).external_media_id,
+      mediaUrl: (m as Snapshot['history'][number]).media_url,
     }));
     const texts = await transcribeVoiceNotes(
       deps.media,
@@ -201,6 +217,8 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     const pending = pendingCustomerImages(snapshot.history).map((m) => ({
       ...m,
       externalMediaId: (m as Snapshot['history'][number]).external_media_id,
+      mediaUrl: (m as Snapshot['history'][number]).media_url,
+      mimeType: (m as Snapshot['history'][number]).mime_type,
     })) as PendingImage[];
     images = await loadCustomerImages(
       deps.media,
@@ -417,26 +435,50 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
 
 class AlreadyAnsweredError extends Error {}
 
+function accountCreds(media: CustomerMediaDeps, snapshot: Snapshot): { accessToken: string; pageId?: string } | null {
+  if (!snapshot.credentialsEnc) return null;
+  try {
+    const creds = JSON.parse(decryptCredentials(snapshot.credentialsEnc, media.masterKey, snapshot.channelAccountId)) as { accessToken?: string; pageId?: string };
+    return creds.accessToken ? { accessToken: creds.accessToken, ...(creds.pageId ? { pageId: creds.pageId } : {}) } : null;
+  } catch {
+    return null;
+  }
+}
+
+const graphOf = (media: CustomerMediaDeps) => ({
+  graphApiVersion: media.graphApiVersion,
+  timeoutMs: 5_000,
+  ...(media.graphBaseUrl ? { graphBaseUrl: media.graphBaseUrl } : {}),
+  ...(media.fetch ? { fetch: media.fetch } : {}),
+});
+
 /** "Leído" + "escribiendo…". Si falla, se sigue: no debe demorar ni impedir la respuesta. */
 async function markReadAndTyping(media: CustomerMediaDeps, snapshot: Snapshot): Promise<void> {
-  if (!snapshot.credentialsEnc || !snapshot.triggerExternalId) return;
+  if (!snapshot.triggerExternalId) return;
+  const creds = accountCreds(media, snapshot);
+  if (!creds) return;
   try {
-    const creds = JSON.parse(decryptCredentials(snapshot.credentialsEnc, media.masterKey, snapshot.channelAccountId)) as { accessToken?: string };
-    if (!creds.accessToken) return;
-    const res = await markWhatsAppRead(
-      {
-        graphApiVersion: media.graphApiVersion,
-        phoneNumberId: snapshot.externalAccountId,
-        accessToken: creds.accessToken,
-        timeoutMs: 5_000,
-        ...(media.graphBaseUrl ? { graphBaseUrl: media.graphBaseUrl } : {}),
-        ...(media.fetch ? { fetch: media.fetch } : {}),
-      },
-      snapshot.triggerExternalId,
-      { typing: true },
-    );
-    if (!res.ok) media.log?.('no se pudo marcar como leído', { error: res.message });
+    if (snapshot.channel === 'whatsapp') {
+      const res = await markWhatsAppRead(
+        { ...graphOf(media), phoneNumberId: snapshot.externalAccountId, accessToken: creds.accessToken },
+        snapshot.triggerExternalId,
+        { typing: true },
+      );
+      if (!res.ok) media.log?.('no se pudo marcar como leído', { error: res.message });
+    } else if (snapshot.channel === 'messenger' || snapshot.channel === 'instagram') {
+      const pageId = snapshot.channel === 'messenger' ? snapshot.externalAccountId : creds.pageId;
+      if (!pageId) return;
+      const config = { ...graphOf(media), pageId, accessToken: creds.accessToken, channel: snapshot.channel as 'messenger' | 'instagram' };
+      await sendMetaSenderAction(config, snapshot.recipient, 'mark_seen');
+      await sendMetaSenderAction(config, snapshot.recipient, 'typing_on');
+    }
   } catch (err) {
     media.log?.('no se pudo marcar como leído', { error: (err as Error).message });
   }
+}
+
+async function lookupMetaName(media: CustomerMediaDeps, snapshot: Snapshot): Promise<string | null> {
+  const creds = accountCreds(media, snapshot);
+  if (!creds) return null;
+  return getMetaProfile(graphOf(media), creds.accessToken, snapshot.channel as 'messenger' | 'instagram', snapshot.recipient);
 }

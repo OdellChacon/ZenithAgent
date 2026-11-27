@@ -116,3 +116,49 @@ describe('salud', () => {
     expect((await app.inject({ method: 'GET', url: '/healthz' })).statusCode).toBe(200);
   });
 });
+
+describe('Messenger e Instagram', () => {
+  const page = (object: 'page' | 'instagram', mid: string) => ({
+    object,
+    entry: [{ id: '111222333', time: 1764200000000, messaging: [{ sender: { id: '999' }, recipient: { id: '111222333' }, timestamp: 1764200000000, message: { mid, text: 'Hola' } }] }],
+  });
+  const postTo = (app: ReturnType<typeof setup>['app'], channel: string, body: unknown, secret = SECRET) => {
+    const raw = JSON.stringify(body);
+    return app.inject({
+      method: 'POST',
+      url: `/webhooks/meta/${channel}`,
+      headers: { 'content-type': 'application/json', 'x-hub-signature-256': signMetaPayload(raw, secret) },
+      payload: raw,
+    });
+  };
+
+  it('Meta verifica cada webhook en su propia URL de callback', async () => {
+    const { app } = setup();
+    for (const channel of ['whatsapp', 'messenger', 'instagram']) {
+      const res = await app.inject({ method: 'GET', url: `/webhooks/meta/${channel}?hub.mode=subscribe&hub.verify_token=${VERIFY}&hub.challenge=777` });
+      expect(res.statusCode).toBe(200);
+      expect(res.body).toBe('777');
+    }
+    expect((await app.inject({ method: 'GET', url: `/webhooks/meta/tiktok?hub.mode=subscribe&hub.verify_token=${VERIFY}&hub.challenge=1` })).statusCode).toBe(404);
+  });
+
+  it('guarda los mensajes de Messenger e Instagram con su canal', async () => {
+    const { app, saveEvent, enqueue } = setup();
+    expect((await postTo(app, 'messenger', page('page', 'm_1'))).statusCode).toBe(200);
+    expect((await postTo(app, 'instagram', page('instagram', 'ig_1'))).statusCode).toBe(200);
+    expect(saveEvent.mock.calls.map(([e]) => [e.channel, e.externalEventId])).toEqual([
+      ['messenger', 'msg:m_1'],
+      ['instagram', 'msg:ig_1'],
+    ]);
+    expect(enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it('rechaza firmas inválidas y un webhook mandado a la URL de otro canal', async () => {
+    const { app, saveEvent } = setup();
+    expect((await postTo(app, 'messenger', page('page', 'm_2'), 'otro-secreto')).statusCode).toBe(401);
+    expect((await postTo(app, 'instagram', page('page', 'm_3'))).statusCode).toBe(400);
+    expect((await postTo(app, 'messenger', textWebhook())).statusCode).toBe(400);
+    expect((await postTo(app, 'tiktok', page('page', 'm_4'))).statusCode).toBe(404);
+    expect(saveEvent).not.toHaveBeenCalled();
+  });
+});

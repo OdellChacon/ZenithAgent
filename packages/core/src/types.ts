@@ -7,7 +7,7 @@ export type Channel = (typeof CHANNELS)[number];
  * history: chats anteriores que Meta manda una sola vez al conectar un número que ya usaba
  * la app (coexistencia). account: aviso sobre la conexión del número (desconexión, etc.).
  */
-export type EventKind = 'message' | 'echo' | 'history' | 'account' | 'contact' | 'status' | 'unsupported';
+export type EventKind = 'message' | 'echo' | 'history' | 'account' | 'contact' | 'status' | 'edit' | 'unsupported';
 
 /** Un mensaje del historial importado. `fromBusiness`: lo mandó el negocio, no el cliente. */
 export interface HistoryMessage {
@@ -40,9 +40,14 @@ export type MediaType = 'image' | 'audio' | 'video' | 'document' | 'sticker';
 
 export interface MediaRef {
   type: MediaType;
+  /** Id del archivo en WhatsApp (se baja por Graph API con el token). En Messenger e Instagram, vacío. */
   externalMediaId: string;
+  /** Messenger e Instagram mandan la url del archivo en el CDN de Meta, no un id. */
+  url?: string;
   mimeType?: string;
   caption?: string;
+  /** Nombre del documento, si lo trae. */
+  filename?: string;
 }
 
 export type DeliveryState = 'sent' | 'delivered' | 'read' | 'failed';
@@ -81,6 +86,11 @@ export interface ParsedEvent {
    * add = se agregó o se editó; remove = se borró (no trae nombre).
    */
   contact?: { phone: string; fullName?: string; action: 'add' | 'remove' };
+  /**
+   * `kind = 'edit'`: alguien editó o borró un mensaje ya enviado. `byBusiness`: lo hizo el
+   * negocio desde la app (coexistencia); si no, el cliente. `text` es el texto nuevo.
+   */
+  edit?: { originalExternalMessageId: string; action: 'edit' | 'revoke'; byBusiness: boolean; text?: string };
   /** Tipo original cuando `kind = 'unsupported'` (ej. "location", "reaction"). */
   unsupportedType?: string;
 }

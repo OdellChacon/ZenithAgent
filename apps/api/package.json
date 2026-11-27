@@ -8,7 +8,9 @@
   },
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
+    "@fastify/multipart": "^9.4.0",
     "@fastify/static": "^10.1.12",
+    "@zenith/channel-meta": "*",
     "@zenith/channel-whatsapp": "*",
     "@zenith/core": "*",
     "@zenith/db": "*",

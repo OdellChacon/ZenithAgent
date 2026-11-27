@@ -4,7 +4,7 @@
  */
 import type { CSSProperties, ReactNode } from 'react';
 import {
-  ArrowLeft, Bell, Check, CheckCheck, ChevronDown, CircleAlert, Clock3, LogOut, MessagesSquare, Moon, Search,
+  ArrowLeft, Bell, Check, CheckCheck, ChevronDown, CircleAlert, Clock3, FileText, LogOut, MessagesSquare, Moon, Paperclip, Search, X,
   SendHorizontal, Sun, Tags, Users, Volume2, VolumeX, type LucideIcon,
 } from 'lucide-react';
 import { siFacebook, siInstagram, siMessenger, siTiktok, siWhatsapp, type SimpleIcon } from 'simple-icons';
@@ -79,6 +79,9 @@ export const Icon = {
   chats: icon(MessagesSquare),
   contacts: icon(Users),
   tags: icon(Tags),
+  clip: icon(Paperclip),
+  file: icon(FileText),
+  close: icon(X),
 };
 
 /** Estado de entrega estilo WhatsApp: reloj, un check, doble check (azul si se leyó) o alerta. */

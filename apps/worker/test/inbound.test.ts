@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type pg from 'pg';
 import { parseWhatsAppWebhook } from '@zenith/channel-whatsapp';
+import { parseMetaMessagingWebhook } from '@zenith/channel-meta';
 import { insertWebhookEvent, reclaimStaleWebhookEvents, withTenant, type Pool } from '@zenith/db';
 import { processInboundEvent } from '../src/inbound.js';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
@@ -476,6 +477,113 @@ describe.skipIf(!hasDb)('worker de entrada', () => {
       expect((await contactOf('584140000302')).name).toBe('Ferretería El Tornillo');
       const convs = await withTenant(app, t.tenantId, async (c) => (await c.query('SELECT 1 FROM conversations WHERE contact_id = $1', [out.contactId])).rowCount);
       expect(convs).toBe(0);
+    });
+  });
+
+  describe('ediciones y borrados', () => {
+    /** Mensaje de edición o borrado del cliente, como lo manda Meta. */
+    function change(type: 'edit' | 'revoke', original: string, from: string, text?: string) {
+      const payload = webhook({ from, timestamp: nowTs() });
+      const value = payload.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] };
+      const id = `wamid.CH${Date.now()}${++seq}`;
+      value.messages = [
+        type === 'edit'
+          ? { from, id, timestamp: nowTs(), type, edit: { original_message_id: original, message: { text: { body: text } } } }
+          : { from, id, timestamp: nowTs(), type, revoke: { original_message_id: original } },
+      ];
+      return payload;
+    }
+
+    it('aplica la edición del cliente al mensaje original sin despertar al bot', async () => {
+      const original = webhook({ from: '584140000301', timestamp: nowTs(), body: 'Necesito 10 cajas' });
+      const originalId = (original.entry[0]!.changes[0]!.value as { messages: { id: string }[] }).messages[0]!.id;
+      const [inId] = await ingest(original);
+      const m = await processInboundEvent(app, inId!);
+      if (m.result !== 'message') throw new Error('se esperaba un mensaje');
+
+      const [editId] = await ingest(change('edit', originalId, '584140000301', 'Necesito 12 cajas'));
+      expect(await processInboundEvent(app, editId!)).toEqual({ result: 'edited', tenantId: t.tenantId, conversationId: m.conversationId });
+      const row = await withTenant(app, t.tenantId, async (c) => (await c.query('SELECT body, edited_at, deleted_at FROM messages WHERE id = $1', [m.messageId])).rows[0]);
+      expect(row.body).toBe('Necesito 12 cajas');
+      expect(row.edited_at).not.toBeNull();
+      expect(row.deleted_at).toBeNull();
+
+      const [revokeId] = await ingest(change('revoke', originalId, '584140000301'));
+      expect(await processInboundEvent(app, revokeId!)).toMatchObject({ result: 'edited' });
+      const gone = await withTenant(app, t.tenantId, async (c) => (await c.query('SELECT body, deleted_at FROM messages WHERE id = $1', [m.messageId])).rows[0]);
+      expect(gone.body).toBeNull();
+      expect(gone.deleted_at).not.toBeNull();
+    });
+
+    it('aplica el borrado que hace el asesor desde la app y ignora cambios a mensajes que no están guardados', async () => {
+      const [echoId] = await ingest(echo({ to: '584140000302', id: 'wamid.ECHO-DEL' }));
+      await processInboundEvent(app, echoId!);
+      const revoke = echoWebhook([
+        { from: '584140000000', to: '584140000302', id: `wamid.R${Date.now()}`, timestamp: nowTs(), type: 'revoke', revoke: { original_message_id: 'wamid.ECHO-DEL' } },
+      ]);
+      (revoke.entry[0]!.changes[0]!.value as { metadata: { phone_number_id: string } }).metadata.phone_number_id = t.phoneNumberId;
+      const [rId] = await ingest(revoke);
+      expect(await processInboundEvent(app, rId!)).toMatchObject({ result: 'edited' });
+      const row = await withTenant(app, t.tenantId, async (c) => (await c.query(`SELECT deleted_at FROM messages WHERE external_message_id = 'wamid.ECHO-DEL'`)).rows[0]);
+      expect(row.deleted_at).not.toBeNull();
+
+      const [unknown] = await ingest(change('edit', 'wamid.NO-EXISTE', '584140000303', 'x'));
+      expect(await processInboundEvent(app, unknown!)).toEqual({ result: 'ignored', reason: 'edición de un mensaje que no está guardado' });
+    });
+  });
+
+  describe('Messenger e Instagram', () => {
+    let pageId: string;
+    beforeAll(async () => {
+      pageId = String(Date.now());
+      await owner.query(`INSERT INTO channel_accounts (tenant_id, channel, external_account_id) VALUES ($1, 'messenger', $2)`, [t.tenantId, pageId]);
+    });
+    afterAll(async () => {
+      await owner.query('DELETE FROM webhook_events WHERE channel_external_account_id = $1', [pageId]);
+    });
+
+    const page = (messaging: unknown[]) => ({ object: 'page', entry: [{ id: pageId, time: Date.now(), messaging }] });
+    async function ingestMeta(payload: unknown) {
+      const ids: string[] = [];
+      for (const e of parseMetaMessagingWebhook(payload)) {
+        const id = await insertWebhookEvent(app, e, payload);
+        if (id) ids.push(id);
+      }
+      return ids;
+    }
+
+    it('crea el contacto por su PSID (sin teléfono) y abre la ventana', async () => {
+      const [id] = await ingestMeta(page([{ sender: { id: '9001' }, recipient: { id: pageId }, timestamp: Date.now(), message: { mid: `m_${Date.now()}`, text: 'Hola' } }]));
+      const m = await processInboundEvent(app, id!);
+      if (m.result !== 'message') throw new Error('se esperaba un mensaje');
+      expect(m.mode).toBe('bot');
+      const contact = await withTenant(app, t.tenantId, async (c) =>
+        (await c.query(`SELECT ct.phone, ci.channel, ci.external_user_id FROM contacts ct JOIN contact_identities ci ON ci.contact_id = ct.id
+                         JOIN conversations cv ON cv.contact_id = ct.id WHERE cv.id = $1`, [m.conversationId])).rows[0],
+      );
+      expect(contact).toEqual({ phone: null, channel: 'messenger', external_user_id: '9001' });
+      expect((await conversation(m.conversationId)).window_expires_at).not.toBeNull();
+    });
+
+    it('una copia con el mismo texto que el sistema acaba de mandar no calla al bot; una escrita a mano sí', async () => {
+      const [id] = await ingestMeta(page([{ sender: { id: '9002' }, recipient: { id: pageId }, timestamp: Date.now(), message: { mid: `m_a${Date.now()}`, text: 'Precio?' } }]));
+      const m = await processInboundEvent(app, id!);
+      if (m.result !== 'message') throw new Error('se esperaba un mensaje');
+      await withTenant(app, t.tenantId, (c) =>
+        c.query(
+          `INSERT INTO outbound_messages (tenant_id, conversation_id, idempotency_key, channel, payload, status)
+           VALUES ($1, $2, $3, 'messenger', $4, 'sending')`,
+          [t.tenantId, m.conversationId, `k-meta-${Date.now()}`, JSON.stringify({ kind: 'text', text: 'El precio lo da un asesor.', to: '9002', author: 'bot' })],
+        ),
+      );
+      const echoOf = (mid: string, text: string) => page([{ sender: { id: pageId }, recipient: { id: '9002' }, timestamp: Date.now(), message: { mid, text, is_echo: true } }]);
+      const [own] = await ingestMeta(echoOf(`m_own${Date.now()}`, 'El precio lo da un asesor.'));
+      expect(await processInboundEvent(app, own!)).toEqual({ result: 'ignored', reason: 'copia de un mensaje enviado por la API' });
+      expect((await conversation(m.conversationId)).mode).toBe('bot');
+
+      const [manual] = await ingestMeta(echoOf(`m_man${Date.now()}`, 'Hola, soy Ana de la tienda'));
+      expect(await processInboundEvent(app, manual!)).toMatchObject({ result: 'agent_echo', conversationId: m.conversationId });
+      expect((await conversation(m.conversationId)).mode).toBe('human');
     });
   });
 });

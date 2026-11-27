@@ -10,7 +10,29 @@ const mediaSchema = z.object({
   id: z.string().min(1),
   mime_type: z.string().optional(),
   caption: z.string().optional(),
+  filename: z.string().optional(),
 });
+
+/**
+ * Edición o borrado de un mensaje ya enviado (tipos "edit" y "revoke"). Según Meta, el
+ * cliente puede editar dentro de 15 minutos y borrar dentro de 2 días; el negocio también
+ * desde la app (coexistencia). `message` trae el contenido nuevo con la forma de su tipo.
+ */
+const editSchema = z
+  .object({
+    original_message_id: z.string().min(1),
+    message: z
+      .object({
+        text: z.object({ body: z.string() }).partial().optional(),
+        image: z.object({ caption: z.string() }).partial().passthrough().optional(),
+        video: z.object({ caption: z.string() }).partial().passthrough().optional(),
+        document: z.object({ caption: z.string() }).partial().passthrough().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+const revokeSchema = z.object({ original_message_id: z.string().min(1) }).passthrough();
 
 const messageSchema = z
   .object({
@@ -46,6 +68,8 @@ const messageSchema = z
         list_reply: z.object({ id: z.string(), title: z.string() }).optional(),
       })
       .optional(),
+    edit: editSchema.optional(),
+    revoke: revokeSchema.optional(),
   })
   .passthrough();
 
@@ -86,6 +110,8 @@ const echoSchema = z
     video: mediaSchema.optional(),
     document: mediaSchema.optional(),
     sticker: mediaSchema.optional(),
+    edit: editSchema.optional(),
+    revoke: revokeSchema.optional(),
   })
   .passthrough();
 
@@ -219,15 +245,11 @@ function toMessageEvent(msg: WaMessage, phoneNumberId: string, displayName: stri
 
   if (msg.type === 'text' && msg.text) return { ...base, text: msg.text.body };
 
-  if ((MEDIA_TYPES as readonly string[]).includes(msg.type)) {
-    const media = msg[msg.type as MediaType];
-    if (media) {
-      const ref: MediaRef = { type: msg.type as MediaType, externalMediaId: media.id };
-      if (media.mime_type) ref.mimeType = media.mime_type;
-      if (media.caption) ref.caption = media.caption;
-      return { ...base, media: [ref], ...(media.caption ? { text: media.caption } : {}) };
-    }
-  }
+  const edit = toEdit(msg, `msg:${msg.id}`, false);
+  if (edit) return { ...base, ...edit };
+
+  const media = toMediaRefs(msg);
+  if (media) return { ...base, media, ...(media[0]!.caption ? { text: media[0]!.caption } : {}) };
 
   // Respuestas a botones de plantillas y mensajes interactivos: se tratan como texto.
   if (msg.type === 'button' && msg.button) return { ...base, text: msg.button.text };
@@ -262,6 +284,31 @@ function toMessageEvent(msg: WaMessage, phoneNumberId: string, displayName: stri
 
 const isCoordinate = (v: number | undefined, max: number) => typeof v === 'number' && Number.isFinite(v) && Math.abs(v) <= max;
 
+/** Si el mensaje es una edición o un borrado, los campos del evento `edit`; si no, null. */
+function toEdit(
+  msg: { type: string; edit?: z.infer<typeof editSchema>; revoke?: z.infer<typeof revokeSchema> },
+  eventId: string,
+  byBusiness: boolean,
+): Pick<ParsedEvent, 'kind' | 'edit' | 'externalEventId'> | null {
+  if (msg.type === 'revoke' && msg.revoke) {
+    return {
+      kind: 'edit',
+      externalEventId: `${eventId}:revoke`,
+      edit: { originalExternalMessageId: msg.revoke.original_message_id, action: 'revoke', byBusiness },
+    };
+  }
+  if (msg.type === 'edit' && msg.edit) {
+    const m = msg.edit.message;
+    const text = m?.text?.body ?? m?.image?.caption ?? m?.video?.caption ?? m?.document?.caption;
+    return {
+      kind: 'edit',
+      externalEventId: `${eventId}:edit`,
+      edit: { originalExternalMessageId: msg.edit.original_message_id, action: 'edit', byBusiness, ...(text !== undefined ? { text } : {}) },
+    };
+  }
+  return null;
+}
+
 type WaEcho = z.infer<typeof echoSchema>;
 
 function toEchoEvent(echo: WaEcho, phoneNumberId: string): ParsedEvent {
@@ -273,21 +320,16 @@ function toEchoEvent(echo: WaEcho, phoneNumberId: string): ParsedEvent {
     kind: 'echo',
     occurredAt: toIso(echo.timestamp),
   };
-  // Sin teléfono no se puede ubicar al cliente; editar o borrar no es un mensaje nuevo.
+  // Editar o borrar desde la app: se aplica al mensaje original (que ya ubica al cliente).
+  const edit = toEdit(echo, `echo:${echo.id}`, true);
+  if (edit) return { ...base, ...edit };
+  // Sin teléfono no se puede ubicar al cliente.
   if (!echo.to) return { ...base, kind: 'unsupported', unsupportedType: 'echo_sin_destinatario' };
-  if (echo.type === 'edit' || echo.type === 'revoke') return { ...base, kind: 'unsupported', unsupportedType: `echo_${echo.type}` };
 
   const withTo: ParsedEvent = { ...base, to: { externalUserId: echo.to, phone: echo.to } };
   if (echo.type === 'text' && echo.text) return { ...withTo, text: echo.text.body };
-  if ((MEDIA_TYPES as readonly string[]).includes(echo.type)) {
-    const media = echo[echo.type as MediaType];
-    if (media) {
-      const ref: MediaRef = { type: echo.type as MediaType, externalMediaId: media.id };
-      if (media.mime_type) ref.mimeType = media.mime_type;
-      if (media.caption) ref.caption = media.caption;
-      return { ...withTo, media: [ref], ...(media.caption ? { text: media.caption } : {}) };
-    }
-  }
+  const media = toMediaRefs(echo);
+  if (media) return { ...withTo, media, ...(media[0]!.caption ? { text: media[0]!.caption } : {}) };
   // Otros tipos (ubicación, contacto…): igual cuentan como que el asesor está atendiendo.
   return { ...withTo, unsupportedType: echo.type };
 }
@@ -302,6 +344,8 @@ function toMediaRefs(msg: { type: string } & Partial<Record<MediaType, z.infer<t
   const ref: MediaRef = { type: msg.type as MediaType, externalMediaId: media.id };
   if (media.mime_type) ref.mimeType = media.mime_type;
   if (media.caption) ref.caption = media.caption;
+  const filename = media.filename?.trim().slice(0, 240);
+  if (filename) ref.filename = filename;
   return [ref];
 }
 

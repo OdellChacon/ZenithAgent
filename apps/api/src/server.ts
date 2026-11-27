@@ -1,6 +1,8 @@
 import { randomInt, randomUUID } from 'node:crypto';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
+import multipart from '@fastify/multipart';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   exchangeSignupCode,
@@ -12,7 +14,15 @@ import {
   listWhatsAppTemplates,
   renderTemplateBody,
   type ApprovedTemplate,
+  WHATSAPP_AUDIO_MIME_TYPES,
+  WHATSAPP_DOCUMENT_MIME_TYPES,
+  WHATSAPP_MAX_AUDIO_BYTES,
+  WHATSAPP_MAX_DOCUMENT_BYTES_IN,
+  WHATSAPP_MAX_VIDEO_BYTES_IN,
+  WHATSAPP_VIDEO_MIME_TYPES,
 } from '@zenith/channel-whatsapp';
+import { downloadCustomerMedia, META_MAX_IMAGE_BYTES } from '@zenith/channel-meta';
+import { agentFileSpec, sniffFile, AGENT_FILE_MAX_BYTES } from './files.js';
 import { decryptCredentials, disconnectReasonLabel, dummyHash, encryptCredentials, outboundIdempotencyKey, verifyPassword, windowState, type Channel, type PanelEvent } from '@zenith/core';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
 
@@ -76,6 +86,8 @@ const err = (reply: FastifyReply, status: number, code: string, message: string)
 export function buildApi(deps: ApiDeps): FastifyInstance {
   const app = Fastify({ logger: false, bodyLimit: 64 * 1024, trustProxy: true });
   void app.register(cookie);
+  // Solo la ruta de archivos lee multipart; el resto de la API acepta JSON de hasta 64 KB.
+  void app.register(multipart, { limits: { fileSize: AGENT_FILE_MAX_BYTES, files: 1, fields: 4, fieldSize: 4096 } });
   const now = () => deps.now?.() ?? new Date();
   // Por correo se frena la fuerza bruta contra una cuenta; por IP el límite es más alto porque
   // en una oficina todos los asesores salen por la misma IP.
@@ -249,7 +261,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         await c.query(
           `SELECT * FROM (
              SELECT m.id, m.direction, m.author, m.type, m.body, m.attachments, m.created_at, m.seq, su.name AS sent_by,
-                    o.status AS delivery
+                    o.status AS delivery, m.edited_at, m.deleted_at
                FROM messages m
                LEFT JOIN users su ON su.id = m.sent_by_user_id
                LEFT JOIN outbound_messages o ON o.message_id = m.id
@@ -295,12 +307,41 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         sentBy: m.sent_by,
         delivery: m.delivery,
         imageId: Array.isArray(m.attachments) ? (m.attachments[0]?.productImageId ?? null) : null,
+        // Archivo que mandó un asesor desde el panel, o que mandó el cliente (se pide a Meta al abrirlo).
+        file: presentFile(m.id, m.type, m.attachments),
+        editedAt: m.edited_at,
+        deletedAt: m.deleted_at,
         // 1 = mensaje de seguimiento del bot; 2 = plantilla de seguimiento.
         followup: Array.isArray(m.attachments) ? (m.attachments[0]?.followup ?? null) : null,
         at: m.created_at,
       })),
     };
   });
+
+  /** Archivo de un mensaje para el panel: dónde verlo, nombre y tipo. */
+  function presentFile(messageId: string, type: string, attachments: unknown) {
+    const a = Array.isArray(attachments) ? (attachments[0] as Record<string, unknown> | undefined) : undefined;
+    if (!a) return null;
+    const name = typeof a.filename === 'string' ? a.filename : null;
+    const mimeType = typeof a.mimeType === 'string' ? a.mimeType : null;
+    if (typeof a.fileId === 'string') return { url: `/api/v1/files/${a.fileId}`, name, mimeType, mediaType: type };
+    if ((typeof a.externalMediaId === 'string' && a.externalMediaId) || typeof a.url === 'string') {
+      return { url: `/api/v1/messages/${messageId}/media`, name, mimeType, mediaType: typeof a.type === 'string' ? a.type : type };
+    }
+    return null;
+  }
+
+  /**
+   * Lo que puede escribir un asesor ahora. En WhatsApp, fuera de 24 h solo plantillas; en
+   * Messenger e Instagram, hasta 7 días con la etiqueta Human Agent.
+   */
+  const agentCanWrite = (channel: Channel, window: ReturnType<typeof windowState>) =>
+    window === 'FREE' || (window === 'HUMAN_AGENT_ONLY' && (channel === 'messenger' || channel === 'instagram'));
+
+  const windowClosedMessage = (channel: Channel) =>
+    channel === 'whatsapp'
+      ? 'Pasaron más de 24 h desde el último mensaje del cliente: WhatsApp solo permite plantillas aprobadas.'
+      : 'Pasaron más de 7 días desde el último mensaje del cliente: Meta no deja escribirle hasta que vuelva a escribir.';
 
   /** Solo quien tiene la conversación (o un administrador) puede actuar sobre ella. */
   const canAct = (u: SessionUser, assigned: string | null) => assigned === u.userId || u.role !== 'agent';
@@ -343,7 +384,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (!conv.recipient) return { error: 'no_recipient' as const };
       const window = windowState({ channel: conv.channel, lastInboundAt: conv.last_inbound_at, now: now(), author: 'agent' });
       // Por ahora solo texto libre: las plantillas de WhatsApp y la etiqueta Human Agent llegan después.
-      if (window !== 'FREE') return { error: 'window_closed' as const, window };
+      if (!agentCanWrite(conv.channel, window)) return { error: 'window_closed' as const, window, channel: conv.channel };
 
       const key = outboundIdempotencyKey(conv.id, clientId, `agent:${u.userId}`);
       const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
@@ -379,12 +420,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         case 'no_recipient':
           return err(reply, 409, 'no_recipient', 'No se encontró el destinatario de esta conversación');
         case 'window_closed':
-          return err(
-            reply,
-            409,
-            'window_closed',
-            'Pasaron más de 24 h desde el último mensaje del cliente: WhatsApp solo permite plantillas aprobadas.',
-          );
+          return err(reply, 409, 'window_closed', windowClosedMessage(result.channel));
       }
     }
     if (!result.duplicate) {
@@ -524,6 +560,203 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       await deps.publish(u.tenantId, { type: 'message.new', conversationId: req.params.id, direction: 'out', author: 'agent' });
     }
     return { ok: true, outboundMessageId: result.id };
+  });
+
+  // ---------------------------------------------------------------- archivos del asesor
+
+  const fileFieldsSchema = z.object({
+    caption: z.string().trim().max(1024, 'El texto que acompaña al archivo tiene como máximo 1024 caracteres').optional(),
+    clientId: z.string().uuid().optional(),
+  });
+
+  /**
+   * El asesor manda una foto, un video o un documento (multipart: caption y clientId antes del
+   * archivo). Se revisa el tipo real por su contenido, no por el nombre, y que el canal lo admita.
+   */
+  app.post<{ Params: { id: string } }>('/api/v1/conversations/:id/files', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Conversación no encontrada');
+    if (!req.isMultipart()) return err(reply, 415, 'unsupported_media_type', 'Se espera un archivo (multipart/form-data)');
+    const u = user(req);
+    const fields: Record<string, string> = {};
+    let upload: { data: Buffer; filename: string } | null = null;
+    try {
+      for await (const part of req.parts()) {
+        if (part.type === 'file') {
+          const data = await part.toBuffer();
+          upload = { data, filename: part.filename };
+        } else if (typeof part.value === 'string') {
+          fields[part.fieldname] = part.value;
+        }
+      }
+    } catch (e) {
+      if ((e as { code?: string }).code === 'FST_REQ_FILE_TOO_LARGE') {
+        return err(reply, 413, 'file_too_large', `El archivo supera los ${AGENT_FILE_MAX_BYTES / 1024 / 1024} MB`);
+      }
+      return err(reply, 400, 'invalid_input', 'No se pudo leer el archivo');
+    }
+    if (!upload || !upload.data.length) return err(reply, 400, 'invalid_input', 'Adjunta un archivo');
+    const parsedFields = fileFieldsSchema.safeParse(fields);
+    if (!parsedFields.success) return err(reply, 400, 'invalid_input', parsedFields.error.issues[0]?.message ?? 'Datos inválidos');
+    const { caption, clientId = randomUUID() } = parsedFields.data;
+
+    const sniffed = sniffFile(upload.data, upload.filename);
+    if (!sniffed) {
+      return err(reply, 415, 'unsupported_file', 'Ese tipo de archivo no se puede enviar. Usa una foto (JPG o PNG), un video MP4 o un PDF, Word, Excel, PowerPoint o texto.');
+    }
+    const data = upload.data;
+
+    const result = await tenant(req, async (c) => {
+      const conv = await loadConversation(c, req.params.id);
+      if (!conv) return { error: 'not_found' as const };
+      if (conv.assigned_user_id !== u.userId) return { error: 'not_assigned' as const };
+      if (!conv.recipient) return { error: 'no_recipient' as const };
+      const window = windowState({ channel: conv.channel, lastInboundAt: conv.last_inbound_at, now: now(), author: 'agent' });
+      if (!agentCanWrite(conv.channel, window)) return { error: 'window_closed' as const, channel: conv.channel };
+      const spec = agentFileSpec(conv.channel, sniffed.mimeType);
+      if (!spec) return { error: 'channel_unsupported' as const };
+      if (data.length > spec.maxBytes) return { error: 'too_large' as const, maxBytes: spec.maxBytes };
+
+      const key = outboundIdempotencyKey(conv.id, clientId, `agent-file:${u.userId}`);
+      const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+      if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
+
+      const file = await c.query<{ id: string }>(
+        `INSERT INTO message_files (tenant_id, conversation_id, uploaded_by, media_type, mime_type, filename, bytes, sha256, data)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+        [u.tenantId, conv.id, u.userId, spec.mediaType, sniffed.mimeType, sniffed.filename, data.length, createHash('sha256').update(data).digest('hex'), data],
+      );
+      const fileId = file.rows[0]!.id;
+      const message = await c.query<{ id: string }>(
+        `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments, sent_by_user_id)
+         VALUES ($1, $2, 'out', 'agent', $3, $4, $5, $6) RETURNING id`,
+        [u.tenantId, conv.id, spec.mediaType, caption || null, JSON.stringify([{ fileId, filename: sniffed.filename, mimeType: sniffed.mimeType }]), u.userId],
+      );
+      const outbound = await c.query<{ id: string }>(
+        `INSERT INTO outbound_messages (tenant_id, conversation_id, message_id, idempotency_key, channel, payload)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [
+          u.tenantId,
+          conv.id,
+          message.rows[0]!.id,
+          key,
+          conv.channel,
+          JSON.stringify({ kind: 'file', fileId, ...(caption ? { caption } : {}), to: conv.recipient, author: 'agent' }),
+        ],
+      );
+      await c.query('UPDATE conversations SET updated_at = now() WHERE id = $1', [conv.id]);
+      return { id: outbound.rows[0]!.id, duplicate: false };
+    });
+
+    if ('error' in result) {
+      switch (result.error) {
+        case 'not_found':
+          return err(reply, 404, 'not_found', 'Conversación no encontrada');
+        case 'not_assigned':
+          return err(reply, 409, 'not_assigned', 'Toma la conversación antes de responder');
+        case 'no_recipient':
+          return err(reply, 409, 'no_recipient', 'No se encontró el destinatario de esta conversación');
+        case 'window_closed':
+          return err(reply, 409, 'window_closed', windowClosedMessage(result.channel));
+        case 'channel_unsupported':
+          return err(reply, 415, 'unsupported_file', 'Este canal no admite ese tipo de archivo');
+        case 'too_large':
+          return err(reply, 413, 'file_too_large', `En este canal el archivo puede pesar hasta ${Math.round(result.maxBytes / 1024 / 1024)} MB`);
+      }
+    }
+    if (!result.duplicate) {
+      await deps.enqueueOutbound(u.tenantId, [result.id]);
+      await deps.publish(u.tenantId, { type: 'message.new', conversationId: req.params.id, direction: 'out', author: 'agent' });
+    }
+    return { ok: true };
+  });
+
+  /** RFC 6266: nombre del archivo en la descarga, sin romper la cabecera con caracteres raros. */
+  const disposition = (kind: 'inline' | 'attachment', name: string | null) => {
+    if (!name) return kind;
+    const ascii = name.replace(/[^\x20-\x7e]|["\\]/g, '_');
+    return `${kind}; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(name)}`;
+  };
+
+  /** Cabeceras para servir un archivo que no controlamos: nunca se ejecuta en el origen del panel. */
+  const sendFile = (reply: FastifyReply, data: Buffer, mimeType: string, name: string | null, inline: boolean) =>
+    reply
+      .header('content-type', mimeType)
+      .header('content-disposition', disposition(inline ? 'inline' : 'attachment', name))
+      .header('x-content-type-options', 'nosniff')
+      .header('content-security-policy', "default-src 'none'; sandbox")
+      .header('cache-control', 'private, max-age=3600')
+      .send(data);
+
+  const INLINE_TYPES = /^(image\/(jpeg|png|webp)|video\/(mp4|3gpp)|audio\/.+)$/;
+
+  app.get<{ Params: { id: string } }>('/api/v1/files/:id', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Archivo no encontrado');
+    const file = await tenant(req, async (c) =>
+      (await c.query<{ data: Buffer; mime_type: string; filename: string }>('SELECT data, mime_type, filename FROM message_files WHERE id = $1', [req.params.id])).rows[0],
+    );
+    if (!file) return err(reply, 404, 'not_found', 'Archivo no encontrado');
+    return sendFile(reply, file.data, file.mime_type, file.filename, INLINE_TYPES.test(file.mime_type));
+  });
+
+  /** Límites al traer de Meta lo que mandó el cliente, según el tipo. */
+  const CUSTOMER_MEDIA_LIMITS: Record<string, { maxBytes: number; allowedMimeTypes: ReadonlySet<string> }> = {
+    image: { maxBytes: META_MAX_IMAGE_BYTES, allowedMimeTypes: new Set(['image/jpeg', 'image/png', 'image/webp']) },
+    sticker: { maxBytes: 1024 * 1024, allowedMimeTypes: new Set(['image/webp', 'image/png']) },
+    audio: { maxBytes: WHATSAPP_MAX_AUDIO_BYTES, allowedMimeTypes: new Set([...WHATSAPP_AUDIO_MIME_TYPES, 'audio/x-m4a', 'audio/wav', 'video/mp4']) },
+    video: { maxBytes: WHATSAPP_MAX_VIDEO_BYTES_IN, allowedMimeTypes: WHATSAPP_VIDEO_MIME_TYPES },
+    document: { maxBytes: WHATSAPP_MAX_DOCUMENT_BYTES_IN, allowedMimeTypes: WHATSAPP_DOCUMENT_MIME_TYPES },
+  };
+
+  /**
+   * Archivo que mandó el cliente (o un asesor desde el teléfono): se pide a Meta en el momento.
+   * WhatsApp guarda los archivos unos 30 días; pasado eso Meta ya no lo entrega.
+   */
+  app.get<{ Params: { id: string } }>('/api/v1/messages/:id/media', async (req, reply) => {
+    if (!UUID.safeParse(req.params.id).success) return err(reply, 404, 'not_found', 'Archivo no encontrado');
+    const g = deps.graph;
+    if (!g) return err(reply, 503, 'not_configured', 'El servidor no tiene configurado el acceso a Meta');
+    const row = await tenant(req, async (c) =>
+      (
+        await c.query<{ attachments: unknown; type: string; channel: Channel; account_id: string; credentials_enc: Buffer | null }>(
+          `SELECT m.attachments, m.type, ca.channel, ca.id AS account_id, ca.credentials_enc
+             FROM messages m JOIN conversations c ON c.id = m.conversation_id JOIN channel_accounts ca ON ca.id = c.channel_account_id
+            WHERE m.id = $1 AND m.deleted_at IS NULL`,
+          [req.params.id],
+        )
+      ).rows[0],
+    );
+    const a = row && Array.isArray(row.attachments) ? (row.attachments[0] as Record<string, unknown> | undefined) : undefined;
+    const mediaType = typeof a?.type === 'string' ? a.type : row?.type;
+    const limits = mediaType ? CUSTOMER_MEDIA_LIMITS[mediaType] : undefined;
+    if (!row || !a || !limits) return err(reply, 404, 'not_found', 'Archivo no encontrado');
+    let accessToken: string | undefined;
+    if (row.channel === 'whatsapp') {
+      try {
+        accessToken = row.credentials_enc
+          ? (JSON.parse(decryptCredentials(row.credentials_enc, g.masterKey, row.account_id)) as { accessToken?: string }).accessToken
+          : undefined;
+      } catch {
+        accessToken = undefined;
+      }
+      if (!accessToken) return err(reply, 503, 'no_credentials', 'No se pudieron leer las credenciales del número');
+    }
+    const res = await downloadCustomerMedia(
+      {
+        channel: row.channel,
+        ...(accessToken ? { accessToken } : {}),
+        graphApiVersion: g.graphApiVersion,
+        ...(g.graphBaseUrl ? { graphBaseUrl: g.graphBaseUrl } : {}),
+        ...(g.fetch ? { fetch: g.fetch } : {}),
+      },
+      { externalMediaId: typeof a.externalMediaId === 'string' ? a.externalMediaId : '', ...(typeof a.url === 'string' ? { url: a.url } : {}) },
+      { ...limits, timeoutMs: 30_000 },
+    );
+    if (!res.ok) {
+      req.log.warn({ messageId: req.params.id, error: res.message }, 'No se pudo traer un archivo de Meta');
+      return err(reply, 502, 'media_unavailable', 'Meta ya no entrega este archivo o no se pudo descargar');
+    }
+    const name = typeof a.filename === 'string' ? a.filename : null;
+    return sendFile(reply, res.data, res.mimeType, name, INLINE_TYPES.test(res.mimeType));
   });
 
   const finishSchema = z.object({ action: z.enum(['release', 'close']) });
@@ -682,8 +915,12 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
           history_progress: number | null;
           on_biz_app: boolean;
           connected_at: Date;
+          token_expires_at: Date | null;
+          credentials_invalid_at: Date | null;
+          credentials_error: string | null;
         }>(
-          `SELECT id, channel, display_name, disconnected_at, disconnect_reason, history_status, history_progress, on_biz_app, connected_at
+          `SELECT id, channel, display_name, disconnected_at, disconnect_reason, history_status, history_progress, on_biz_app, connected_at,
+                  token_expires_at, credentials_invalid_at, credentials_error
              FROM channel_accounts WHERE status = 'active' ORDER BY connected_at`,
         )
       ).rows,
@@ -696,6 +933,14 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         disconnected: r.disconnected_at
           ? { at: r.disconnected_at.toISOString(), reason: r.disconnect_reason, label: disconnectReasonLabel(r.disconnect_reason) }
           : null,
+        /**
+         * El token de Meta: `invalid` si Meta lo rechazó (vencido o revocado: el bot no puede
+         * enviar hasta volver a conectar); `expiresAt` si tiene fecha de vencimiento.
+         */
+        token: {
+          invalid: r.credentials_invalid_at ? { at: r.credentials_invalid_at.toISOString(), error: r.credentials_error } : null,
+          expiresAt: r.token_expires_at ? r.token_expires_at.toISOString() : null,
+        },
         history: r.history_status ? { status: r.history_status, progress: r.history_progress ?? 0 } : null,
         coexistence: r.on_biz_app,
         connectedAt: r.connected_at.toISOString(),
@@ -749,10 +994,11 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     const graph = { graphApiVersion: s.graphApiVersion, ...(s.graphBaseUrl ? { graphBaseUrl: s.graphBaseUrl } : {}), ...(s.fetch ? { fetch: s.fetch } : {}) };
 
     let token: string;
+    let tokenExpiresAt: Date | null;
     let info: Awaited<ReturnType<typeof getPhoneInfo>>;
     let pin: string | null = null;
     try {
-      token = await exchangeSignupCode(graph, { appId: s.appId, appSecret: s.appSecret, code });
+      ({ accessToken: token, expiresAt: tokenExpiresAt } = await exchangeSignupCode(graph, { appId: s.appId, appSecret: s.appSecret, code }));
       info = await getPhoneInfo(graph, token, phoneNumberId);
       await subscribeAppToWaba(graph, token, wabaId);
       if (!info.isOnBizApp) {
@@ -784,9 +1030,11 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
         const id = row.rows[0]!.id;
         const enc = encryptCredentials(JSON.stringify({ accessToken: token, ...(pin ? { pin } : {}) }), s.masterKey, id);
         await c.query(
-          `UPDATE channel_accounts SET credentials_enc = $2, credentials_key_id = $3, disconnected_at = NULL, disconnect_reason = NULL
+          `UPDATE channel_accounts SET credentials_enc = $2, credentials_key_id = $3, disconnected_at = NULL, disconnect_reason = NULL,
+                  token_expires_at = $4, credentials_invalid_at = NULL, credentials_error = NULL,
+                  credentials_checked_at = now(), credentials_alerted_at = NULL
             WHERE id = $1`,
-          [id, enc, s.masterKeyId ?? null],
+          [id, enc, s.masterKeyId ?? null, tokenExpiresAt],
         );
         return id;
       });

@@ -20,6 +20,7 @@ import { processInboundEvent } from './inbound.js';
 import { processOutbound } from './outbound.js';
 import { notifyDisconnection, processNotifyJob } from './notify.js';
 import { runFollowups } from './followups.js';
+import { checkChannelTokens, notifyCredentials } from './channel-health.js';
 import { createLogMailer, createSmtpMailer } from './mailer.js';
 import { aiEnvShape, buildLlm } from './llm-provider.js';
 
@@ -83,6 +84,17 @@ const mailer = env.SMTP_HOST
   : createLogMailer((msg, data) => log.warn(data, msg));
 if (!env.SMTP_HOST) log.warn('SMTP no configurado: los avisos por correo a los asesores solo quedan en el log');
 
+/** Token rechazado o por vencer: el panel lo muestra en vivo y el equipo recibe un correo (uno por día). */
+async function alertCredentials(tenantId: string, channelAccountId: string, state: 'invalid' | 'expiring') {
+  await publish(tenantId, { type: 'channel.updated' });
+  try {
+    const mail = await notifyCredentials({ pool, mailer, panelUrl: env.PANEL_URL }, tenantId, channelAccountId, state);
+    log.warn({ tenantId, channelAccountId, state, mail }, 'aviso de acceso a Meta');
+  } catch (err) {
+    log.error({ err: (err as Error).message, tenantId, channelAccountId }, 'No se pudo enviar el aviso de acceso a Meta');
+  }
+}
+
 const inboundWorker = new Worker<InboundJobData>(
   QUEUES.inbound,
   async (job) => {
@@ -94,6 +106,9 @@ const inboundWorker = new Worker<InboundJobData>(
     if (outcome.result === 'agent_echo' && !outcome.duplicate) {
       // Un asesor contestó desde la app: el panel lo muestra y el bot ya no responde ahí.
       await publish(outcome.tenantId, { type: 'message.new', conversationId: outcome.conversationId, direction: 'out', author: 'agent' });
+      await publish(outcome.tenantId, { type: 'conversation.updated', conversationId: outcome.conversationId });
+    }
+    if (outcome.result === 'edited' && outcome.conversationId) {
       await publish(outcome.tenantId, { type: 'conversation.updated', conversationId: outcome.conversationId });
     }
     if (outcome.result === 'history' && outcome.imported > 0) {
@@ -149,6 +164,7 @@ const brainWorker = new Worker<BrainJobData>(
           masterKey,
           graphApiVersion: env.META_GRAPH_API_VERSION,
           ...(env.META_GRAPH_BASE_URL ? { graphBaseUrl: env.META_GRAPH_BASE_URL } : {}),
+          ...(env.FFMPEG_PATH ? { ffmpegPath: env.FFMPEG_PATH } : {}),
           log: (msg, data) => log.warn(data, msg),
         },
         ...(audio ? { voice: { llm, model, ...(env.FFMPEG_PATH ? { ffmpegPath: env.FFMPEG_PATH } : {}) } } : {}),
@@ -201,6 +217,8 @@ const outboundWorker = new Worker<OutboundJobData>(
       job.data,
     );
     log.info({ outboundMessageIds: job.data.outboundMessageIds, outcome: outcome.map((o) => o.result) }, 'envío procesado');
+    const authFailed = new Set(outcome.flatMap((o) => (o.result === 'failed' && o.reason === 'auth_failed' && o.channelAccountId ? [o.channelAccountId] : [])));
+    for (const channelAccountId of authFailed) await alertCredentials(job.data.tenantId, channelAccountId, 'invalid');
     return outcome;
   },
   { connection, concurrency: env.WORKER_CONCURRENCY },
@@ -268,9 +286,36 @@ async function followupTick() {
 }
 const followupTimer = setInterval(followupTick, 60_000);
 
+/** Revisión diaria del token de cada cuenta (ver channel-health.ts). Cada hora mira a quién le toca. */
+let healthRunning = false;
+async function healthTick() {
+  if (healthRunning) return;
+  healthRunning = true;
+  try {
+    const findings = await checkChannelTokens({
+      pool,
+      masterKey,
+      graphApiVersion: env.META_GRAPH_API_VERSION,
+      ...(env.META_GRAPH_BASE_URL ? { graphBaseUrl: env.META_GRAPH_BASE_URL } : {}),
+      log: (msg, data) => log.warn(data, msg),
+    });
+    for (const f of findings) {
+      if (f.state === 'recovered') await publish(f.tenantId, { type: 'channel.updated' });
+      else await alertCredentials(f.tenantId, f.channelAccountId, f.state);
+    }
+  } catch (err) {
+    log.error({ err: (err as Error).message }, 'falló la revisión de tokens');
+  } finally {
+    healthRunning = false;
+  }
+}
+const healthTimer = setInterval(healthTick, 60 * 60_000);
+void healthTick();
+
 const shutdown = async () => {
   clearInterval(sweepTimer);
   clearInterval(followupTimer);
+  clearInterval(healthTimer);
   await Promise.all([inboundWorker.close(), brainWorker.close(), outboundWorker.close(), notifyWorker.close()]);
   await Promise.all([inboundQueue.close(), brainQueue.close(), outboundQueue.close(), notifyQueue.close()]);
   connection.disconnect();

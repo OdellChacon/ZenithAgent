@@ -9,6 +9,8 @@ const env = z
     DEV_WHATSAPP_PHONE_NUMBER_ID: z.string().min(1, 'Define DEV_WHATSAPP_PHONE_NUMBER_ID (el del seed de desarrollo)'),
     SIMULATOR_PORT: z.coerce.number().int().min(1).max(65535).default(4010),
     SIMULATOR_GATEWAY_URL: z.string().url().default('http://127.0.0.1:3000'),
+    DEV_MESSENGER_PAGE_ID: z.string().regex(/^\d+$/).optional().or(z.literal('')),
+    DEV_INSTAGRAM_ID: z.string().regex(/^\d+$/).optional().or(z.literal('')),
   })
   .parse(process.env);
 
@@ -24,6 +26,8 @@ const app = buildSimulator({
   gatewayUrl: env.SIMULATOR_GATEWAY_URL,
   metaAppSecret: env.META_APP_SECRET,
   phoneNumberId: env.DEV_WHATSAPP_PHONE_NUMBER_ID,
+  ...(env.DEV_MESSENGER_PAGE_ID ? { pageId: env.DEV_MESSENGER_PAGE_ID } : {}),
+  ...(env.DEV_INSTAGRAM_ID ? { instagramId: env.DEV_INSTAGRAM_ID } : {}),
   templates,
 });
 

@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@zenith/brain": "*",
+    "@zenith/channel-meta": "*",
     "@zenith/channel-whatsapp": "*",
     "@zenith/core": "*",
     "@zenith/db": "*",

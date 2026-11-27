@@ -14,6 +14,28 @@ const DOWNLOAD_MIME_TYPES = new Set(['image/jpeg', 'image/png', 'image/webp']);
 export const WHATSAPP_AUDIO_MIME_TYPES = new Set(['audio/ogg', 'audio/opus', 'audio/mpeg', 'audio/mp4', 'audio/aac', 'audio/amr']);
 /** Audios: hasta 16 MB según Meta. */
 export const WHATSAPP_MAX_AUDIO_BYTES = 16 * 1024 * 1024;
+/** Videos del cliente: MP4 o 3GP, hasta 16 MB según Meta. */
+export const WHATSAPP_VIDEO_MIME_TYPES = new Set(['video/mp4', 'video/3gpp']);
+export const WHATSAPP_MAX_VIDEO_BYTES_IN = 16 * 1024 * 1024;
+/** Stickers: WebP. */
+export const WHATSAPP_STICKER_MIME_TYPES = new Set(['image/webp']);
+/**
+ * Documentos del cliente: Meta admite hasta 100 MB, pero el panel solo los sirve hasta 25 MB
+ * para no tener al servidor descargando archivos enormes por cada clic.
+ */
+export const WHATSAPP_DOCUMENT_MIME_TYPES = new Set([
+  'application/pdf',
+  'text/plain',
+  'application/msword',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  'application/vnd.ms-excel',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'image/jpeg',
+  'image/png',
+]);
+export const WHATSAPP_MAX_DOCUMENT_BYTES_IN = 25 * 1024 * 1024;
 const META_MEDIA_HOST_SUFFIXES = ['.fbsbx.com', '.facebook.com', '.whatsapp.net', '.fbcdn.net'];
 const GRAPH_VERSION_RE = /^v\d+\.\d+$/;
 const MEDIA_ID_RE = /^[A-Za-z0-9_.-]{1,128}$/;

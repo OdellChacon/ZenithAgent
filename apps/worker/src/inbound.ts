@@ -56,6 +56,8 @@ export type InboundOutcome =
       contactId: string | null;
     }
   | { result: 'status'; tenantId: string; updated: number }
+  /** Se editó o borró un mensaje ya guardado (por el cliente o por el negocio desde la app). */
+  | { result: 'edited'; tenantId: string; conversationId: string | null }
   | { result: 'ignored'; reason: string }
   | { result: 'failed'; reason: string }
   | { result: 'skipped' };
@@ -111,7 +113,9 @@ export async function processInboundEvent(pool: Pool, webhookEventId: string): P
               ? await storeHistory(client, account.tenantId, account.channelAccountId, event)
               : event.kind === 'contact'
                 ? await storeAgendaContact(client, account.tenantId, event)
-                : await storeMessage(client, account.tenantId, account.channelAccountId, event);
+                : event.kind === 'edit'
+                  ? await applyEdit(client, account.tenantId, event)
+                  : await storeMessage(client, account.tenantId, account.channelAccountId, event);
       if (outcome.result === 'ignored') {
         await finishWebhookEvent(client, row.id, 'ignored', outcome.reason);
         return outcome;
@@ -195,6 +199,30 @@ async function storeMessage(
   return { result: 'message', tenantId, conversationId, messageId, duplicate, mode: updated.rows[0]!.mode, resumed };
 }
 
+/**
+ * Edición o borrado de un mensaje ya guardado. Al borrar se quita el contenido (el cliente o el
+ * asesor decidió retirarlo) y queda la marca para el panel. No despierta al bot: el cliente que
+ * corrige algo suele mandar después otro mensaje.
+ */
+async function applyEdit(client: PoolClient, tenantId: string, event: ParsedEvent): Promise<InboundOutcome> {
+  const e = event.edit;
+  if (!e) throw new Error('Edición sin datos');
+  const { rows } =
+    e.action === 'revoke'
+      ? await client.query<{ conversation_id: string }>(
+          `UPDATE messages SET body = NULL, attachments = '[]'::jsonb, deleted_at = COALESCE(deleted_at, $3)
+            WHERE tenant_id = $1 AND external_message_id = $2 RETURNING conversation_id`,
+          [tenantId, e.originalExternalMessageId, event.occurredAt],
+        )
+      : await client.query<{ conversation_id: string }>(
+          `UPDATE messages SET body = COALESCE($3, body), edited_at = $4
+            WHERE tenant_id = $1 AND external_message_id = $2 AND deleted_at IS NULL RETURNING conversation_id`,
+          [tenantId, e.originalExternalMessageId, e.text ?? null, event.occurredAt],
+        );
+  if (!rows[0]) return { result: 'ignored', reason: 'edición de un mensaje que no está guardado' };
+  return { result: 'edited', tenantId, conversationId: rows[0].conversation_id };
+}
+
 /** "Casa de Pedro, Av. Libertador (7.7669, -72.2250)" — lo que ve el asesor y el bot. */
 function locationText(l: NonNullable<ParsedEvent['location']>): string {
   const label = [l.name, l.address].filter(Boolean).join(', ');
@@ -249,6 +277,19 @@ async function storeAgentEcho(
 
   const contactId = await upsertContact(client, tenantId, event.channel, to);
   const conversationId = await openConversation(client, tenantId, channelAccountId, contactId);
+
+  // La copia puede llegar antes de que el worker de salida guarde el id que devolvió Meta: si
+  // hace poco este sistema mandó ese mismo texto en el chat, es nuestra y no de un asesor.
+  if (event.text) {
+    const recent = await client.query(
+      `SELECT 1 FROM outbound_messages
+        WHERE conversation_id = $1 AND status IN ('sending', 'sent', 'delivered', 'read')
+          AND updated_at > now() - interval '5 minutes' AND btrim(payload->>'text') = btrim($2)
+        LIMIT 1`,
+      [conversationId, event.text],
+    );
+    if (recent.rowCount) return { result: 'ignored', reason: 'copia de un mensaje enviado por la API' };
+  }
 
   const type = event.media?.[0]?.type ?? (event.unsupportedType ? event.unsupportedType : 'text');
   const inserted = await client.query<{ id: string }>(

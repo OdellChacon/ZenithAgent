@@ -1,0 +1,14 @@
+{
+  "name": "@zenith/channel-meta",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@zenith/channel-whatsapp": "*",
+    "@zenith/core": "*",
+    "zod": "^4.6.7"
+  }
+}
