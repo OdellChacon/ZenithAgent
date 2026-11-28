@@ -1,4 +1,4 @@
-import { decryptCredentials, outboundIdempotencyKey, type BrainJobData, type Channel } from '@zenith/core';
+import { catalogSendLimit, decryptCredentials, outboundIdempotencyKey, type BrainJobData, type Channel } from '@zenith/core';
 import { markWhatsAppRead } from '@zenith/channel-whatsapp';
 import { getMetaProfile, sendMetaSenderAction } from '@zenith/channel-meta';
 import { withTenant, type Pool, type PoolClient } from '@zenith/db';
@@ -13,12 +13,14 @@ import {
   pendingVoiceNotes,
   runBrainTurn,
   PHOTO_SENT_PREFIX,
+  CATALOG_SENT_PREFIX,
   identifyProductInPhoto,
   splitBubbles,
   typingPauseMs,
   toModelMessages,
   type BrainConfig,
   type BrainResult,
+  type CatalogDoc,
   type HistoryMessage,
   type LlmClient,
   type ModelImage,
@@ -75,6 +77,8 @@ interface Snapshot {
   customerName: string | null;
   /** Foto de la fachada del negocio, si la cargó. */
   storefrontImageId: string | null;
+  /** Catálogos que el bot puede mandar por este canal (vacío si el negocio no lo permite). */
+  catalogDocs: (CatalogDoc & { mediaType: 'image' | 'video' | 'document'; filename: string; mimeType: string })[];
   /** phone_number_id del canal y wamid del mensaje que dispara el turno (para "leído"). */
   externalAccountId: string;
   triggerExternalId: string | null;
@@ -137,10 +141,11 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       job.tenantId,
     ]);
     const history = await client.query<Snapshot['history'][number]>(
-      `SELECT id, direction, author, type, body, external_media_id, media_url, mime_type, file_name AS "fileName" FROM (
+      `SELECT id, direction, author, type, body, external_media_id, media_url, mime_type, file_name AS "fileName", catalog_title AS "catalogTitle" FROM (
          SELECT id, direction, author, type, body, seq,
                 nullif(attachments->0->>'externalMediaId', '') AS external_media_id, attachments->0->>'url' AS media_url,
-                attachments->0->>'mimeType' AS mime_type, attachments->0->>'filename' AS file_name
+                attachments->0->>'mimeType' AS mime_type, attachments->0->>'filename' AS file_name,
+                CASE WHEN attachments->0 ? 'catalogId' THEN attachments->0->>'title' END AS catalog_title
            FROM messages
           WHERE conversation_id = $1 AND deleted_at IS NULL ORDER BY seq DESC LIMIT $2) recent
         ORDER BY seq`,
@@ -151,7 +156,31 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     const trigger = await client.query<{ external_message_id: string | null }>('SELECT external_message_id FROM messages WHERE id = $1', [
       job.triggerMessageId,
     ]);
+    // Catálogos para el bot: solo si el negocio lo permite, los marcados para el bot y que el
+    // canal acepta por su peso (un PDF de 30 MB no sale por Instagram).
+    const botCatalogs = await client.query<{
+      id: string;
+      title: string;
+      description: string | null;
+      category: string | null;
+      media_type: 'image' | 'video' | 'document';
+      mime_type: string;
+      filename: string;
+      bytes: number;
+    }>(
+      `SELECT k.id, k.title, k.description, k.category, k.media_type, k.mime_type, k.filename, k.bytes
+         FROM catalogs k JOIN catalog_settings s ON s.tenant_id = k.tenant_id AND s.bot_can_send
+        WHERE k.archived_at IS NULL AND k.bot_enabled
+        ORDER BY k.created_at DESC LIMIT 30`,
+    );
+    const catalogDocs = botCatalogs.rows
+      .filter((k) => {
+        const limit = catalogSendLimit(row.channel as Channel, k.media_type, k.mime_type);
+        return limit !== null && k.bytes <= limit;
+      })
+      .map((k) => ({ id: k.id, title: k.title, description: k.description, category: k.category, mediaType: k.media_type, filename: k.filename, mimeType: k.mime_type }));
     return {
+      catalogDocs,
       storefrontImageId: storefront.rows[0]?.id ?? null,
       externalAccountId: row.external_account_id,
       triggerExternalId: trigger.rows[0]?.external_message_id ?? null,
@@ -247,6 +276,9 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
         catalog: createCatalogReader(pool, job.tenantId),
         wastePercent: settings.boxes.wastePercent,
         hasStorefrontPhoto: Boolean(snapshot.storefrontImageId),
+        ...(snapshot.catalogDocs.length
+          ? { catalogDocs: snapshot.catalogDocs.map(({ id, title, description, category }) => ({ id, title, description, category })) }
+          : {}),
         // El modelo ve las fotos de los primeros productos que encuentra. Tope por turno para que
         // varias búsquedas no disparen el costo.
         catalogPhotos: { perSearch: 5, remaining: CATALOG_PHOTOS_PER_TURN },
@@ -318,7 +350,7 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
     }
 
     /** Guarda un mensaje del bot y su envío pendiente; null si ese paso ya estaba guardado. */
-    const queue = async (type: 'text' | 'image', body: string, payload: object, idempotencyKey: string, attachments: object[] = []) => {
+    const queue = async (type: 'text' | 'image' | 'video' | 'document', body: string | null, payload: object, idempotencyKey: string, attachments: object[] = []) => {
       const message = await client.query<{ id: string }>(
         `INSERT INTO messages (tenant_id, conversation_id, direction, author, type, body, attachments)
          VALUES ($1, $2, 'out', 'bot', $3, $4, $5) RETURNING id`,
@@ -372,12 +404,29 @@ export async function processBrainJob(deps: BrainJobDeps, job: BrainJobData): Pr
       }
     }
 
+    // Los catálogos que pidió el bot, después de las fotos y antes del texto que los menciona.
+    for (const sent of brain.catalogs ?? []) {
+      const doc = snapshot.catalogDocs.find((d) => d.id === sent.catalogId);
+      if (!doc) continue;
+      const id = await queue(
+        doc.mediaType,
+        null,
+        { kind: 'catalog', catalogId: doc.id, to: snapshot.recipient, author: 'bot' },
+        outboundIdempotencyKey(job.conversationId, job.triggerMessageId, `catalog:${doc.id}`),
+        [{ catalogId: doc.id, filename: doc.filename, mimeType: doc.mimeType, title: doc.title }],
+      );
+      if (id) {
+        ordered.push(id);
+        pauses.push(0);
+      }
+    }
+
     // El nombre de cada foto ya va como pie: un mensaje que solo repite ese nombre (o la marca
     // interna "[Foto enviada…]") sobra.
     const photoNames = new Set(brain.photos.map((p) => p.name.trim().toLocaleLowerCase('es')));
     const cleaned = brain.reply
       .split('\n')
-      .filter((line) => !line.trim().startsWith(PHOTO_SENT_PREFIX))
+      .filter((line) => !line.trim().startsWith(PHOTO_SENT_PREFIX) && !line.trim().startsWith(CATALOG_SENT_PREFIX))
       .join('\n');
     const bubbles = splitBubbles(cleaned).filter((b) => !photoNames.has(b.replace(/[*_]/g, '').trim().toLocaleLowerCase('es')));
     if (!bubbles.length) bubbles.push(brain.reply);

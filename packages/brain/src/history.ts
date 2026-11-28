@@ -10,6 +10,8 @@ export interface HistoryMessage {
   body: string | null;
   /** Nombre del documento que mandó el cliente, si lo trae. */
   fileName?: string | null;
+  /** Si el negocio mandó un catálogo: su nombre (para que el bot no lo vuelva a mandar). */
+  catalogTitle?: string | null;
 }
 
 /** Foto del cliente lista para el modelo (JPEG en base64). */
@@ -38,6 +40,7 @@ export const VISUAL_TYPES: ReadonlySet<string> = new Set(['image', 'video', 'doc
 
 /** Cómo ve el modelo una foto que ya le mandó el negocio al cliente. */
 export const PHOTO_SENT_PREFIX = '[Foto enviada al cliente: ';
+export const CATALOG_SENT_PREFIX = '[Catálogo enviado al cliente: ';
 
 /**
  * Texto para el modelo de lo que no es texto ni foto. La nota de voz va transcrita; de la
@@ -103,7 +106,10 @@ export function toModelMessages(
         blocks.push({ type: 'text', text: name ? label.replace(/\]$/, `${name}]`) : label });
       }
     }
-    if (m.direction === 'out' && m.type === 'image') {
+    if (m.direction === 'out' && m.catalogTitle?.trim()) {
+      blocks.push({ type: 'text', text: `${CATALOG_SENT_PREFIX}${m.catalogTitle.trim().slice(0, 120)}]` });
+      if (m.body?.trim()) blocks.push({ type: 'text', text: m.body.trim() });
+    } else if (m.direction === 'out' && m.type === 'image') {
       // Las fotos que mandó el negocio llevan el nombre como pie. Si pasaran como texto suelto, el
       // modelo aprende a escribir el nombre solo en un mensaje: se marcan como foto.
       blocks.push({ type: 'text', text: `${PHOTO_SENT_PREFIX}${m.body?.trim() || 'producto'}]` });

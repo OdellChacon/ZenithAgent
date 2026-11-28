@@ -38,6 +38,7 @@ detalle está en `zc logs worker` y en el panel (mensaje con "No se envió").
 | W8 | El cliente pide precio | Pasa a asesor: sonido y aviso en el panel, y llega el correo. |
 | W9 | El asesor toma la conversación y responde, manda una foto, un PDF y un catálogo arrastrado | Todo llega al teléfono; los documentos con su nombre. |
 | W10 | El asesor devuelve al bot | El bot vuelve a responder el siguiente mensaje. |
+| W10b | Con "El bot y los catálogos" activado en Catálogos, el cliente pide "¿tienen catálogo de grifería?" | Llega el catálogo que corresponde y después el texto. Si se vuelve a pedir, no lo repite. Con el interruptor apagado, el bot no manda archivos. |
 | W11 | Desde la app WhatsApp Business del negocio, alguien responde a mano | El bot se calla en ese chat y el panel muestra el mensaje como "desde el teléfono". |
 | W12 | ⏱ El cliente no responde | A las ~20 h el bot manda el seguimiento; pasadas 24 h sale la plantilla aprobada. |
 | W13 | ⏱ Pasadas 24 h, el asesor intenta escribir | El panel ofrece solo plantillas; la plantilla llega. |

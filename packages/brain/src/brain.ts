@@ -1,6 +1,6 @@
 import type Anthropic from '@anthropic-ai/sdk';
 import type { BetaMessageParam, LlmClient } from './llm.js';
-import { TOOL_DEFINITIONS, runTool, type HandoffReason, type ToolContext, type ToolEffects } from './tools.js';
+import { TOOL_DEFINITIONS, catalogToolDefinition, runTool, type HandoffReason, type ToolContext, type ToolEffects } from './tools.js';
 import { checkReply, promisesHandoff } from './validate.js';
 
 /** Etiqueta de cada foto del catálogo que se le muestra al modelo tras una búsqueda. */
@@ -34,6 +34,8 @@ export interface BrainResult {
   stopFollowups?: boolean;
   /** Enviar la foto de la fachada (con la dirección) antes del texto. */
   storefront?: boolean;
+  /** Catálogos a enviar antes del texto (solo si el negocio lo permite). */
+  catalogs?: { catalogId: string; title: string }[];
   usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number };
   iterations: number;
   stopReason: string | null;
@@ -57,6 +59,8 @@ export async function runBrainTurn(params: {
   config?: Partial<BrainConfig>;
 }): Promise<BrainResult> {
   const config = { ...DEFAULT_BRAIN_CONFIG, ...params.config };
+  // enviar_catalogo solo existe si el negocio permite que el bot mande catálogos.
+  const tools = params.tools.catalogDocs?.length ? [...TOOL_DEFINITIONS, catalogToolDefinition(params.tools.catalogDocs)] : TOOL_DEFINITIONS;
   const messages = [...params.messages];
   const effects: ToolEffects = { handoff: null, photos: [] };
   const usage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 };
@@ -94,7 +98,7 @@ export async function runBrainTurn(params: {
       // El prompt de sistema y las herramientas son estables por tenant: se cachean.
       cache_control: { type: 'ephemeral' },
       system: params.system,
-      tools: TOOL_DEFINITIONS,
+      tools,
       messages,
     });
 
@@ -187,6 +191,7 @@ export async function runBrainTurn(params: {
       photos: effects.photos,
       ...(effects.stopFollowups ? { stopFollowups: true } : {}),
       ...(effects.storefront ? { storefront: true } : {}),
+      ...(effects.catalogs?.length ? { catalogs: effects.catalogs } : {}),
       usage,
       iterations,
       stopReason,

@@ -735,14 +735,24 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     mime_type: string;
     filename: string;
     bytes: number;
+    category: string | null;
+    default_message: string | null;
+    bot_enabled: boolean;
     created_at: Date;
     updated_at: Date;
+    /** Solo en el listado: envíos que llegaron a salir (asesores y bot). */
+    sent_count?: number;
+    bot_sent_count?: number;
+    last_sent_at?: Date | null;
   };
-  const CATALOG_COLUMNS = 'id, title, description, media_type, mime_type, filename, bytes, created_at, updated_at';
+  const CATALOG_COLUMNS = 'id, title, description, media_type, mime_type, filename, bytes, category, default_message, bot_enabled, created_at, updated_at';
   const presentCatalog = (r: CatalogRow) => ({
     id: r.id,
     title: r.title,
     description: r.description,
+    category: r.category,
+    defaultMessage: r.default_message,
+    botEnabled: r.bot_enabled,
     mediaType: r.media_type,
     mimeType: r.mime_type,
     filename: r.filename,
@@ -750,14 +760,51 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     url: `/api/v1/catalogs/${r.id}/file`,
     createdAt: r.created_at,
     updatedAt: r.updated_at,
+    usage: { sent: r.sent_count ?? 0, byBot: r.bot_sent_count ?? 0, lastSentAt: r.last_sent_at ?? null },
   });
   const canManageCatalogs = (req: FastifyRequest) => user(req).role !== 'agent';
+  const botCanSendCatalogs = async (c: PoolClient) =>
+    Boolean((await c.query<{ bot_can_send: boolean }>('SELECT bot_can_send FROM catalog_settings')).rows[0]?.bot_can_send);
 
   app.get('/api/v1/catalogs', async (req) => {
-    const rows = await tenant(req, async (c) =>
-      (await c.query<CatalogRow>(`SELECT ${CATALOG_COLUMNS} FROM catalogs WHERE archived_at IS NULL ORDER BY created_at DESC LIMIT 200`)).rows,
+    const { rows, botCanSend } = await tenant(req, async (c) => ({
+      // Cuántas veces salió cada catálogo: los envíos quedan en outbound_messages (índice por catalogId).
+      rows: (
+        await c.query<CatalogRow>(
+          `SELECT ${CATALOG_COLUMNS.split(', ').map((col) => `k.${col}`).join(', ')},
+                  coalesce(u.sent, 0)::int AS sent_count, coalesce(u.by_bot, 0)::int AS bot_sent_count, u.last_sent_at
+             FROM catalogs k
+             LEFT JOIN LATERAL (
+               SELECT count(*) AS sent, count(*) FILTER (WHERE o.payload->>'author' = 'bot') AS by_bot, max(o.created_at) AS last_sent_at
+                 FROM outbound_messages o
+                WHERE o.tenant_id = k.tenant_id AND o.payload->>'kind' = 'catalog' AND o.payload->>'catalogId' = k.id::text
+                  AND o.status IN ('sent', 'delivered', 'read')
+             ) u ON true
+            WHERE k.archived_at IS NULL
+            ORDER BY k.created_at DESC
+            LIMIT 200`,
+        )
+      ).rows,
+      botCanSend: await botCanSendCatalogs(c),
+    }));
+    const categories = [...new Set(rows.map((r) => r.category).filter((x): x is string => Boolean(x)))].sort((a, b) => a.localeCompare(b, 'es'));
+    return { items: rows.map(presentCatalog), categories, canManage: canManageCatalogs(req), botCanSend };
+  });
+
+  /** Si el bot puede mandar catálogos por su cuenta. Lo decide el dueño o un administrador. */
+  app.put('/api/v1/catalogs/settings', async (req, reply) => {
+    if (!canManageCatalogs(req)) return err(reply, 403, 'forbidden', 'Solo el dueño o un administrador puede cambiar esto');
+    const parsed = z.object({ botCanSend: z.boolean() }).strict().safeParse(req.body);
+    if (!parsed.success) return err(reply, 400, 'invalid_input', 'Indica si el bot puede mandar catálogos');
+    const u = user(req);
+    await tenant(req, (c) =>
+      c.query(
+        `INSERT INTO catalog_settings (tenant_id, bot_can_send, updated_by) VALUES ($1, $2, $3)
+         ON CONFLICT (tenant_id) DO UPDATE SET bot_can_send = EXCLUDED.bot_can_send, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+        [u.tenantId, parsed.data.botCanSend, u.userId],
+      ),
     );
-    return { items: rows.map(presentCatalog), canManage: canManageCatalogs(req) };
+    return { ok: true, botCanSend: parsed.data.botCanSend };
   });
 
   const catalogTitle = z.string().trim().min(1, 'Ponle un nombre al catálogo').max(120, 'El nombre tiene como máximo 120 caracteres');
@@ -765,6 +812,16 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     .string()
     .trim()
     .max(300, 'La descripción tiene como máximo 300 caracteres')
+    .transform((d) => d || null);
+  const catalogCategory = z
+    .string()
+    .trim()
+    .max(40, 'La categoría tiene como máximo 40 caracteres')
+    .transform((d) => d.replace(/\s+/g, ' ') || null);
+  const catalogMessage = z
+    .string()
+    .trim()
+    .max(1000, 'El mensaje tiene como máximo 1000 caracteres')
     .transform((d) => d || null);
 
   /** Sube un catálogo (multipart: title y description antes del archivo). Solo dueño o administrador. */
@@ -784,39 +841,68 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     }
     if (!upload?.data.length) return err(reply, 400, 'invalid_input', 'Adjunta el archivo del catálogo');
     const parsed = z
-      .object({ title: catalogTitle.optional(), description: catalogDescription.optional() })
+      .object({
+        title: catalogTitle.optional(),
+        description: catalogDescription.optional(),
+        category: catalogCategory.optional(),
+        defaultMessage: catalogMessage.optional(),
+        botEnabled: z.enum(['true', 'false']).optional(),
+        allowDuplicate: z.enum(['true', 'false']).optional(),
+      })
       .safeParse(fields);
     if (!parsed.success) return err(reply, 400, 'invalid_input', parsed.error.issues[0]?.message ?? 'Datos inválidos');
     const sniffed = sniffFile(upload.data, upload.filename);
     if (!sniffed) return err(reply, 415, 'unsupported_file', 'Sube un PDF, una foto (JPG o PNG), un video MP4 o un documento de Office');
     const mediaType = sniffed.mimeType.startsWith('image/') ? 'image' : sniffed.mimeType.startsWith('video/') ? 'video' : 'document';
     const title = parsed.data.title ?? sniffed.filename.replace(/\.[^.]+$/, '').slice(0, 120);
+    const sha256 = createHash('sha256').update(upload.data).digest('hex');
     const u = user(req);
-    const row = await tenant(req, async (c) =>
-      (
+    const result = await tenant(req, async (c) => {
+      // El mismo archivo ya subido: se avisa (y se puede subir igual con allowDuplicate).
+      if (parsed.data.allowDuplicate !== 'true') {
+        const dup = (await c.query<CatalogRow>(`SELECT ${CATALOG_COLUMNS} FROM catalogs WHERE sha256 = $1 AND archived_at IS NULL LIMIT 1`, [sha256])).rows[0];
+        if (dup) return { duplicate: dup };
+      }
+      const row = (
         await c.query<CatalogRow>(
-          `INSERT INTO catalogs (tenant_id, title, description, media_type, mime_type, filename, bytes, sha256, data, created_by)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING ${CATALOG_COLUMNS}`,
+          `INSERT INTO catalogs (tenant_id, title, description, category, default_message, bot_enabled, media_type, mime_type, filename, bytes, sha256, data, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING ${CATALOG_COLUMNS}`,
           [
             u.tenantId,
             title,
             parsed.data.description ?? null,
+            parsed.data.category ?? null,
+            parsed.data.defaultMessage ?? null,
+            parsed.data.botEnabled !== 'false',
             mediaType,
             sniffed.mimeType,
             sniffed.filename,
             upload!.data.length,
-            createHash('sha256').update(upload!.data).digest('hex'),
+            sha256,
             upload!.data,
             u.userId,
           ],
         )
-      ).rows[0]!,
-    );
-    return { ok: true, item: presentCatalog(row) };
+      ).rows[0]!;
+      return { row };
+    });
+    if (result.duplicate) {
+      return reply.code(409).send({
+        error: { code: 'duplicate', message: `Este archivo ya está subido como “${result.duplicate.title}”.` },
+        existing: presentCatalog(result.duplicate),
+      });
+    }
+    return { ok: true, item: presentCatalog(result.row!) };
   });
 
   const catalogPatchSchema = z
-    .object({ title: catalogTitle.optional(), description: catalogDescription.nullable().optional() })
+    .object({
+      title: catalogTitle.optional(),
+      description: catalogDescription.nullable().optional(),
+      category: catalogCategory.nullable().optional(),
+      defaultMessage: catalogMessage.nullable().optional(),
+      botEnabled: z.boolean().optional(),
+    })
     .strict()
     .refine((v) => Object.keys(v).length > 0, 'No hay cambios');
 
@@ -830,9 +916,23 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       (
         await c.query<CatalogRow>(
           `UPDATE catalogs SET title = COALESCE($2, title),
-                  description = CASE WHEN $3 THEN $4 ELSE description END, updated_at = now()
+                  description = CASE WHEN $3 THEN $4 ELSE description END,
+                  category = CASE WHEN $5 THEN $6 ELSE category END,
+                  default_message = CASE WHEN $7 THEN $8 ELSE default_message END,
+                  bot_enabled = COALESCE($9, bot_enabled),
+                  updated_at = now()
             WHERE id = $1 AND archived_at IS NULL RETURNING ${CATALOG_COLUMNS}`,
-          [req.params.id, v.title ?? null, v.description !== undefined, v.description ?? null],
+          [
+            req.params.id,
+            v.title ?? null,
+            v.description !== undefined,
+            v.description ?? null,
+            v.category !== undefined,
+            v.category ?? null,
+            v.defaultMessage !== undefined,
+            v.defaultMessage ?? null,
+            v.botEnabled ?? null,
+          ],
         )
       ).rows[0],
     );

@@ -55,6 +55,17 @@ export interface ProductRow {
   score?: number;
 }
 
+/** Catálogo (PDF, foto, video o documento) que el negocio permite mandar al bot. */
+export interface CatalogDoc {
+  id: string;
+  title: string;
+  description: string | null;
+  category: string | null;
+}
+
+/** Catálogos por turno: más de dos archivos seguidos abruma al cliente. */
+export const MAX_CATALOGS_PER_TURN = 2;
+
 /** Fotos por mensaje: más que esto satura el chat del cliente. */
 export const MAX_PHOTOS_PER_TURN = 6;
 
@@ -73,6 +84,11 @@ export interface ToolContext {
    * ese (con un modelo de visión). `remaining` limita las consultas por turno.
    */
   identifyPhoto?: { run: (candidates: { name: string; photo: CatalogPhoto }[]) => Promise<string | null>; remaining: number };
+  /**
+   * Catálogos que el bot puede mandar. Solo viene si el negocio lo permite; sin esto el bot no
+   * tiene la herramienta enviar_catalogo.
+   */
+  catalogDocs?: CatalogDoc[];
 }
 
 /** Lo que las herramientas piden al sistema además de responder (se aplica al guardar). */
@@ -91,6 +107,8 @@ export interface ToolEffects {
   listing?: { names: string[]; total: number };
   /** Productos que trajeron las búsquedas del turno, por nombre (para mandar fotos prometidas). */
   seen?: Map<string, { id: string; hasPhoto: boolean }>;
+  /** Catálogos a enviar antes del texto, en orden. */
+  catalogs?: { catalogId: string; title: string }[];
 }
 
 // --------------------------------------------------------------------- definiciones
@@ -196,6 +214,35 @@ export const TOOL_DEFINITIONS: Anthropic.Beta.BetaTool[] = [
   },
 ];
 
+/**
+ * Herramienta para mandar un catálogo. Se arma por negocio con la lista de sus catálogos en la
+ * descripción (así el modelo elige sin una vuelta extra para listarlos).
+ */
+export function catalogToolDefinition(docs: CatalogDoc[]): Anthropic.Beta.BetaTool {
+  const list = docs
+    .map((d) => {
+      const extra = [d.category ? `categoría: ${d.category}` : '', d.description ? d.description.slice(0, 160) : ''].filter(Boolean).join(' · ');
+      return `- ${d.id}: "${d.title}"${extra ? ` (${extra})` : ''}`;
+    })
+    .join('\n');
+  return {
+    name: 'enviar_catalogo',
+    description:
+      'Envía al cliente un catálogo del negocio (archivo), justo antes de tu mensaje. Úsala cuando el cliente pida un catálogo, ' +
+      'una lista de productos o "qué tienen" de un tipo que un catálogo cubre. Elige el que corresponda a lo que pide; si ninguno ' +
+      'encaja, no mandes nada. No mandes de nuevo un catálogo que ya se le envió en esta conversación (aparece como ' +
+      '"[Catálogo enviado al cliente: …]"). El archivo llega antes de tu mensaje: habla de él como ya enviado. ' +
+      `Máximo ${MAX_CATALOGS_PER_TURN} por mensaje. Catálogos disponibles:\n${list}`,
+    strict: true,
+    input_schema: {
+      type: 'object',
+      properties: { catalogo_id: { type: 'string', description: 'El id del catálogo, de la lista de esta herramienta.' } },
+      required: ['catalogo_id'],
+      additionalProperties: false,
+    },
+  };
+}
+
 // --------------------------------------------------------------------- validación
 
 const searchInput = z.object({
@@ -214,6 +261,8 @@ const boxesInput = z.object({
 const photosInput = z.object({
   producto_ids: z.array(z.string().uuid()).min(1).max(10),
 });
+
+const catalogInput = z.object({ catalogo_id: z.string().trim().min(1).max(64) });
 
 const handoffInput = z.object({
   motivo: z.enum(HANDOFF_REASONS),
@@ -508,6 +557,23 @@ export async function runTool(name: string, input: unknown, ctx: ToolContext, ef
         }
       }
       return json({ fotos_que_se_enviaran: sent, no_enviadas: skipped });
+    }
+
+    case 'enviar_catalogo': {
+      const docs = ctx.catalogDocs ?? [];
+      if (!docs.length) return error('El negocio no permite que el bot mande catálogos');
+      const parsed = catalogInput.safeParse(input);
+      if (!parsed.success) return error('Indique catalogo_id con un id de la lista');
+      const doc = docs.find((d) => d.id === parsed.data.catalogo_id);
+      if (!doc) return error('Ese catálogo no está en la lista; use uno de los ids de la descripción de la herramienta');
+      effects.catalogs ??= [];
+      if (effects.catalogs.some((c) => c.catalogId === doc.id)) return json({ catalogo_que_se_enviara: doc.title, nota: 'Ya estaba incluido.' });
+      if (effects.catalogs.length >= MAX_CATALOGS_PER_TURN) return error(`Máximo ${MAX_CATALOGS_PER_TURN} catálogos por mensaje`);
+      effects.catalogs.push({ catalogId: doc.id, title: doc.title });
+      return json({
+        catalogo_que_se_enviara: doc.title,
+        indicacion: 'El archivo llega antes de tu mensaje: habla de él como ya enviado ("ahí tiene el catálogo de grifería") y sigue ayudándolo.',
+      });
     }
 
     case 'enviar_ubicacion': {

@@ -119,6 +119,33 @@
   .rec button { border: 0; background: transparent; cursor: pointer; color: inherit; display: grid; place-items: center; width: 36px; height: 36px; }
   .rec button svg { width: 22px; height: 22px; fill: currentColor; }
   .bubble.photo { padding: 3px; width: 250px; max-width: 78%; }
+  .bubble.photo video { display: block; width: 100%; border-radius: calc(var(--r) - 2px); background: #000; }
+
+  /* Documento (PDF, Word, Excel…), como lo muestra WhatsApp: ficha con tipo, nombre y peso. */
+  .bubble.file { padding: 3px; width: 280px; max-width: 80%; white-space: normal; }
+  .doc { display: flex; align-items: center; gap: 10px; padding: 10px 10px 10px 9px; border-radius: calc(var(--r) - 2px);
+         background: var(--doc-bg, rgba(11,20,26,.05)); color: inherit; text-decoration: none; }
+  .out .doc { background: var(--doc-out-bg, rgba(11,20,26,.06)); }
+  .bubble a.doc.doc, .bubble a.doc.doc:visited { color: inherit; text-decoration: none; }
+  .doc:hover { filter: brightness(.97); }
+  .doc-icon { flex: none; position: relative; width: 32px; height: 40px; border-radius: 4px 9px 4px 4px; display: grid; place-items: end center;
+              padding-bottom: 5px; background: #e2513f; color: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.18); }
+  .doc-icon::after { content: ''; position: absolute; top: 0; right: 0; width: 10px; height: 10px; border-radius: 0 9px 0 4px;
+                     background: rgba(255,255,255,.35); }
+  .doc-icon b { font: 700 8.5px/1 var(--sans); letter-spacing: .04em; }
+  .doc-icon[data-kind="word"] { background: #2b6fd6; }
+  .doc-icon[data-kind="excel"] { background: #1e8e4f; }
+  .doc-icon[data-kind="ppt"] { background: #e07a27; }
+  .doc-icon[data-kind="other"] { background: #6b7c85; }
+  .doc-text { display: grid; gap: 2px; min-width: 0; flex: 1; }
+  .doc-name { font-size: 14px; line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+  .doc-sub { font-size: 12px; color: var(--stamp); }
+  .doc-dl { flex: none; width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; color: var(--stamp);
+            border: 1.5px solid currentColor; opacity: .85; }
+  .doc-dl svg { width: 18px; height: 18px; }
+  .doc-caption { padding: 6px 6px 0; }
+  .doc-foot { display: flex; justify-content: flex-end; padding: 2px 5px 1px; min-height: 14px; }
+  .doc-foot .stamp { float: none; margin: 0; }
   .bubble.photo img { display: block; width: 100%; aspect-ratio: 1 / 1; object-fit: cover; border-radius: calc(var(--r) - 2px); background: rgba(0,0,0,.06); }
   .bubble.photo .caption { padding: 5px 6px 4px; }
   .bubble.photo .caption.only-stamp { position: absolute; right: 8px; bottom: 6px; padding: 0; }
@@ -187,6 +214,8 @@
              --stamp: rgba(233,237,239,.6); --link: #53bdeb; --note-bg: #182229; --note-ink: #8696a0; --warn-bg: #182229; --warn-ink: #ffd279;
              --input-bg: #2a3942; --input-icon: #8696a0; --composer-icon: #8696a0; --placeholder: #8696a0; --gesture: rgba(255,255,255,.4); --bubble-shadow: none; --note-shadow: none; }
   .wa.dark .gesture { background: #0b141a; }
+  .wa.dark { --doc-bg: rgba(255,255,255,.06); --doc-out-bg: rgba(0,0,0,.16); }
+  .ig.dark, .ms.dark { --doc-bg: rgba(255,255,255,.08); --doc-out-bg: rgba(0,0,0,.2); }
 
   /* ================================================================= Instagram */
   .ig { --app-font: -apple-system, "Segoe UI", Roboto, var(--sans); --title-size: 16px; --title-weight: 600; --msg-size: 15px; --pad: 8px 12px; --r: 22px;
@@ -355,6 +384,17 @@
   const save = () => store.set('sim-state-v2', state);
 
   // ------------------------------------------------------------------ formato de texto
+  // Ficha del documento: color por tipo y la línea "PDF · 5,1 MB", como en WhatsApp.
+  function docInfo(f) {
+    const ext = ((f.name || '').split('.').pop() || '').toLowerCase();
+    const kind = ext === 'pdf' ? 'pdf' : /^docx?$/.test(ext) ? 'word' : /^xlsx?$/.test(ext) ? 'excel' : /^pptx?$/.test(ext) ? 'ppt' : 'other';
+    const label = (ext || 'archivo').slice(0, 4).toUpperCase();
+    const size = typeof f.size === 'number'
+      ? f.size >= 1048576 ? `${(f.size / 1048576).toLocaleString('es-VE', { maximumFractionDigits: 1 })} MB` : `${Math.max(1, Math.round(f.size / 1024))} kB`
+      : null;
+    return { kind, ext: label, sub: [label, size].filter(Boolean).join(' · ') };
+  }
+
   const escape = (s) => s.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const URL_RE = /(https?:\/\/[^\s<>"']+[^\s<>"'.,;:!?)])/g;
   // Negrita, cursiva y tachado como en WhatsApp. Se escapa primero y los enlaces no se tocan.
@@ -493,11 +533,20 @@
           const caption = g.text ? `<div class="caption">${formatText(g.text, s === 'wa')}${stamp}</div>` : stamp ? `<div class="caption only-stamp">${stamp}</div>` : '';
           html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><img src="${escape(g.image)}" alt="${escape(g.text || (side === 'out' ? 'Foto enviada' : 'Foto del producto'))}" loading="lazy">${caption}</div></div>`;
         } else if (g.file) {
-          // Video o documento que mandó un asesor desde el panel.
-          const media = g.file.kind === 'video'
-            ? `<video src="${escape(g.file.url)}" controls preload="metadata" style="max-width:240px;border-radius:10px;display:block"></video>`
-            : `<a href="${escape(g.file.url)}" target="_blank" rel="noopener" style="display:inline-block;padding:6px 0;font-weight:600">📄 ${escape(g.file.name)}</a>`;
-          html += `<div class="line ${side}">${slot}<div class="${cls}"${style}>${media}${g.text ? `<div>${formatText(g.text, s === 'wa')}</div>` : ''}${stamp}</div></div>`;
+          // Video o documento (catálogo, PDF, Office) que mandó un asesor o el bot.
+          if (g.file.kind === 'video') {
+            const caption = g.text ? `<div class="caption">${formatText(g.text, s === 'wa')}${stamp}</div>` : stamp ? `<div class="caption only-stamp">${stamp}</div>` : '';
+            html += `<div class="line ${side}">${slot}<div class="${cls} photo"${style}><video src="${escape(g.file.url)}" controls preload="metadata"></video>${caption}</div></div>`;
+          } else {
+            const doc = docInfo(g.file);
+            const caption = g.text ? `<div class="doc-caption">${formatText(g.text, s === 'wa')}</div>` : '';
+            html += `<div class="line ${side}">${slot}<div class="${cls} file"${style}>`
+              + `<a class="doc" href="${escape(g.file.url)}" target="_blank" rel="noopener" title="Abrir ${escape(g.file.name)}">`
+              + `<span class="doc-icon" data-kind="${doc.kind}"><b>${escape(doc.ext)}</b></span>`
+              + `<span class="doc-text"><span class="doc-name">${escape(g.file.name)}</span><span class="doc-sub">${escape(doc.sub)}</span></span>`
+              + `<span class="doc-dl" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></span>`
+              + `</a>${caption}<div class="doc-foot">${stamp}</div></div></div>`;
+          }
         } else if (g.buttons && g.buttons.length && side === 'in') {
           // Solo se puede tocar un botón una vez; después quedan como recuerdo.
           const quick = g.buttons.map((b) => `<button type="button" data-quick="${escape(b)}"${g.answered ? ' disabled' : ''} data-for="${escape(g.id)}">${escape(b)}</button>`).join('');

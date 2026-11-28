@@ -846,5 +846,57 @@ describe.skipIf(!hasDb)('API del panel', () => {
       await app.inject({ method: 'DELETE', url: `/api/v1/catalogs/${item.id}`, headers: headers(admin.cookie) });
       expect((await share(ana.cookie, { catalogId: item.id })).statusCode).toBe(404);
     });
+
+    it('avisa del archivo repetido, guarda categoría y mensaje, cuenta los envíos y guarda si el bot puede mandarlos', async () => {
+      const admin = await login(users.admin.email);
+      const ana = await login(users.ana.email);
+      const data = Buffer.from(`%PDF-1.4\nlista ${run}\n`);
+      const file = { name: 'Lista.pdf', type: 'application/pdf', data };
+      const first = await uploadCatalog(admin.cookie, { title: 'Lista de precios', category: '  Grifería  ', defaultMessage: 'Aquí tiene la lista', botEnabled: 'false' }, file);
+      const item = first.json().item;
+      expect(item).toMatchObject({ category: 'Grifería', defaultMessage: 'Aquí tiene la lista', botEnabled: false, usage: { sent: 0, byBot: 0, lastSentAt: null } });
+
+      // El mismo archivo otra vez: 409 con el que ya existe, salvo que se pida subirlo igual.
+      const dup = await uploadCatalog(admin.cookie, { title: 'Otra vez' }, file);
+      expect(dup.statusCode).toBe(409);
+      expect(dup.json()).toMatchObject({ error: { code: 'duplicate' }, existing: { id: item.id, title: 'Lista de precios' } });
+      const forced = await uploadCatalog(admin.cookie, { title: 'Copia', allowDuplicate: 'true' }, file);
+      expect(forced.statusCode).toBe(200);
+
+      const patched = await app.inject({
+        method: 'PATCH',
+        url: `/api/v1/catalogs/${item.id}`,
+        headers: headers(admin.cookie),
+        payload: { category: null, defaultMessage: '', botEnabled: true },
+      });
+      expect(patched.json().item).toMatchObject({ category: null, defaultMessage: null, botEnabled: true });
+
+      // Envíos que salieron (uno del bot, uno de un asesor) y uno que falló, que no cuenta.
+      const conv = await seedConversation(t.tenantId, t.channelAccountId);
+      const out = (status: string, author: string) =>
+        owner.query(`INSERT INTO outbound_messages (tenant_id, conversation_id, idempotency_key, channel, payload, status) VALUES ($1, $2, $3, 'whatsapp', $4, $5)`, [
+          t.tenantId,
+          conv,
+          randomUUID(),
+          JSON.stringify({ kind: 'catalog', catalogId: item.id, to: '1', author }),
+          status,
+        ]);
+      await out('delivered', 'bot');
+      await out('read', 'agent');
+      await out('failed', 'agent');
+      const listed = (await app.inject({ method: 'GET', url: '/api/v1/catalogs', headers: headers(ana.cookie) })).json();
+      expect(listed.items.find((c: { id: string }) => c.id === item.id).usage).toMatchObject({ sent: 2, byBot: 1 });
+      expect(listed.botCanSend).toBe(false);
+
+      // Si el bot puede mandar catálogos: lo decide el administrador, no el asesor.
+      const set = (cookie: string, botCanSend: unknown) => app.inject({ method: 'PUT', url: '/api/v1/catalogs/settings', headers: headers(cookie), payload: { botCanSend } });
+      expect((await set(ana.cookie, true)).statusCode).toBe(403);
+      expect((await set(admin.cookie, 'sí')).statusCode).toBe(400);
+      expect((await set(admin.cookie, true)).statusCode).toBe(200);
+      expect((await app.inject({ method: 'GET', url: '/api/v1/catalogs', headers: headers(ana.cookie) })).json().botCanSend).toBe(true);
+      await set(admin.cookie, false);
+
+      for (const c of [item.id, forced.json().item.id]) await app.inject({ method: 'DELETE', url: `/api/v1/catalogs/${c}`, headers: headers(admin.cookie) });
+    });
   });
 });

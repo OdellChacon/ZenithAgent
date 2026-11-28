@@ -238,6 +238,52 @@ describe.skipIf(!hasDb)('turno completo del bot', () => {
     }
   });
 
+  it('si el negocio lo permite, el bot manda un catálogo antes del texto y después lo ve en el historial', async () => {
+    const pdf = Buffer.from('%PDF-1.4 catálogo de prueba');
+    const ins = (title: string, botEnabled: boolean) =>
+      owner.query<{ id: string }>(
+        `INSERT INTO catalogs (tenant_id, title, description, category, media_type, mime_type, filename, bytes, sha256, data, bot_enabled)
+         VALUES ($1, $2, 'Llaves y mezcladoras', 'Grifería', 'document', 'application/pdf', $3, $4, $5, $6, $7) RETURNING id`,
+        [t.tenantId, title, `${title}.pdf`, pdf.length, `sha-${title}-${Date.now()}`, pdf, botEnabled],
+      );
+    const shown = (await ins('Grifería 2026', true)).rows[0]!.id;
+    const hidden = (await ins('Lista interna', false)).rows[0]!.id;
+    const sent: string[] = [];
+    const meta = vi.fn<typeof fetch>(async (url, init) => {
+      if (new URL(String(url)).pathname.endsWith('/media')) return new Response(JSON.stringify({ id: 'media-catalogo' }), { status: 200 });
+      const body = JSON.parse(String(init?.body));
+      sent.push(body.type === 'document' ? `documento:${body.document.id}:${body.document.filename}` : `texto:${body.text.body}`);
+      return new Response(JSON.stringify({ messages: [{ id: `wamid.K${++seq}` }] }), { status: 200 });
+    });
+    try {
+      // Sin permitirlo: el bot no tiene la herramienta.
+      const first = await customerSays('¿Tienen catálogo de grifería?', '584141230088');
+      const off = scriptedLlm([text('Un asesor le puede enviar el catálogo.')]);
+      await processBrainJob({ pool: app, llm: off.llm }, { tenantId: t.tenantId, conversationId: first.conversationId, triggerMessageId: first.messageId });
+      expect(JSON.stringify(off.calls[0]!.tools)).not.toContain('enviar_catalogo');
+
+      await owner.query(`INSERT INTO catalog_settings (tenant_id, bot_can_send) VALUES ($1, true)`, [t.tenantId]);
+      const msg = await customerSays('Mándeme el catálogo de grifería por favor', '584141230088');
+      const { llm, calls } = scriptedLlm([tool('enviar_catalogo', { catalogo_id: shown }), text('Ahí tiene el catálogo de grifería.')]);
+      const turn = await processBrainJob({ pool: app, llm }, { tenantId: t.tenantId, conversationId: msg.conversationId, triggerMessageId: msg.messageId });
+      if (turn.result !== 'replied') throw new Error('se esperaba respuesta');
+      const tools = JSON.stringify(calls[0]!.tools);
+      expect(tools).toContain(shown);
+      expect(tools).not.toContain(hidden); // marcado "el bot no lo manda"
+      await processOutboundBatch({ ...outboundDeps(), fetch: meta }, { tenantId: t.tenantId, outboundMessageIds: turn.outboundMessageIds });
+      expect(sent).toEqual(['documento:media-catalogo:Grifería 2026.pdf', 'texto:Ahí tiene el catálogo de grifería.']);
+
+      // El siguiente turno ve que ya se lo mandó.
+      const next = await customerSays('Gracias, ¿y tienen lavamanos?', '584141230088');
+      const later = scriptedLlm([text('Sí, tenemos varios.')]);
+      await processBrainJob({ pool: app, llm: later.llm }, { tenantId: t.tenantId, conversationId: next.conversationId, triggerMessageId: next.messageId });
+      expect(JSON.stringify(later.calls[0]!.messages)).toContain('[Catálogo enviado al cliente: Grifería 2026]');
+    } finally {
+      await owner.query('DELETE FROM catalog_settings WHERE tenant_id = $1', [t.tenantId]);
+      await owner.query(`DELETE FROM catalogs WHERE tenant_id = $1 AND title IN ('Grifería 2026', 'Lista interna')`, [t.tenantId]);
+    }
+  });
+
   it.skipIf(spawnSync('ffmpeg', ['-version'], { windowsHide: true }).status !== 0)(
     'transcribe la nota de voz, guarda el texto y el bot responde a lo que dijo',
     async () => {

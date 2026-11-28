@@ -265,6 +265,10 @@ export function Conversation({
     });
   };
 
+  /**
+   * El mensaje predeterminado del catálogo se escribe en la caja si está vacía (o si solo tiene el
+   * mensaje del catálogo anterior); lo que el asesor ya escribió no se pisa.
+   */
   const pickCatalog = (c: Catalog) => {
     if (!canWrite) {
       setNotice(catalogBlockedReason);
@@ -272,7 +276,14 @@ export function Conversation({
     }
     setNotice(null);
     setFile(null);
+    setText((t) => (!t.trim() || t === catalog?.defaultMessage ? (c.defaultMessage ?? '') : t));
     setCatalog(c);
+  };
+
+  /** Quita el catálogo adjunto y, si el texto era su mensaje predeterminado sin cambios, también. */
+  const dropCatalog = () => {
+    setText((t) => (catalog?.defaultMessage && t === catalog.defaultMessage ? '' : t));
+    setCatalog(null);
   };
 
   // Arrastrar al chat: un catálogo del estante o un archivo de la computadora.
@@ -300,7 +311,7 @@ export function Conversation({
       return;
     }
     if (e.dataTransfer.files[0]) {
-      setCatalog(null);
+      dropCatalog();
       pickFile(e.dataTransfer.files[0]);
     }
   };
@@ -313,7 +324,7 @@ export function Conversation({
       return;
     }
     setNotice(null);
-    setCatalog(null);
+    dropCatalog();
     setFile(f);
   };
 
@@ -505,7 +516,7 @@ export function Conversation({
                 <span className="chip attach-chip catalog">
                   {Icon.catalog}
                   <span className="name">Catálogo: {catalog.title}</span>
-                  <button type="button" onClick={() => setCatalog(null)} aria-label="Quitar el catálogo">
+                  <button type="button" onClick={dropCatalog} aria-label="Quitar el catálogo">
                     {Icon.close}
                   </button>
                 </span>

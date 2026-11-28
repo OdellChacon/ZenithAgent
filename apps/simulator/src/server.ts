@@ -59,7 +59,7 @@ export interface BotMessage {
   /** Botones de respuesta rápida, si el mensaje es una plantilla que los tiene. */
   buttons?: string[];
   /** Video o documento que mandó un asesor desde el panel. */
-  file?: { url: string; name: string; kind: 'video' | 'document' };
+  file?: { url: string; name: string; kind: 'video' | 'document'; mime?: string; size?: number };
   /** Canal por el que salió. */
   channel?: SimChannel;
   at: string;
@@ -227,7 +227,12 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
       /* si no se puede guardar, sigue en memoria */
     }
   };
-  const uploads = new Map<string, { mime: string; name: string }>();
+  const uploads = new Map<string, { mime: string; name: string; size?: number }>();
+  /** Tipo y peso del archivo subido, para que el teléfono lo muestre como WhatsApp ("PDF · 5,1 MB"). */
+  const fileInfo = (id: string) => {
+    const u = uploads.get(id);
+    return { ...(u?.mime ? { mime: u.mime } : {}), ...(u?.size ? { size: u.size } : {}) };
+  };
   /** Mensajes que mandó cada cliente (wamid → número), para aceptar el "leído" como Meta. */
   const inbound = new Map<string, string>();
   let seq = 0;
@@ -516,6 +521,7 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
               url: `/sim-media/${encodeURIComponent(mediaRef!.id)}`,
               name: (body.type === 'document' ? body.document.filename : undefined) ?? uploads.get(mediaRef!.id)?.name ?? 'archivo',
               kind: body.type,
+              ...fileInfo(mediaRef!.id),
             },
           }
         : {}),
@@ -564,7 +570,7 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     }
     const id = `${Date.now()}${++seq}`;
     media.set(id, { mime: file.mimetype, data });
-    uploads.set(id, { mime: file.mimetype, name: file.filename });
+    uploads.set(id, { mime: file.mimetype, name: file.filename, size: data.length });
     return { id };
   });
 
@@ -617,7 +623,14 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
       channel: user.channel,
       ...(att?.type === 'image' ? { image: fileUrl! } : {}),
       ...(att && att.type !== 'image'
-        ? { file: { url: fileUrl!, name: uploads.get(att.payload.attachment_id)?.name ?? 'archivo', kind: att.type === 'video' ? 'video' : 'document' } as const }
+        ? {
+            file: {
+              url: fileUrl!,
+              name: uploads.get(att.payload.attachment_id)?.name ?? 'archivo',
+              kind: att.type === 'video' ? ('video' as const) : ('document' as const),
+              ...fileInfo(att.payload.attachment_id),
+            },
+          }
         : {}),
       at: new Date().toISOString(),
     };
@@ -655,7 +668,7 @@ export function buildSimulator(deps: SimulatorDeps): FastifyInstance & { botMess
     if (!data?.length || !UPLOAD_TYPES.has(mime)) return reply.code(400).send({ error: { code: 100, message: `Tipo no admitido: ${mime}` } });
     const id = `att${Date.now()}${++seq}`;
     media.set(id, { mime, data });
-    uploads.set(id, { mime, name });
+    uploads.set(id, { mime, name, size: data.length });
     return { attachment_id: id };
   });
 

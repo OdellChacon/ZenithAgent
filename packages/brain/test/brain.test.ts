@@ -494,6 +494,28 @@ describe('runBrainTurn', () => {
     expect(JSON.stringify(noPhoto.calls[1]?.messages.at(-1))).toContain('No hay foto de la fachada');
   });
 
+  it('manda un catálogo solo si el negocio lo permite y solo de la lista', async () => {
+    const docs = [
+      { id: 'cat-griferia', title: 'Grifería 2026', description: 'Llaves y mezcladoras', category: 'Grifería' },
+      { id: 'cat-porcelanatos', title: 'Porcelanatos', description: null, category: null },
+    ];
+    const { llm, calls } = scriptedLlm([
+      tool('enviar_catalogo', { catalogo_id: 'cat-griferia' }),
+      tool('enviar_catalogo', { catalogo_id: 'no-existe' }),
+      text('Ahí tiene el catálogo de grifería.'),
+    ]);
+    const res = await runBrainTurn({ ...base, llm, messages: customer('¿Tienen catálogo de grifería?'), tools: { catalog: catalog([]), wastePercent: null, catalogDocs: docs } });
+    expect(res.catalogs).toEqual([{ catalogId: 'cat-griferia', title: 'Grifería 2026' }]);
+    const toolDef = calls[0]!.tools?.find((t) => 'name' in t && t.name === 'enviar_catalogo') as { description: string } | undefined;
+    expect(toolDef?.description).toContain('cat-griferia: "Grifería 2026" (categoría: Grifería · Llaves y mezcladoras)');
+    expect(JSON.stringify(calls[2]?.messages.at(-1))).toContain('no está en la lista');
+
+    // Sin permiso del negocio, el bot ni siquiera tiene la herramienta.
+    const off = scriptedLlm([text('Le paso con un asesor.')]);
+    await runBrainTurn({ ...base, llm: off.llm, messages: customer('¿Tienen catálogo?'), tools: { catalog: catalog([]), wastePercent: null } });
+    expect(off.calls[0]!.tools?.some((t) => 'name' in t && t.name === 'enviar_catalogo')).toBe(false);
+  });
+
   it('si el turno falla no se envían las fotos pedidas', async () => {
     const { llm } = scriptedLlm([tool('enviar_fotos', { producto_ids: [PRODUCT.id] }), text('Cuesta $20')]);
     const res = await runBrainTurn({ ...base, llm, messages: customer('fotos y precio'), tools: { catalog: catalog(), wastePercent: null } });

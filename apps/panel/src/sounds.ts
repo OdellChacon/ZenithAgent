@@ -4,7 +4,7 @@
  * reanuda en el primer gesto del usuario.
  */
 
-export type SoundName = 'handoff' | 'incoming' | 'sent' | 'tap' | 'success';
+export type SoundName = 'handoff' | 'incoming' | 'sent' | 'tap' | 'success' | 'open' | 'close' | 'saved' | 'warn' | 'remove' | 'error' | 'uploaded';
 
 const MUTE_KEY = 'zenith.panel.muted';
 let ctx: AudioContext | null = null;
@@ -116,6 +116,42 @@ const SOUNDS: Record<SoundName, Note[]> = {
   success: [
     { freq: 784, at: 0, dur: 0.14, type: 'triangle', gain: 0.22 },
     { freq: 1175, at: 0.09, dur: 0.3, type: 'triangle', gain: 0.22 },
+  ],
+  // Se abre una vista previa: barrido suave hacia arriba con un brillo al final.
+  open: [
+    { freq: 300, at: 0, dur: 0.16, to: 620, gain: 0.1 },
+    { freq: 1240, at: 0.08, dur: 0.16, gain: 0.035 },
+  ],
+  // Se cierra: el mismo gesto, hacia abajo y más corto.
+  close: [{ freq: 560, at: 0, dur: 0.12, to: 260, gain: 0.08 }],
+  // Cambio guardado: dos notas cortas, más discretas que "success".
+  saved: [
+    { freq: 880, at: 0, dur: 0.1, type: 'triangle', gain: 0.16 },
+    { freq: 1318.5, at: 0.07, dur: 0.2, type: 'triangle', gain: 0.16 },
+  ],
+  // Se pide confirmar algo que no se puede deshacer: tono grave, sin alarmar.
+  warn: [
+    { freq: 330, at: 0, dur: 0.16, type: 'triangle', gain: 0.18 },
+    { freq: 247, at: 0.12, dur: 0.24, type: 'triangle', gain: 0.16 },
+  ],
+  // Algo se quitó: dos notas que bajan y un golpe grave.
+  remove: [
+    { freq: 660, at: 0, dur: 0.1, type: 'triangle', gain: 0.16 },
+    { freq: 440, at: 0.08, dur: 0.14, type: 'triangle', gain: 0.16 },
+    { freq: 140, at: 0.16, dur: 0.18, to: 70, gain: 0.22 },
+  ],
+  // Archivo subido: arpegio brillante que sube, con un destello al final.
+  uploaded: [
+    { freq: 523.25, at: 0, dur: 0.12, type: 'triangle', gain: 0.18 },
+    { freq: 659.25, at: 0.07, dur: 0.12, type: 'triangle', gain: 0.18 },
+    { freq: 783.99, at: 0.14, dur: 0.14, type: 'triangle', gain: 0.18 },
+    { freq: 1046.5, at: 0.21, dur: 0.36, type: 'triangle', gain: 0.2 },
+    { freq: 2093, at: 0.24, dur: 0.3, gain: 0.04 },
+  ],
+  // No se pudo: zumbido corto y doble.
+  error: [
+    { freq: 200, at: 0, dur: 0.09, type: 'square', gain: 0.05 },
+    { freq: 200, at: 0.13, dur: 0.12, type: 'square', gain: 0.05 },
   ],
 };
 

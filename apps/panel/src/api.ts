@@ -137,6 +137,14 @@ export interface Catalog {
   id: string;
   title: string;
   description: string | null;
+  /** Para filtrar (ej. "Grifería"). */
+  category: string | null;
+  /** Texto que se propone al mandarlo a un chat. */
+  defaultMessage: string | null;
+  /** Si el bot puede mandarlo (cuando el negocio lo permite en general). */
+  botEnabled: boolean;
+  /** Envíos que llegaron a salir, de asesores y del bot. */
+  usage: { sent: number; byBot: number; lastSentAt: string | null };
   mediaType: 'image' | 'video' | 'document';
   mimeType: string;
   filename: string;
@@ -152,12 +160,14 @@ export class ApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /** El resto de la respuesta de error (ej. el catálogo que ya existía). */
+    readonly details?: Record<string, unknown>,
   ) {
     super(message);
   }
 }
 
-async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', path: string, body?: unknown): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE', path: string, body?: unknown): Promise<T> {
   let res: Response;
   try {
     res = await fetch(`/api/v1${path}`, {
@@ -195,6 +205,39 @@ async function upload<T>(path: string, form: FormData): Promise<T> {
   return data as T;
 }
 
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+}
+
+/**
+ * Igual que `upload`, pero informa el avance (fetch no lo hace) y se puede cancelar. Usado para
+ * archivos grandes como los catálogos.
+ */
+function uploadWithProgress<T>(path: string, form: FormData, opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {}): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', `/api/v1${path}`);
+    xhr.withCredentials = true;
+    xhr.setRequestHeader('Accept', 'application/json');
+    xhr.setRequestHeader('x-zenith-csrf', '1');
+    xhr.responseType = 'json';
+    xhr.upload.onprogress = (e) => e.lengthComputable && opts.onProgress?.({ loaded: e.loaded, total: e.total });
+    xhr.onload = () => {
+      const data = xhr.response as ({ error?: { code: string; message: string } } & T) | null;
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data as T);
+      else reject(new ApiError(xhr.status, data?.error?.code ?? 'error', data?.error?.message ?? `Error ${xhr.status}`, (data ?? undefined) as Record<string, unknown> | undefined));
+    };
+    xhr.onerror = () => reject(new ApiError(0, 'network', 'No hay conexión con el servidor'));
+    xhr.onabort = () => reject(new ApiError(0, 'aborted', 'Subida cancelada'));
+    if (opts.signal) {
+      if (opts.signal.aborted) return reject(new ApiError(0, 'aborted', 'Subida cancelada'));
+      opts.signal.addEventListener('abort', () => xhr.abort(), { once: true });
+    }
+    xhr.send(form);
+  });
+}
+
 /** "2,4 MB", "350 KB". */
 export function formatBytes(bytes: number): string {
   if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toLocaleString('es-VE', { maximumFractionDigits: 1 })} MB`;
@@ -224,15 +267,24 @@ export const api = {
     form.append('file', file, file.name);
     return upload<{ ok: true }>(`/conversations/${encodeURIComponent(id)}/files`, form);
   },
-  catalogs: () => request<{ items: Catalog[]; canManage: boolean }>('GET', '/catalogs'),
-  uploadCatalog: (file: File, title: string, description: string) => {
+  catalogs: () => request<{ items: Catalog[]; categories: string[]; canManage: boolean; botCanSend: boolean }>('GET', '/catalogs'),
+  setCatalogBot: (botCanSend: boolean) => request<{ ok: true; botCanSend: boolean }>('PUT', '/catalogs/settings', { botCanSend }),
+  uploadCatalog: (
+    file: File,
+    fields: { title: string; description: string; category: string; defaultMessage: string; botEnabled: boolean; allowDuplicate?: boolean },
+    opts: { onProgress?: (p: UploadProgress) => void; signal?: AbortSignal } = {},
+  ) => {
     const form = new FormData();
-    if (title.trim()) form.append('title', title.trim());
-    if (description.trim()) form.append('description', description.trim());
+    if (fields.title.trim()) form.append('title', fields.title.trim());
+    if (fields.description.trim()) form.append('description', fields.description.trim());
+    if (fields.category.trim()) form.append('category', fields.category.trim());
+    if (fields.defaultMessage.trim()) form.append('defaultMessage', fields.defaultMessage.trim());
+    form.append('botEnabled', String(fields.botEnabled));
+    if (fields.allowDuplicate) form.append('allowDuplicate', 'true');
     form.append('file', file, file.name);
-    return upload<{ ok: true; item: Catalog }>('/catalogs', form);
+    return uploadWithProgress<{ ok: true; item: Catalog }>('/catalogs', form, opts);
   },
-  updateCatalog: (id: string, patch: { title?: string; description?: string | null }) =>
+  updateCatalog: (id: string, patch: { title?: string; description?: string | null; category?: string | null; defaultMessage?: string | null; botEnabled?: boolean }) =>
     request<{ ok: true; item: Catalog }>('PATCH', `/catalogs/${encodeURIComponent(id)}`, patch),
   deleteCatalog: (id: string) => request<{ ok: true }>('DELETE', `/catalogs/${encodeURIComponent(id)}`),
   shareCatalog: (conversationId: string, catalogId: string, caption: string, clientId: string) =>
