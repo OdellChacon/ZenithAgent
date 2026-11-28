@@ -4,7 +4,7 @@
 # El código corre en TypeScript con tsx (sin paso de compilación); el panel sí se compila con Vite.
 
 # ---------------------------------------------------------------- dependencias y panel
-FROM node:20-bookworm-slim AS build
+FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
 # Primero los package.json: si no cambian, Docker reutiliza la capa de npm ci.
@@ -28,7 +28,7 @@ RUN npm run build:panel \
  && rm -rf apps/simulator apps/*/test packages/*/test
 
 # ---------------------------------------------------------------- ejecución
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 # ffmpeg: notas de voz y cuadros de video (worker). tini: señales y procesos hijos bien cerrados.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends ffmpeg tini ca-certificates \

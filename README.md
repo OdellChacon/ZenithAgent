@@ -60,7 +60,7 @@ packages/
 
 ## Desarrollo local
 
-Requisitos: Node 20.6+ y Docker.
+Requisitos: Node 22.13+ y Docker.
 
 ```bash
 cp .env.example .env          # completa contraseñas, secretos y la clave maestra

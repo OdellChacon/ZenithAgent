@@ -17,11 +17,14 @@ function pdfjs() {
 
 const docs = new Map<string, Promise<PDFDocumentProxy>>();
 
-/** Abre el PDF (una vez por url). Sin eval ni scripts del documento: solo se dibuja. */
+/**
+ * Abre el PDF (una vez por url). Solo se dibuja: pdf.js no ejecuta los scripts del documento y,
+ * desde la versión 6, tampoco usa eval para las fuentes.
+ */
 export function loadPdf(url: string): Promise<PDFDocumentProxy> {
   let doc = docs.get(url);
   if (!doc) {
-    doc = pdfjs().then((m) => m.getDocument({ url, withCredentials: true, isEvalSupported: false, enableXfa: false }).promise);
+    doc = pdfjs().then((m) => m.getDocument({ url, withCredentials: true, enableXfa: false }).promise);
     doc.catch(() => docs.delete(url)); // si falla, el siguiente intento vuelve a probar
     docs.set(url, doc);
   }
@@ -71,7 +74,7 @@ export function pdfCover(url: string, cssWidth = 260): Promise<string> {
 
 /** Al cambiar o quitar un catálogo, se olvida lo guardado de su archivo. */
 export function forgetPdf(url: string) {
-  void docs.get(url)?.then((d) => d.destroy()).catch(() => undefined);
+  void docs.get(url)?.then((d) => d.loadingTask.destroy()).catch(() => undefined);
   docs.delete(url);
   covers.delete(url);
 }
