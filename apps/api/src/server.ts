@@ -124,6 +124,13 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     return reply.code(ok ? 200 : 503).header('cache-control', 'no-store').send({ ok, checks });
   });
 
+  /**
+   * Para el healthcheck de Docker: solo dice si este proceso responde. /healthz incluye al
+   * worker y a Redis; si Docker usara ese, un worker caído marcaría también a la API como
+   * enferma aunque el panel funcione.
+   */
+  app.get('/readyz', async (_req, reply) => reply.header('cache-control', 'no-store').send({ ok: true }));
+
   const user = (req: FastifyRequest) => req.user!;
   const tenant = <T>(req: FastifyRequest, fn: (c: PoolClient) => Promise<T>) => withTenant(deps.pool, user(req).tenantId, fn);
 
@@ -406,7 +413,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (!agentCanWrite(conv.channel, window)) return { error: 'window_closed' as const, window, channel: conv.channel };
 
       const key = outboundIdempotencyKey(conv.id, clientId, `agent:${u.userId}`);
-      const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+      const existing = await findOutboundByKey(c, key);
       if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
 
       const message = await c.query<{ id: string }>(
@@ -533,7 +540,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (v.params.length !== tpl.params) return { error: 'bad_params' as const, expected: tpl.params };
 
       const key = outboundIdempotencyKey(conv.id, clientId, `agent-template:${u.userId}`);
-      const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+      const existing = await findOutboundByKey(c, key);
       if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
 
       const body = renderTemplateBody(tpl.body, v.params);
@@ -636,7 +643,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (data.length > spec.maxBytes) return { error: 'too_large' as const, maxBytes: spec.maxBytes };
 
       const key = outboundIdempotencyKey(conv.id, clientId, `agent-file:${u.userId}`);
-      const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+      const existing = await findOutboundByKey(c, key);
       if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
 
       const file = await c.query<{ id: string }>(
@@ -688,6 +695,16 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     }
     return { ok: true };
   });
+
+  /**
+   * Busca un envío por su clave de idempotencia. Antes toma un candado de la transacción sobre la
+   * clave: si el panel reintenta el mismo envío dos veces a la vez, el segundo espera a que el
+   * primero termine y lo encuentra, en vez de chocar con la restricción única (500).
+   */
+  const findOutboundByKey = async (c: PoolClient, key: string) => {
+    await c.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
+    return c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+  };
 
   /** RFC 6266: nombre del archivo en la descarga, sin romper la cabecera con caracteres raros. */
   const disposition = (kind: 'inline' | 'attachment', name: string | null) => {
@@ -839,12 +856,17 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
     );
     if (!file) return err(reply, 404, 'not_found', 'Catálogo no encontrado');
     // El PDF se abre en el visor del navegador; con "sandbox" Chrome no lo mostraría. El visor
-    // no ejecuta nada en el origen del panel.
+    // corre aparte y no ejecuta nada en el origen del panel; content-type fijo + nosniff impiden
+    // que un archivo disfrazado se interprete como HTML. Además: ningún otro sitio puede
+    // incrustarlo (frame-ancestors) ni leerlo (CORP), y abre sin acceso a la ventana del panel.
     if (file.mime_type === 'application/pdf') {
       return reply
         .header('content-type', 'application/pdf')
         .header('content-disposition', disposition('inline', file.filename))
         .header('x-content-type-options', 'nosniff')
+        .header('content-security-policy', "frame-ancestors 'self'")
+        .header('cross-origin-resource-policy', 'same-origin')
+        .header('cross-origin-opener-policy', 'same-origin')
         .header('cache-control', 'private, max-age=3600')
         .send(file.data);
     }
@@ -885,7 +907,7 @@ export function buildApi(deps: ApiDeps): FastifyInstance {
       if (catalog.bytes > limit) return { error: 'too_large' as const, maxBytes: limit };
 
       const key = outboundIdempotencyKey(conv.id, clientId, `agent-catalog:${u.userId}`);
-      const existing = await c.query<{ id: string }>('SELECT id FROM outbound_messages WHERE idempotency_key = $1', [key]);
+      const existing = await findOutboundByKey(c, key);
       if (existing.rows[0]) return { id: existing.rows[0].id, duplicate: true };
 
       const message = await c.query<{ id: string }>(

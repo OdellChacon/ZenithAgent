@@ -136,18 +136,49 @@ export function splitForMetaChannel(text: string, channel: 'messenger' | 'instag
 }
 
 /**
- * Envía un texto. Si no entra en un mensaje se manda en varios; devuelve el id del último.
- * Si uno de los trozos falla, se devuelve el error (los anteriores ya salieron).
+ * Avance de un envío en varias partes. Con `skip` un reintento salta las partes que ya llegaron
+ * y `onPart` se llama al confirmar cada una, para guardarlo antes de mandar la siguiente.
  */
-export async function sendMetaText(config: MetaSendConfig, to: string, text: string, opts: { humanAgent?: boolean } = {}): Promise<SendResult> {
-  const parts = splitForMetaChannel(text, config.channel);
-  if (!parts.length) throw new MetaSendError('El mensaje está vacío');
+export interface MetaSendProgress {
+  skip: number;
+  onPart(index: number, externalMessageId: string): Promise<void>;
+  /** Id de la última parte ya enviada (si todas se saltan, es el resultado). */
+  lastExternalId?: string | null;
+}
+
+export interface MetaSendOptions {
+  humanAgent?: boolean;
+  progress?: MetaSendProgress;
+}
+
+/** Manda una secuencia de mensajes en orden; se detiene en el primero que falla. */
+async function sendParts(config: MetaSendConfig, to: string, messages: Record<string, unknown>[], opts: MetaSendOptions): Promise<SendResult> {
+  const skip = opts.progress?.skip ?? 0;
   let last: SendResult | null = null;
-  for (const part of parts) {
-    last = await sendMessage(config, to, { text: part }, opts.humanAgent ?? false);
+  for (let i = skip; i < messages.length; i++) {
+    last = await sendMessage(config, to, messages[i]!, opts.humanAgent ?? false);
     if (!last.ok) return last;
+    await opts.progress?.onPart(i, last.externalMessageId);
   }
-  return last!;
+  if (last) return last;
+  // Todo había salido en un intento anterior.
+  return opts.progress?.lastExternalId
+    ? { ok: true, externalMessageId: opts.progress.lastExternalId }
+    : { ok: false, retryable: false, httpStatus: null, message: 'No quedaba nada por enviar y no hay id del último mensaje' };
+}
+
+const textParts = (text: string, channel: 'messenger' | 'instagram') => splitForMetaChannel(text, channel).map((part) => ({ text: part }));
+
+/**
+ * Envía un texto. Si no entra en un mensaje se manda en varios; devuelve el id del último.
+ * Si uno de los trozos falla, se devuelve el error (los anteriores ya salieron: con `progress`
+ * el reintento sigue desde el que falló).
+ */
+export async function sendMetaText(config: MetaSendConfig, to: string, text: string, opts: MetaSendOptions = {}): Promise<SendResult> {
+  checkRecipient(to);
+  const parts = textParts(text, config.channel);
+  if (!parts.length) throw new MetaSendError('El mensaje está vacío');
+  return sendParts(config, to, parts, opts);
 }
 
 export type MetaAttachmentType = 'image' | 'video' | 'audio' | 'file';
@@ -172,23 +203,22 @@ export async function uploadMetaAttachment(
   return id ? { ok: true, attachmentId: id } : { ok: false, retryable: false, httpStatus: 200, message: 'Meta no devolvió el id del archivo' };
 }
 
-/** Envía un archivo ya subido. Messenger e Instagram no tienen pie de foto: va como texto aparte. */
+/**
+ * Envía un archivo ya subido. Messenger e Instagram no tienen pie de foto: va como texto aparte,
+ * después del archivo. Si el texto falla se devuelve el error, para que el reintento lo mande
+ * (con `progress`, sin repetir el archivo).
+ */
 export async function sendMetaAttachment(
   config: MetaSendConfig,
   to: string,
   attachment: { type: MetaAttachmentType; attachmentId: string; caption?: string },
-  opts: { humanAgent?: boolean } = {},
+  opts: MetaSendOptions = {},
 ): Promise<SendResult> {
+  checkRecipient(to);
   if (!attachment.attachmentId) throw new MetaSendError('Falta el id del archivo');
-  const res = await sendMessage(
-    config,
-    to,
-    { attachment: { type: attachment.type, payload: { attachment_id: attachment.attachmentId } } },
-    opts.humanAgent ?? false,
-  );
-  if (!res.ok || !attachment.caption?.trim()) return res;
-  const caption = await sendMetaText(config, to, attachment.caption, opts);
-  return caption.ok ? caption : res;
+  const messages: Record<string, unknown>[] = [{ attachment: { type: attachment.type, payload: { attachment_id: attachment.attachmentId } } }];
+  if (attachment.caption?.trim()) messages.push(...textParts(attachment.caption, config.channel));
+  return sendParts(config, to, messages, opts);
 }
 
 /** "Visto" y "escribiendo…" mientras el bot prepara la respuesta. Si falla no pasa nada. */

@@ -25,6 +25,8 @@ export function isMetaCdnUrl(url: string, localBaseUrl?: string): boolean {
   return META_CDN_SUFFIXES.some((s) => host.endsWith(s));
 }
 
+const MAX_REDIRECTS = 5;
+
 export interface UrlDownloadOptions {
   maxBytes: number;
   allowedMimeTypes: ReadonlySet<string>;
@@ -37,15 +39,30 @@ export interface UrlDownloadOptions {
 /** Baja un archivo del CDN de Meta. No lanza por errores de red. */
 export async function downloadMetaUrl(url: string, opts: UrlDownloadOptions): Promise<DownloadResult> {
   if (!isMetaCdnUrl(url, opts.localBaseUrl)) return { ok: false, retryable: false, httpStatus: null, message: 'La url del archivo no es de Meta' };
-  let res: Response;
-  try {
-    res = await (opts.fetch ?? fetch)(url, { method: 'GET', redirect: 'follow', signal: AbortSignal.timeout(opts.timeoutMs ?? 20_000) });
-  } catch (err) {
-    return { ok: false, retryable: true, httpStatus: null, message: `Error de red: ${(err as Error).message}` };
-  }
-  // Una redirección no debe sacar la descarga de los hosts de Meta.
-  if (res.url && res.url !== url && !isMetaCdnUrl(res.url, opts.localBaseUrl)) {
-    return { ok: false, retryable: false, httpStatus: null, message: 'La descarga salió de los hosts de Meta' };
+  // Las redirecciones se siguen a mano para validar cada salto: con redirect 'follow' el servidor
+  // ya habría pedido el host de destino antes de poder rechazarlo.
+  let res: Response | undefined;
+  let current = url;
+  const deadline = AbortSignal.timeout(opts.timeoutMs ?? 20_000);
+  for (let hop = 0; ; hop++) {
+    try {
+      res = await (opts.fetch ?? fetch)(current, { method: 'GET', redirect: 'manual', signal: deadline });
+    } catch (err) {
+      return { ok: false, retryable: true, httpStatus: null, message: `Error de red: ${(err as Error).message}` };
+    }
+    if (res.status < 300 || res.status >= 400) break;
+    const location = res.headers.get('location');
+    await res.body?.cancel().catch(() => undefined);
+    if (!location) return { ok: false, retryable: false, httpStatus: res.status, message: 'Redirección sin destino' };
+    if (hop >= MAX_REDIRECTS) return { ok: false, retryable: false, httpStatus: res.status, message: 'Demasiadas redirecciones' };
+    let next: string;
+    try {
+      next = new URL(location, current).toString();
+    } catch {
+      return { ok: false, retryable: false, httpStatus: res.status, message: 'Redirección inválida' };
+    }
+    if (!isMetaCdnUrl(next, opts.localBaseUrl)) return { ok: false, retryable: false, httpStatus: null, message: 'La descarga salió de los hosts de Meta' };
+    current = next;
   }
   if (!res.ok) return { ok: false, retryable: res.status === 429 || res.status >= 500, httpStatus: res.status, message: `Descarga fallida (HTTP ${res.status})` };
   const mimeType = (res.headers.get('content-type') ?? '').split(';')[0]!.trim().toLowerCase();

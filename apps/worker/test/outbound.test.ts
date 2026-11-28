@@ -285,4 +285,27 @@ describe.skipIf(!hasDb)('envíos por canal, archivos del asesor y token de Meta'
     const ok = graph(() => ({ body: { messages: [{ id: 'wamid.NUEVO' }] } }));
     expect(await processOutboundMessage(deps(ok.fetchFn), { tenantId: t.tenantId, outboundMessageId: p.out })).toEqual({ result: 'sent', externalMessageId: 'wamid.NUEVO' });
   });
+
+  it('Messenger: si el texto tras el archivo falla, el reintento manda solo el texto (no repite el archivo)', async () => {
+    const p = await pending(messengerId, 'messenger', '24680020', { kind: 'file', fileId: '', caption: 'Precio en el PDF', author: 'agent' });
+    const fileId = await addFile(p.conv, 'document', 'application/pdf', 'lista.pdf', Buffer.from('%PDF-1.4'));
+    await owner.query(`UPDATE outbound_messages SET payload = jsonb_set(payload, '{fileId}', to_jsonb($2::text)) WHERE id = $1`, [p.out, fileId]);
+    let messages = 0;
+    const g = graph((url) => {
+      if (url.endsWith('/message_attachments')) return { body: { attachment_id: 'att_20' } };
+      messages++;
+      return messages === 2 ? { status: 500, body: { error: { code: 2, message: 'temporal' } } } : { body: { message_id: `m_20_${messages}` } };
+    });
+    await expect(processOutboundMessage(deps(g.fetchFn), { tenantId: t.tenantId, outboundMessageId: p.out })).rejects.toThrow();
+    const row = (await owner.query('SELECT status, parts_sent, external_message_id FROM outbound_messages WHERE id = $1', [p.out])).rows[0];
+    expect(row).toMatchObject({ status: 'queued', parts_sent: 1, external_message_id: 'm_20_1' });
+
+    expect(await processOutboundMessage(deps(g.fetchFn), { tenantId: t.tenantId, outboundMessageId: p.out })).toEqual({ result: 'sent', externalMessageId: 'm_20_3' });
+    const sent = g.calls.filter((c) => c.url.endsWith('/messages')).map((c) => (c.body as { message: unknown }).message);
+    expect(sent).toEqual([
+      { attachment: { type: 'file', payload: { attachment_id: 'att_20' } } },
+      { text: 'Precio en el PDF' },
+      { text: 'Precio en el PDF' },
+    ]);
+  });
 });

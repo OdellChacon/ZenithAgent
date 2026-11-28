@@ -91,8 +91,10 @@ services:
       API_HOST: 0.0.0.0
       API_PORT: "3100"
       COOKIE_SECURE: "true"
+    # Solo este proceso: el estado de todo el sistema (worker incluido) está en /healthz, para el
+    # monitor externo.
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/readyz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3

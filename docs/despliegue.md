@@ -91,6 +91,11 @@ Antes de una actualización grande, una copia a mano: `zc exec backup sh -c 'pg_
   (Backblaze B2, Google Drive, otro servidor…) es **sin dato**: decidirlo con Mora Mora. Con el
   destino elegido, un cron en el servidor que suba la carpeta cada día, por ejemplo con rclone:
   `30 4 * * * rclone copy /opt/zenithagent/backups destino:zenith-backups --max-age 48h`.
+- **Cifrarlas antes de que salgan:** la copia tiene las conversaciones y los datos de los
+  clientes. Con rclone, usar un remoto `crypt` encima del destino (`rclone config` → tipo
+  `crypt`, apuntando a `destino:zenith-backups`) y copiar a ese remoto en vez de al destino
+  directo. La contraseña del crypt se guarda junto a `ENCRYPTION_MASTER_KEY`, fuera del
+  servidor: sin ella las copias externas no se pueden leer.
 - **Guardar fuera del servidor** también `.env.production` y `.env.db`, en especial `ENCRYPTION_MASTER_KEY`:
   sin ella, una copia de la base no sirve para recuperar los tokens de los canales.
 - **Restaurar**: `sh deploy/restore.sh backups/zenith-AAAAMMDD-HHMM.dump`. Probarlo cada tanto

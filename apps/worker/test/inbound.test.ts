@@ -482,14 +482,14 @@ describe.skipIf(!hasDb)('worker de entrada', () => {
 
   describe('ediciones y borrados', () => {
     /** Mensaje de edición o borrado del cliente, como lo manda Meta. */
-    function change(type: 'edit' | 'revoke', original: string, from: string, text?: string) {
-      const payload = webhook({ from, timestamp: nowTs() });
+    function change(type: 'edit' | 'revoke', original: string, from: string, text?: string, ts = nowTs()) {
+      const payload = webhook({ from, timestamp: ts });
       const value = payload.entry[0]!.changes[0]!.value as { messages: Record<string, unknown>[] };
       const id = `wamid.CH${Date.now()}${++seq}`;
       value.messages = [
         type === 'edit'
-          ? { from, id, timestamp: nowTs(), type, edit: { original_message_id: original, message: { text: { body: text } } } }
-          : { from, id, timestamp: nowTs(), type, revoke: { original_message_id: original } },
+          ? { from, id, timestamp: ts, type, edit: { original_message_id: original, message: { text: { body: text } } } }
+          : { from, id, timestamp: ts, type, revoke: { original_message_id: original } },
       ];
       return payload;
     }
@@ -513,6 +513,22 @@ describe.skipIf(!hasDb)('worker de entrada', () => {
       const gone = await withTenant(app, t.tenantId, async (c) => (await c.query('SELECT body, deleted_at FROM messages WHERE id = $1', [m.messageId])).rows[0]);
       expect(gone.body).toBeNull();
       expect(gone.deleted_at).not.toBeNull();
+    });
+
+    it('una edición vieja que llega tarde no pisa a la más nueva', async () => {
+      const original = webhook({ from: '584140000304', timestamp: nowTs(), body: 'Quiero 10' });
+      const originalId = (original.entry[0]!.changes[0]!.value as { messages: { id: string }[] }).messages[0]!.id;
+      const [inId] = await ingest(original);
+      const m = await processInboundEvent(app, inId!);
+      if (m.result !== 'message') throw new Error('se esperaba un mensaje');
+      const t0 = Math.floor(Date.now() / 1000);
+      const [newer] = await ingest(change('edit', originalId, '584140000304', 'Quiero 14', String(t0 + 60)));
+      const [older] = await ingest(change('edit', originalId, '584140000304', 'Quiero 12', String(t0 + 30)));
+      await processInboundEvent(app, newer!);
+      expect(await processInboundEvent(app, older!)).toMatchObject({ result: 'edited' });
+      const row = await withTenant(app, t.tenantId, async (c) => (await c.query('SELECT body, edited_at FROM messages WHERE id = $1', [m.messageId])).rows[0]);
+      expect(row.body).toBe('Quiero 14');
+      expect(new Date(row.edited_at).getTime()).toBe((t0 + 60) * 1000);
     });
 
     it('aplica el borrado que hace el asesor desde la app y ignora cambios a mensajes que no están guardados', async () => {
@@ -584,6 +600,21 @@ describe.skipIf(!hasDb)('worker de entrada', () => {
       const [manual] = await ingestMeta(echoOf(`m_man${Date.now()}`, 'Hola, soy Ana de la tienda'));
       expect(await processInboundEvent(app, manual!)).toMatchObject({ result: 'agent_echo', conversationId: m.conversationId });
       expect((await conversation(m.conversationId)).mode).toBe('human');
+    });
+
+    it('si el asesor escribe lo mismo que el bot ya mandó (y guardó su id), cuenta como del asesor', async () => {
+      const [id] = await ingestMeta(page([{ sender: { id: '9003' }, recipient: { id: pageId }, timestamp: Date.now(), message: { mid: `m_b${Date.now()}`, text: 'Gracias' } }]));
+      const m = await processInboundEvent(app, id!);
+      if (m.result !== 'message') throw new Error('se esperaba un mensaje');
+      await withTenant(app, t.tenantId, (c) =>
+        c.query(
+          `INSERT INTO outbound_messages (tenant_id, conversation_id, idempotency_key, channel, payload, status, external_message_id)
+           VALUES ($1, $2, $3, 'messenger', $4, 'sent', $5)`,
+          [t.tenantId, m.conversationId, `k-meta-ok-${Date.now()}`, JSON.stringify({ kind: 'text', text: 'Ok', to: '9003', author: 'bot' }), `m_bot${Date.now()}`],
+        ),
+      );
+      const [manual] = await ingestMeta(page([{ sender: { id: pageId }, recipient: { id: '9003' }, timestamp: Date.now(), message: { mid: `m_ok${Date.now()}`, text: 'Ok', is_echo: true } }]));
+      expect(await processInboundEvent(app, manual!)).toMatchObject({ result: 'agent_echo', conversationId: m.conversationId });
     });
   });
 });

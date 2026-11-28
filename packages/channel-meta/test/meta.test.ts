@@ -142,6 +142,31 @@ describe('envío por la Send API', () => {
     expect(JSON.parse(String(fetchMock.mock.calls[2]![1]?.body)).message).toEqual({ text: 'Este es el modelo' });
   });
 
+  it('si una parte falla, el reintento sigue desde ahí: no repite el archivo ni pierde el texto', async () => {
+    let n = 0;
+    const flaky = vi.fn<typeof fetch>().mockImplementation(async () =>
+      ++n === 2
+        ? new Response(JSON.stringify({ error: { code: 2, message: 'temporal' } }), { status: 500 })
+        : new Response(JSON.stringify({ message_id: `m_${n}` }), { status: 200 }),
+    );
+    const done: number[] = [];
+    const progress = { skip: 0, onPart: async (i: number) => void done.push(i) };
+    const att = { type: 'image' as const, attachmentId: 'att_1', caption: 'Este es el modelo' };
+    // El archivo sale; el texto falla: se devuelve el error (antes se daba por enviado).
+    expect(await sendMetaAttachment(config(flaky), PSID, att, { progress })).toMatchObject({ ok: false, retryable: true });
+    expect(done).toEqual([0]);
+    // Reintento: solo el texto.
+    expect(await sendMetaAttachment(config(flaky), PSID, att, { progress: { ...progress, skip: 1 } })).toEqual({ ok: true, externalMessageId: 'm_3' });
+    expect(flaky).toHaveBeenCalledTimes(3);
+    expect(JSON.parse(String(flaky.mock.calls[2]![1]?.body)).message).toEqual({ text: 'Este es el modelo' });
+    // Si ya había salido todo (se cayó antes de marcarlo), no manda nada y devuelve el último id.
+    expect(await sendMetaText(config(flaky), PSID, 'Hola', { progress: { skip: 1, onPart: async () => undefined, lastExternalId: 'm_3' } })).toEqual({
+      ok: true,
+      externalMessageId: 'm_3',
+    });
+    expect(flaky).toHaveBeenCalledTimes(3);
+  });
+
   it('distingue token rechazado, límite de tasa y errores definitivos', async () => {
     const fail = (status: number, code: number) =>
       vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify({ error: { code, message: 'x' } }), { status }));
@@ -169,5 +194,30 @@ describe('descarga del CDN de Meta', () => {
       ok: false,
     });
     expect(await downloadMetaUrl('https://otro.com/x.jpg', { maxBytes: 100, allowedMimeTypes: allowed, fetch: fetchFn })).toMatchObject({ ok: false });
+  });
+
+  it('valida cada redirección antes de seguirla: nunca pide un host fuera de Meta', async () => {
+    const asked: string[] = [];
+    const fetchFn = vi.fn<typeof fetch>().mockImplementation(async (input) => {
+      const u = String(input);
+      asked.push(u);
+      if (u.includes('/a')) return new Response(null, { status: 302, headers: { location: 'https://b.fbcdn.net/b' } });
+      if (u.includes('/b')) return new Response(null, { status: 302, headers: { location: 'http://169.254.169.254/latest' } });
+      return new Response(Buffer.alloc(10), { status: 200, headers: { 'content-type': 'image/jpeg' } });
+    });
+    const allowed = new Set(['image/jpeg']);
+    expect(await downloadMetaUrl('https://a.fbcdn.net/a', { maxBytes: 100, allowedMimeTypes: allowed, fetch: fetchFn })).toMatchObject({
+      ok: false,
+      message: 'La descarga salió de los hosts de Meta',
+    });
+    expect(asked).toEqual(['https://a.fbcdn.net/a', 'https://b.fbcdn.net/b']);
+    expect(fetchFn.mock.calls[0]![1]).toMatchObject({ redirect: 'manual' });
+
+    // Una redirección dentro de Meta se sigue.
+    const ok = vi.fn<typeof fetch>().mockImplementation(async (input) =>
+      String(input).endsWith('/a') ? new Response(null, { status: 301, headers: { location: '/final' } }) : new Response(Buffer.alloc(10), { status: 200, headers: { 'content-type': 'image/jpeg' } }),
+    );
+    expect(await downloadMetaUrl('https://a.fbcdn.net/a', { maxBytes: 100, allowedMimeTypes: allowed, fetch: ok })).toMatchObject({ ok: true });
+    expect(String(ok.mock.calls[1]![0])).toBe('https://a.fbcdn.net/final');
   });
 });

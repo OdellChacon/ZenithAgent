@@ -214,8 +214,11 @@ async function applyEdit(client: PoolClient, tenantId: string, event: ParsedEven
             WHERE tenant_id = $1 AND external_message_id = $2 RETURNING conversation_id`,
           [tenantId, e.originalExternalMessageId, event.occurredAt],
         )
-      : await client.query<{ conversation_id: string }>(
-          `UPDATE messages SET body = COALESCE($3, body), edited_at = $4
+      : // Las ediciones pueden llegar desordenadas: una más vieja que la guardada no pisa el texto.
+        await client.query<{ conversation_id: string }>(
+          `UPDATE messages
+              SET body = CASE WHEN edited_at IS NULL OR edited_at <= $4 THEN COALESCE($3, body) ELSE body END,
+                  edited_at = GREATEST(edited_at, $4)
             WHERE tenant_id = $1 AND external_message_id = $2 AND deleted_at IS NULL RETURNING conversation_id`,
           [tenantId, e.originalExternalMessageId, e.text ?? null, event.occurredAt],
         );
@@ -279,12 +282,14 @@ async function storeAgentEcho(
   const conversationId = await openConversation(client, tenantId, channelAccountId, contactId);
 
   // La copia puede llegar antes de que el worker de salida guarde el id que devolvió Meta: si
-  // hace poco este sistema mandó ese mismo texto en el chat, es nuestra y no de un asesor.
+  // este sistema está mandando ese mismo texto en el chat y todavía no tiene el id, es nuestra.
+  // Un envío que ya guardó su id no absorbe copias: si un asesor escribe lo mismo que el bot
+  // (un "ok", un "gracias") desde el teléfono, se registra como suyo.
   if (event.text) {
     const recent = await client.query(
       `SELECT 1 FROM outbound_messages
-        WHERE conversation_id = $1 AND status IN ('sending', 'sent', 'delivered', 'read')
-          AND updated_at > now() - interval '5 minutes' AND btrim(payload->>'text') = btrim($2)
+        WHERE conversation_id = $1 AND status IN ('sending', 'sent') AND external_message_id IS NULL
+          AND updated_at > now() - interval '2 minutes' AND btrim(payload->>'text') = btrim($2)
         LIMIT 1`,
       [conversationId, event.text],
     );

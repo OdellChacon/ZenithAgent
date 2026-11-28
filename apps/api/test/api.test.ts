@@ -5,7 +5,7 @@ import type { PanelEvent } from '@zenith/core';
 import type { Pool } from '@zenith/db';
 import { buildApi } from '../src/server.js';
 import { sniffFile } from '../src/files.js';
-import { decryptCredentials, encryptCredentials, hashPassword, verifyPassword } from '@zenith/core';
+import { decryptCredentials, encryptCredentials, hashPassword, outboundIdempotencyKey, verifyPassword } from '@zenith/core';
 import { hasDb, seedTenant, setupDb } from '../../../packages/db/test/helpers.js';
 
 describe('contraseñas', () => {
@@ -50,6 +50,8 @@ describe('/healthz para el monitoreo', () => {
     expect(ok.statusCode).toBe(200);
     expect(ok.json()).toEqual({ ok: true, checks: { db: true, redis: true, worker: true } });
     const down = await build(async () => ({ db: true, redis: true, worker: false })).inject({ method: 'GET', url: '/healthz' });
+    // Docker mira /readyz: un worker caído no marca a la API como enferma.
+    expect((await build(async () => ({ db: true, redis: true, worker: false })).inject({ method: 'GET', url: '/readyz' })).statusCode).toBe(200);
     expect(down.statusCode).toBe(503);
     expect(down.json()).toEqual({ ok: false, checks: { db: true, redis: true, worker: false } });
     const broken = await build(async () => {
@@ -259,6 +261,29 @@ describe.skipIf(!hasDb)('API del panel', () => {
     expect((await send()).statusCode).toBe(200);
     expect((await send()).statusCode).toBe(200); // doble clic: no duplica
     expect(enqueued.filter((e) => e.tenantId === t.tenantId)).toHaveLength(1);
+
+    // El mismo envío llega dos veces a la vez: mientras el primero (aquí, otra transacción) aún no
+    // confirma, el segundo espera y lo encuentra, en vez de chocar con la clave única (500).
+    const raceId = randomUUID();
+    const tx = await owner.connect();
+    try {
+      const key = outboundIdempotencyKey(id, raceId, `agent:${users.ana.id}`);
+      await tx.query('BEGIN');
+      await tx.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [key]);
+      await tx.query(
+        `INSERT INTO outbound_messages (tenant_id, conversation_id, idempotency_key, channel, payload) VALUES ($1, $2, $3, 'whatsapp', '{"kind":"text","text":"x","to":"1","author":"agent"}')`,
+        [t.tenantId, id, key],
+      );
+      const second = app.inject({ method: 'POST', url: `/api/v1/conversations/${id}/messages`, headers: headers(ana.cookie), payload: { text: 'Le confirmo el pedido.', clientId: raceId } });
+      await new Promise((r) => setTimeout(r, 300));
+      await tx.query('COMMIT');
+      const res = await second;
+      expect(res.statusCode).toBe(200);
+      expect((await owner.query(`SELECT 1 FROM messages WHERE conversation_id = $1 AND body = 'Le confirmo el pedido.'`, [id])).rowCount).toBe(0);
+      await owner.query('DELETE FROM outbound_messages WHERE idempotency_key = $1', [key]);
+    } finally {
+      tx.release();
+    }
 
     const { rows } = await owner.query(
       `SELECT m.author, m.sent_by_user_id, o.payload FROM messages m JOIN outbound_messages o ON o.message_id = m.id WHERE m.conversation_id = $1`,

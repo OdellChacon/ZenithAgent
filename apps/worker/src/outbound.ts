@@ -9,7 +9,7 @@ import {
   type SendResult,
   type WhatsAppSendConfig,
 } from '@zenith/channel-whatsapp';
-import { sendMetaAttachment, sendMetaText, uploadMetaAttachment, type MetaAttachmentType, type MetaSendConfig } from '@zenith/channel-meta';
+import { sendMetaAttachment, sendMetaText, uploadMetaAttachment, type MetaAttachmentType, type MetaSendConfig, type MetaSendProgress } from '@zenith/channel-meta';
 import { withTenant, type Pool } from '@zenith/db';
 
 export interface OutboundDeps {
@@ -52,6 +52,8 @@ interface Claimed {
   external_account_id: string;
   credentials_enc: Buffer | null;
   credentials_invalid_at: Date | null;
+  parts_sent: number;
+  external_message_id: string | null;
 }
 
 /** El bot deja de usar texto libre un minuto antes de que cierre la ventana de 24 h. */
@@ -95,14 +97,15 @@ function whatsappSender(config: WhatsAppSendConfig): ChannelSender {
 
 const META_ATTACHMENT: Record<'image' | 'video' | 'document', MetaAttachmentType> = { image: 'image', video: 'video', document: 'file' };
 
-function metaSender(config: MetaSendConfig, humanAgent: boolean): ChannelSender {
+function metaSender(config: MetaSendConfig, humanAgent: boolean, progress: MetaSendProgress): ChannelSender {
   return {
     async upload(data, mimeType, type, filename) {
       const r = await uploadMetaAttachment(config, data, mimeType, META_ATTACHMENT[type], filename);
       return r.ok ? { ok: true, id: r.attachmentId } : r;
     },
-    text: (to, text) => sendMetaText(config, to, text, { humanAgent }),
-    media: (to, m) => sendMetaAttachment(config, to, { type: META_ATTACHMENT[m.mediaType], attachmentId: m.id, ...(m.caption ? { caption: m.caption } : {}) }, { humanAgent }),
+    text: (to, text) => sendMetaText(config, to, text, { humanAgent, progress }),
+    media: (to, m) =>
+      sendMetaAttachment(config, to, { type: META_ATTACHMENT[m.mediaType], attachmentId: m.id, ...(m.caption ? { caption: m.caption } : {}) }, { humanAgent, progress }),
     template: async () => ({ ok: false, retryable: false, httpStatus: null, message: 'Las plantillas solo existen en WhatsApp' }),
   };
 }
@@ -254,7 +257,7 @@ export async function processOutboundMessage(
           SET status = 'sending', attempts = o.attempts + 1, updated_at = now()
          FROM conversations c JOIN channel_accounts ca ON ca.id = c.channel_account_id
         WHERE o.id = $1 AND o.status = 'queued' AND c.id = o.conversation_id
-        RETURNING o.id, o.message_id, o.conversation_id, o.attempts, o.payload, ca.channel, c.last_inbound_at,
+        RETURNING o.id, o.message_id, o.conversation_id, o.attempts, o.payload, o.parts_sent, o.external_message_id, ca.channel, c.last_inbound_at,
                   ca.id AS channel_account_id, ca.external_account_id, ca.credentials_enc, ca.credentials_invalid_at`,
       [job.outboundMessageId],
     );
@@ -328,6 +331,25 @@ export async function processOutboundMessage(
     ...(deps.graphBaseUrl ? { graphBaseUrl: deps.graphBaseUrl } : {}),
     ...(deps.fetch ? { fetch: deps.fetch } : {}),
   };
+  // Messenger e Instagram mandan algunos mensajes en varias partes: cada parte confirmada se
+  // guarda, y un reintento sigue desde la que falló en vez de repetir las que ya llegaron.
+  let partsSentNow = 0;
+  const progress: MetaSendProgress = {
+    skip: claimed.parts_sent,
+    lastExternalId: claimed.external_message_id,
+    onPart: async (index, externalMessageId) => {
+      partsSentNow++;
+      await withTenant(deps.pool, job.tenantId, (client) =>
+        client.query('UPDATE outbound_messages SET parts_sent = $2, external_message_id = $3, updated_at = now() WHERE id = $1', [
+          claimed.id,
+          index + 1,
+          externalMessageId,
+        ]),
+      );
+    },
+  };
+  /** Ya llegó algo al cliente (en este intento o en uno anterior): el id guardado del archivo sirvió. */
+  const somethingDelivered = () => partsSentNow > 0 || claimed.parts_sent > 0;
   let sender: ChannelSender;
   if (claimed.channel === 'whatsapp') {
     sender = whatsappSender({ ...common, phoneNumberId: claimed.external_account_id });
@@ -338,7 +360,7 @@ export async function processOutboundMessage(
       await finish('failed', { error: 'la cuenta de Instagram no tiene la página vinculada' });
       return { result: 'failed', reason: 'missing_credentials' };
     }
-    sender = metaSender({ ...common, pageId, channel: claimed.channel }, humanAgent);
+    sender = metaSender({ ...common, pageId, channel: claimed.channel }, humanAgent, progress);
   }
 
   const authFailed = async (message: string): Promise<OutboundOutcome> => {
@@ -371,7 +393,7 @@ export async function processOutboundMessage(
       }
       res = await sender.media(payload.to, { mediaType: 'image', id: media.mediaId, ...(payload.caption ? { caption: payload.caption } : {}) });
       // Si Meta ya no reconoce un id guardado, se descarta y se reintenta subiendo la foto de nuevo.
-      if (!res.ok && !res.authError && media.cached) {
+      if (!res.ok && !res.authError && media.cached && !somethingDelivered()) {
         await forgetMedia(deps, job.tenantId, claimed.channel_account_id, payload.productImageId);
         if (claimed.attempts < maxAttempts) {
           await finish('queued', { error: `id de foto vencido: ${res.message}` });
@@ -396,7 +418,7 @@ export async function processOutboundMessage(
         ...(payload.caption ? { caption: payload.caption } : {}),
       });
       // Un id guardado que Meta ya no reconoce se olvida y se reintenta subiendo de nuevo.
-      if (!res.ok && !res.authError && media.cached) {
+      if (!res.ok && !res.authError && media.cached && !somethingDelivered()) {
         await withTenant(deps.pool, job.tenantId, (client) =>
           client.query('DELETE FROM catalog_media WHERE channel_account_id = $1 AND catalog_id = $2', [claimed.channel_account_id, payload.catalogId]),
         );
